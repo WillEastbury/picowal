@@ -89,6 +89,19 @@ static void lcd_write_data16(uint16_t data) {
     gpio_put(LCD_CS_PIN, 1);
 }
 
+// Convert RGB565 to 3-byte RGB666 and send as pixel data
+static void lcd_write_pixel_rgb666(uint16_t rgb565) {
+    uint8_t r = (rgb565 >> 11) & 0x1F;
+    uint8_t g = (rgb565 >> 5) & 0x3F;
+    uint8_t b = rgb565 & 0x1F;
+    uint8_t buf[3] = {
+        (r << 3) | (r >> 2),   // 5-bit → 8-bit
+        (g << 2) | (g >> 4),   // 6-bit → 8-bit
+        (b << 3) | (b >> 2),   // 5-bit → 8-bit
+    };
+    spi_write_blocking(LCD_SPI_PORT, buf, 3);
+}
+
 void lcd_set_backlight(uint8_t brightness) {
     pwm_set_gpio_level(LCD_BL_PIN, brightness * brightness);
 }
@@ -150,8 +163,8 @@ void lcd_init(void) {
     lcd_write_cmd(0x36); // Memory Access Control (landscape)
     lcd_write_data(0x28);
 
-    lcd_write_cmd(0x3A); // Pixel Format - 16bit RGB565
-    lcd_write_data(0x55);
+    lcd_write_cmd(0x3A); // Pixel Format - 18bit RGB666 (required for ILI9488 SPI)
+    lcd_write_data(0x66);
 
     lcd_write_cmd(0xB0); // Interface Mode Control
     lcd_write_data(0x00);
@@ -195,27 +208,36 @@ void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 
 void lcd_draw_pixel(uint16_t x, uint16_t y, uint16_t color) {
     lcd_set_window(x, y, x, y);
-    lcd_write_data16(color);
+    gpio_put(LCD_CS_PIN, 0);
+    gpio_put(LCD_DC_PIN, 1);
+    lcd_write_pixel_rgb666(color);
+    gpio_put(LCD_CS_PIN, 1);
 }
 
 void lcd_clear(uint16_t color) {
     lcd_set_window(0, 0, LCD_WIDTH - 1, LCD_HEIGHT - 1);
-    uint8_t buf[2] = {color >> 8, color & 0xFF};
+    uint8_t r = ((color >> 11) & 0x1F); r = (r << 3) | (r >> 2);
+    uint8_t g = ((color >> 5) & 0x3F);  g = (g << 2) | (g >> 4);
+    uint8_t b = (color & 0x1F);         b = (b << 3) | (b >> 2);
+    uint8_t buf[3] = {r, g, b};
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
     for (uint32_t i = 0; i < (uint32_t)LCD_WIDTH * LCD_HEIGHT; i++) {
-        spi_write_blocking(LCD_SPI_PORT, buf, 2);
+        spi_write_blocking(LCD_SPI_PORT, buf, 3);
     }
     gpio_put(LCD_CS_PIN, 1);
 }
 
 void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
     lcd_set_window(x, y, x + w - 1, y + h - 1);
-    uint8_t buf[2] = {color >> 8, color & 0xFF};
+    uint8_t r = ((color >> 11) & 0x1F); r = (r << 3) | (r >> 2);
+    uint8_t g = ((color >> 5) & 0x3F);  g = (g << 2) | (g >> 4);
+    uint8_t b = (color & 0x1F);         b = (b << 3) | (b >> 2);
+    uint8_t buf[3] = {r, g, b};
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
     for (uint32_t i = 0; i < (uint32_t)w * h; i++) {
-        spi_write_blocking(LCD_SPI_PORT, buf, 2);
+        spi_write_blocking(LCD_SPI_PORT, buf, 3);
     }
     gpio_put(LCD_CS_PIN, 1);
 }
