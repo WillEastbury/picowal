@@ -74,26 +74,16 @@ static void lcd_write_cmd(uint8_t cmd) {
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Waveshare 3.5" sends register data as 16-bit words (high byte first)
-static void lcd_write_data(uint16_t data) {
+// Register parameter: single byte (ILI9488 SPI = 8-bit interface)
+static void lcd_write_data8(uint8_t data) {
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
-    uint8_t buf[2] = {data >> 8, data & 0xFF};
-    spi_write_blocking(LCD_SPI_PORT, buf, 2);
+    spi_write_blocking(LCD_SPI_PORT, &data, 1);
     gpio_put(LCD_CS_PIN, 1);
 }
 
-static void lcd_write_data16(uint16_t data) {
-    uint8_t buf[2] = {data >> 8, data & 0xFF};
-    gpio_put(LCD_CS_PIN, 0);
-    gpio_put(LCD_DC_PIN, 1);
-    spi_write_blocking(LCD_SPI_PORT, buf, 2);
-    gpio_put(LCD_CS_PIN, 1);
-}
-
-// Write bulk pixel data — 3 bytes per pixel (RGB666)
-// ILI9488 SPI always receives pixel data as 18-bit (3 bytes) regardless
-// of register 0x3A setting. Convert RGB565 → RGB666 on the fly.
+// Pixel data: 3 bytes per pixel (RGB666 over SPI)
+// ILI9488 SPI interface always uses 18-bit color (3 bytes per pixel)
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
     uint8_t r = (color >> 11) & 0x1F;
     uint8_t g = (color >> 5) & 0x3F;
@@ -152,60 +142,60 @@ void lcd_init(void) {
     lcd_write_cmd(0x21);  // Display Inversion ON
 
     lcd_write_cmd(0xC2);  // Power Control 3
-    lcd_write_data(0x33);
+    lcd_write_data8(0x33);
 
     lcd_write_cmd(0xC5);  // VCOM Control
-    lcd_write_data(0x00);
-    lcd_write_data(0x1E);
-    lcd_write_data(0x80);
+    lcd_write_data8(0x00);
+    lcd_write_data8(0x1E);
+    lcd_write_data8(0x80);
 
     lcd_write_cmd(0xB1);  // Frame Rate Control
-    lcd_write_data(0xB0);
+    lcd_write_data8(0xB0);
 
     lcd_write_cmd(0x36);  // Memory Access Control (landscape)
-    lcd_write_data(0x28);
+    lcd_write_data8(0x28);
 
     lcd_write_cmd(0xE0);  // Positive Gamma Control
-    lcd_write_data(0x00);
-    lcd_write_data(0x13);
-    lcd_write_data(0x18);
-    lcd_write_data(0x04);
-    lcd_write_data(0x0F);
-    lcd_write_data(0x06);
-    lcd_write_data(0x3A);
-    lcd_write_data(0x56);
-    lcd_write_data(0x4D);
-    lcd_write_data(0x03);
-    lcd_write_data(0x0A);
-    lcd_write_data(0x06);
-    lcd_write_data(0x30);
-    lcd_write_data(0x3E);
-    lcd_write_data(0x0F);
+    lcd_write_data8(0x00);
+    lcd_write_data8(0x13);
+    lcd_write_data8(0x18);
+    lcd_write_data8(0x04);
+    lcd_write_data8(0x0F);
+    lcd_write_data8(0x06);
+    lcd_write_data8(0x3A);
+    lcd_write_data8(0x56);
+    lcd_write_data8(0x4D);
+    lcd_write_data8(0x03);
+    lcd_write_data8(0x0A);
+    lcd_write_data8(0x06);
+    lcd_write_data8(0x30);
+    lcd_write_data8(0x3E);
+    lcd_write_data8(0x0F);
 
     lcd_write_cmd(0xE1);  // Negative Gamma Control
-    lcd_write_data(0x00);
-    lcd_write_data(0x13);
-    lcd_write_data(0x18);
-    lcd_write_data(0x01);
-    lcd_write_data(0x11);
-    lcd_write_data(0x06);
-    lcd_write_data(0x38);
-    lcd_write_data(0x34);
-    lcd_write_data(0x4D);
-    lcd_write_data(0x06);
-    lcd_write_data(0x0D);
-    lcd_write_data(0x0B);
-    lcd_write_data(0x31);
-    lcd_write_data(0x37);
-    lcd_write_data(0x0F);
+    lcd_write_data8(0x00);
+    lcd_write_data8(0x13);
+    lcd_write_data8(0x18);
+    lcd_write_data8(0x01);
+    lcd_write_data8(0x11);
+    lcd_write_data8(0x06);
+    lcd_write_data8(0x38);
+    lcd_write_data8(0x34);
+    lcd_write_data8(0x4D);
+    lcd_write_data8(0x06);
+    lcd_write_data8(0x0D);
+    lcd_write_data8(0x0B);
+    lcd_write_data8(0x31);
+    lcd_write_data8(0x37);
+    lcd_write_data8(0x0F);
 
     lcd_write_cmd(0x3A);  // Pixel Format — 18-bit RGB666 (ILI9488 SPI requires 3 bytes/pixel)
-    lcd_write_data(0x66);
+    lcd_write_data8(0x66);
 
     // Display Function Control — set scan direction
     lcd_write_cmd(0xB6);
-    lcd_write_data(0x00);
-    lcd_write_data(0x02);
+    lcd_write_data8(0x00);
+    lcd_write_data8(0x02);
 
     lcd_write_cmd(0x11);  // Sleep Out
     sleep_ms(120);
@@ -215,18 +205,17 @@ void lcd_init(void) {
 }
 
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    // Match Waveshare reference: each coordinate byte sent as 16-bit word
     lcd_write_cmd(0x2A);
-    lcd_write_data(x0 >> 8);
-    lcd_write_data(x0 & 0xFF);
-    lcd_write_data(x1 >> 8);
-    lcd_write_data(x1 & 0xFF);
+    lcd_write_data8(x0 >> 8);
+    lcd_write_data8(x0 & 0xFF);
+    lcd_write_data8(x1 >> 8);
+    lcd_write_data8(x1 & 0xFF);
 
     lcd_write_cmd(0x2B);
-    lcd_write_data(y0 >> 8);
-    lcd_write_data(y0 & 0xFF);
-    lcd_write_data(y1 >> 8);
-    lcd_write_data(y1 & 0xFF);
+    lcd_write_data8(y0 >> 8);
+    lcd_write_data8(y0 & 0xFF);
+    lcd_write_data8(y1 >> 8);
+    lcd_write_data8(y1 & 0xFF);
 
     lcd_write_cmd(0x2C);
 }
