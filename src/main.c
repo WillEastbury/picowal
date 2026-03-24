@@ -31,7 +31,7 @@ int main(void) {
     sleep_ms(500);
 
     printf("\n================================\n");
-    printf("  Pico 2W WAL Appliance\n");
+    printf("  Pico 2W Storage Appliance\n");
     printf("  192 x 2KB delta buffer pool\n");
     printf("  APPEND | READ | COMPACT\n");
     printf("================================\n");
@@ -40,7 +40,7 @@ int main(void) {
     touch_init();
 
     lcd_clear(COLOR_BLACK);
-    lcd_draw_string(60, 30, "WAL APPLIANCE", COLOR_CYAN, COLOR_BLACK, 4);
+    lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
 
     // ---- PSK: load or generate on first boot ----
     uint8_t psk[PSK_LEN];
@@ -86,10 +86,8 @@ int main(void) {
 
     // ---- Normal boot screen ----
     lcd_clear(COLOR_BLACK);
-    lcd_draw_string(60, 30, "WAL APPLIANCE", COLOR_CYAN, COLOR_BLACK, 4);
-    lcd_draw_string(40, 90, "192 X 2KB SLOTS", COLOR_WHITE, COLOR_BLACK, 2);
-    lcd_draw_string(40, 120, "APPEND READ COMPACT", COLOR_GREEN, COLOR_BLACK, 2);
-    lcd_draw_string(40, 160, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
+    lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
+    lcd_draw_string(40, 70, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
     // Initialize WAL state
     memset(&wal, 0, sizeof(wal));
@@ -104,10 +102,10 @@ int main(void) {
 
     // Launch Core 1 (WAL engine + compactor)
     multicore_launch_core1(core1_entry);
-    printf("[main] Core 1 WAL engine launched\n");
+    printf("[main] Core 1 engine launched\n");
 
-    lcd_draw_string(40, 190, "CORE1 WAL ENGINE OK", COLOR_GREEN, COLOR_BLACK, 2);
-    lcd_draw_string(40, 220, "LISTENING...", COLOR_YELLOW, COLOR_BLACK, 2);
+    lcd_draw_string(40, 95, "CORE1 ENGINE OK", COLOR_GREEN, COLOR_BLACK, 2);
+    lcd_draw_string(40, 120, "LISTENING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
     // Core 0: network receiver (never returns)
     net_core_run(&wal);

@@ -7,309 +7,624 @@
 #include <string.h>
 #include <stdio.h>
 
-#define XIP_BASE_ADDR 0x10000000
+#define XIP_BASE_ADDR 0x10000000u
 
-// ============================================================
-// Sorted keymap: sparse array of (key, sector) pairs
-// Binary search for O(log n) lookup, shift-insert to maintain order.
-// Max entries = KV_SECTOR_COUNT (767).
-// ============================================================
+#define KV_PAGE_MAGIC        0x4B565031u // KVP1
+#define KV_REC_FLAG_COMP     0x01u
+#define KV_REC_FLAG_TOMB     0x02u
 
-typedef struct {
-    uint32_t key;
-    uint16_t sector;
-} keymap_entry_t;
+#define KV_LOC_PAGE_BITS     12u
+#define KV_LOC_OFF_BITS      10u
+#define KV_LOC_LEN_BITS      10u
 
-static keymap_entry_t g_keymap[KV_SECTOR_COUNT];
-static uint32_t g_keymap_count = 0;
-static uint32_t g_next_free_scan = 0;
+#define KV_LOC_OFF_SHIFT     KV_LOC_LEN_BITS
+#define KV_LOC_PAGE_SHIFT    (KV_LOC_OFF_BITS + KV_LOC_LEN_BITS)
+#define KV_LOC_LEN_MASK      ((1u << KV_LOC_LEN_BITS) - 1u)
+#define KV_LOC_OFF_MASK      ((1u << KV_LOC_OFF_BITS) - 1u)
+#define KV_LOC_PAGE_MASK     ((1u << KV_LOC_PAGE_BITS) - 1u)
 
-// Binary search: returns index of key, or insertion point (negative - 1)
-static int keymap_search(uint32_t key) {
-    int lo = 0, hi = (int)g_keymap_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (g_keymap[mid].key == key) return mid;
-        if (g_keymap[mid].key < key) lo = mid + 1;
-        else hi = mid - 1;
-    }
-    return -(lo + 1);  // insertion point encoded as negative
-}
+#define KV_LEN_QUANTUM       4u // packed length/offset units
 
-static void keymap_insert(uint32_t key, uint16_t sector) {
-    int idx = keymap_search(key);
-    if (idx >= 0) {
-        // Key exists — update sector
-        g_keymap[idx].sector = sector;
-        return;
-    }
+#define KV_INDEX_CAPACITY    4096u
 
-    // Insert at position
-    int pos = -(idx + 1);
-    if (g_keymap_count >= KV_SECTOR_COUNT) return;  // full
+// Dead log (append-only pages)
+#define KV_DEADLOG_MAGIC     0x444C4731u // DLG1
 
-    // Shift right
-    if ((uint32_t)pos < g_keymap_count) {
-        memmove(&g_keymap[pos + 1], &g_keymap[pos],
-                (g_keymap_count - pos) * sizeof(keymap_entry_t));
-    }
-    g_keymap[pos].key = key;
-    g_keymap[pos].sector = sector;
-    g_keymap_count++;
-}
+typedef struct __attribute__((packed)) {
+    uint32_t magic; // KV_PAGE_MAGIC
+} kv_page_hdr_t;
 
-static void keymap_remove(uint32_t key) {
-    int idx = keymap_search(key);
-    if (idx < 0) return;
+_Static_assert(sizeof(kv_page_hdr_t) == 4, "kv_page_hdr_t size");
 
-    // Shift left
-    if ((uint32_t)idx < g_keymap_count - 1) {
-        memmove(&g_keymap[idx], &g_keymap[idx + 1],
-                (g_keymap_count - idx - 1) * sizeof(keymap_entry_t));
-    }
-    g_keymap_count--;
-}
+typedef struct __attribute__((packed)) {
+    uint16_t rec_len; // includes header + payload, 4-byte aligned
+    kv_header_t hdr;
+} kv_rec_prefix_t;
 
-static int16_t keymap_get(uint32_t key) {
-    int idx = keymap_search(key);
-    if (idx >= 0) return (int16_t)g_keymap[idx].sector;
-    return -1;
-}
+_Static_assert(sizeof(kv_rec_prefix_t) == 22, "kv_rec_prefix_t size");
 
-static void keymap_clear(void) {
-    g_keymap_count = 0;
-}
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+} deadlog_hdr_t;
 
-// ---- Flash helpers ----
+_Static_assert(sizeof(deadlog_hdr_t) == 4, "deadlog_hdr_t size");
 
-static const kv_header_t *sector_hdr(uint32_t idx) {
-    return (const kv_header_t *)(XIP_BASE_ADDR + KV_REGION_START + idx * KV_SECTOR_SIZE);
-}
+typedef struct __attribute__((packed)) {
+    uint16_t page_idx;
+    uint16_t reserved;
+} deadlog_entry_t;
 
-static const uint8_t *sector_value(uint32_t idx) {
-    return (const uint8_t *)sector_hdr(idx) + sizeof(kv_header_t);
-}
+_Static_assert(sizeof(deadlog_entry_t) == 4, "deadlog_entry_t size");
+
+static uint32_t g_keys[KV_INDEX_CAPACITY];
+static uint32_t g_locs[KV_INDEX_CAPACITY];
+static uint16_t g_versions[KV_INDEX_CAPACITY];
+static uint8_t g_flags[KV_INDEX_CAPACITY];
+static uint32_t g_count = 0;
+
+static uint16_t g_write_page = 0;
+static uint16_t g_write_off = sizeof(kv_page_hdr_t);
+
+static uint16_t g_deadlog_write_page = 0;
+static uint16_t g_deadlog_write_off = sizeof(deadlog_hdr_t);
+static uint16_t g_deadlog_read_page = 0;
+static uint16_t g_deadlog_read_off = sizeof(deadlog_hdr_t);
 
 static uint32_t crc32(const uint8_t *data, uint32_t len) {
-    uint32_t crc = 0xFFFFFFFF;
+    uint32_t crc = 0xFFFFFFFFu;
     for (uint32_t i = 0; i < len; i++) {
         crc ^= data[i];
-        for (int j = 0; j < 8; j++)
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1)));
-    }
-    return crc ^ 0xFFFFFFFF;
-}
-
-static int find_free_sector(void) {
-    for (uint32_t i = 0; i < KV_SECTOR_COUNT; i++) {
-        uint32_t idx = (g_next_free_scan + i) % KV_SECTOR_COUNT;
-        if (sector_hdr(idx)->magic == KV_FREE) {
-            g_next_free_scan = (idx + 1) % KV_SECTOR_COUNT;
-            return (int)idx;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
         }
     }
-    return -1;
+    return crc ^ 0xFFFFFFFFu;
 }
 
-// ============================================================
-// Init: scan flash, build sorted keymap
-// ============================================================
+static const uint8_t *xip_ptr(uint32_t flash_off) {
+    return (const uint8_t *)(XIP_BASE_ADDR + flash_off);
+}
 
-void kv_init(void) {
-    keymap_clear();
+static bool encode_rle_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
+    uint16_t ip = 0, op = 0;
+    while (ip < in_len) {
+        uint8_t b = in[ip];
+        uint16_t run = 1;
+        while ((ip + run) < in_len && in[ip + run] == b && run < 255) run++;
 
-    uint32_t active = 0, dead = 0, free_count = 0;
-
-    // First pass: collect all valid entries, keep highest version per key
-    for (uint32_t i = 0; i < KV_SECTOR_COUNT; i++) {
-        const kv_header_t *hdr = sector_hdr(i);
-
-        if (hdr->magic == KV_MAGIC) {
-            if (hdr->value_len <= KV_MAX_VALUE &&
-                crc32(sector_value(i), hdr->value_len) == hdr->checksum) {
-
-                int16_t existing = keymap_get(hdr->key);
-                if (existing >= 0) {
-                    const kv_header_t *old = sector_hdr((uint32_t)existing);
-                    if (hdr->version > old->version) {
-                        keymap_insert(hdr->key, (uint16_t)i);
-                    }
-                } else {
-                    keymap_insert(hdr->key, (uint16_t)i);
-                }
-                active++;
-            } else {
-                dead++;
-            }
-        } else if (hdr->magic == KV_DEAD) {
-            dead++;
+        if (run >= 4) {
+            if ((uint32_t)op + 3u > *out_len) return false;
+            out[op++] = 0xFFu;
+            out[op++] = (uint8_t)run;
+            out[op++] = b;
+            ip = (uint16_t)(ip + run);
         } else {
-            free_count++;
+            if (b == 0xFFu) {
+                if ((uint32_t)op + 2u > *out_len) return false;
+                out[op++] = 0xFFu;
+                out[op++] = 0x00u;
+            } else {
+                if ((uint32_t)op + 1u > *out_len) return false;
+                out[op++] = b;
+            }
+            ip++;
         }
     }
-
-    printf("[kv] Init: %lu keys, %lu active sectors, %lu dead, %lu free (of %u)\n",
-           (unsigned long)g_keymap_count, (unsigned long)active,
-           (unsigned long)dead, (unsigned long)free_count, KV_SECTOR_COUNT);
-}
-
-// ============================================================
-// Put
-// ============================================================
-
-bool kv_put(uint32_t key, const uint8_t *value, uint16_t len) {
-    if (len > KV_MAX_VALUE) return false;
-
-    int new_sector = find_free_sector();
-    if (new_sector < 0) {
-        kv_reclaim();
-        new_sector = find_free_sector();
-        if (new_sector < 0) return false;
-    }
-
-    uint16_t version = 1;
-    int16_t old_sector = keymap_get(key);
-    if (old_sector >= 0)
-        version = sector_hdr((uint32_t)old_sector)->version + 1;
-
-    // Build sector image
-    uint8_t buf[KV_SECTOR_SIZE];
-    memset(buf, 0xFF, KV_SECTOR_SIZE);
-
-    kv_header_t *hdr = (kv_header_t *)buf;
-    hdr->magic     = KV_MAGIC;
-    hdr->key       = key;
-    hdr->value_len = len;
-    hdr->version   = version;
-    hdr->checksum  = crc32(value, len);
-
-    if (len > 0)
-        memcpy(buf + sizeof(kv_header_t), value, len);
-
-    uint32_t flash_offset = KV_REGION_START + (uint32_t)new_sector * KV_SECTOR_SIZE;
-    uint32_t prog_len = (sizeof(kv_header_t) + len + KV_PAGE_SIZE - 1)
-                        & ~(KV_PAGE_SIZE - 1);
-
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(flash_offset, KV_SECTOR_SIZE);
-    flash_range_program(flash_offset, buf, prog_len);
-    restore_interrupts(ints);
-
-    // Update keymap
-    keymap_insert(key, (uint16_t)new_sector);
-
-    // Invalidate old
-    if (old_sector >= 0) {
-        uint32_t old_offset = KV_REGION_START + (uint32_t)old_sector * KV_SECTOR_SIZE;
-        uint8_t zeros[KV_PAGE_SIZE];
-        memset(zeros, 0, KV_PAGE_SIZE);
-        uint32_t ints2 = save_and_disable_interrupts();
-        flash_range_program(old_offset, zeros, KV_PAGE_SIZE);
-        restore_interrupts(ints2);
-    }
-
+    *out_len = op;
     return true;
 }
 
-// ============================================================
-// Get — zero-copy from XIP flash
-// ============================================================
-
-const uint8_t *kv_get(uint32_t key, uint16_t *len) {
-    int16_t sector = keymap_get(key);
-    if (sector < 0) return NULL;
-
-    const kv_header_t *hdr = sector_hdr((uint32_t)sector);
-    if (hdr->magic != KV_MAGIC) {
-        keymap_remove(key);
-        return NULL;
+static bool decode_rle_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
+    uint16_t ip = 0, op = 0;
+    while (ip < in_len) {
+        uint8_t b = in[ip++];
+        if (b != 0xFFu) {
+            if (op >= out_len) return false;
+            out[op++] = b;
+            continue;
+        }
+        if (ip >= in_len) return false;
+        uint8_t tag = in[ip++];
+        if (tag == 0) {
+            if (op >= out_len) return false;
+            out[op++] = 0xFFu;
+            continue;
+        }
+        if (ip >= in_len) return false;
+        uint8_t rb = in[ip++];
+        if ((uint32_t)op + tag > out_len) return false;
+        memset(out + op, rb, tag);
+        op = (uint16_t)(op + tag);
     }
-
-    if (len) *len = hdr->value_len;
-    return sector_value((uint32_t)sector);
+    return op == out_len;
 }
 
-// ============================================================
-// Delete
-// ============================================================
+static uint32_t pack_loc(uint16_t page, uint16_t off_bytes, uint16_t len_bytes) {
+    uint16_t off_q = (uint16_t)(off_bytes / KV_LEN_QUANTUM);
+    uint16_t len_q = (uint16_t)((len_bytes + (KV_LEN_QUANTUM - 1u)) / KV_LEN_QUANTUM);
+    if (off_q > KV_LOC_OFF_MASK) off_q = KV_LOC_OFF_MASK;
+    if (len_q > KV_LOC_LEN_MASK) len_q = KV_LOC_LEN_MASK;
+    return (((uint32_t)page & KV_LOC_PAGE_MASK) << KV_LOC_PAGE_SHIFT)
+         | (((uint32_t)off_q & KV_LOC_OFF_MASK) << KV_LOC_OFF_SHIFT)
+         | ((uint32_t)len_q & KV_LOC_LEN_MASK);
+}
 
-bool kv_delete(uint32_t key) {
-    int16_t sector = keymap_get(key);
-    if (sector < 0) return false;
+static void unpack_loc(uint32_t loc, uint16_t *page, uint16_t *off_bytes, uint16_t *len_bytes) {
+    uint16_t p = (uint16_t)((loc >> KV_LOC_PAGE_SHIFT) & KV_LOC_PAGE_MASK);
+    uint16_t o = (uint16_t)((loc >> KV_LOC_OFF_SHIFT) & KV_LOC_OFF_MASK);
+    uint16_t l = (uint16_t)(loc & KV_LOC_LEN_MASK);
+    if (page) *page = p;
+    if (off_bytes) *off_bytes = (uint16_t)(o * KV_LEN_QUANTUM);
+    if (len_bytes) *len_bytes = (uint16_t)(l * KV_LEN_QUANTUM);
+}
 
-    uint32_t flash_offset = KV_REGION_START + (uint32_t)sector * KV_SECTOR_SIZE;
-    uint8_t zeros[KV_PAGE_SIZE];
-    memset(zeros, 0, KV_PAGE_SIZE);
+static int idx_find_linear(uint32_t key) {
+    for (uint32_t i = 0; i < g_count; i++) {
+        if (g_keys[i] == key) return (int)i;
+        if (g_keys[i] > key) return -(int)(i + 1);
+    }
+    return -(int)(g_count + 1u);
+}
+
+static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags) {
+    int f = idx_find_linear(key);
+    if (f >= 0) {
+        g_locs[(uint32_t)f] = loc;
+        g_versions[(uint32_t)f] = version;
+        g_flags[(uint32_t)f] = flags;
+        return true;
+    }
+    if (g_count >= KV_INDEX_CAPACITY) return false;
+    uint32_t pos = (uint32_t)(-f - 1);
+    if (pos < g_count) {
+        memmove(&g_keys[pos + 1], &g_keys[pos], (g_count - pos) * sizeof(uint32_t));
+        memmove(&g_locs[pos + 1], &g_locs[pos], (g_count - pos) * sizeof(uint32_t));
+        memmove(&g_versions[pos + 1], &g_versions[pos], (g_count - pos) * sizeof(uint16_t));
+        memmove(&g_flags[pos + 1], &g_flags[pos], (g_count - pos) * sizeof(uint8_t));
+    }
+    g_keys[pos] = key;
+    g_locs[pos] = loc;
+    g_versions[pos] = version;
+    g_flags[pos] = flags;
+    g_count++;
+    return true;
+}
+
+static void idx_remove(uint32_t key) {
+    int f = idx_find_linear(key);
+    if (f < 0) return;
+    uint32_t i = (uint32_t)f;
+    if (i + 1u < g_count) {
+        memmove(&g_keys[i], &g_keys[i + 1], (g_count - i - 1u) * sizeof(uint32_t));
+        memmove(&g_locs[i], &g_locs[i + 1], (g_count - i - 1u) * sizeof(uint32_t));
+        memmove(&g_versions[i], &g_versions[i + 1], (g_count - i - 1u) * sizeof(uint16_t));
+        memmove(&g_flags[i], &g_flags[i + 1], (g_count - i - 1u) * sizeof(uint8_t));
+    }
+    g_count--;
+}
+
+static bool idx_get(uint32_t key, uint32_t *loc, uint16_t *version, uint8_t *flags) {
+    int f = idx_find_linear(key);
+    if (f < 0) return false;
+    uint32_t i = (uint32_t)f;
+    if (loc) *loc = g_locs[i];
+    if (version) *version = g_versions[i];
+    if (flags) *flags = g_flags[i];
+    return true;
+}
+
+static bool ensure_page_ready(uint16_t page) {
+    uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
+    const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+    if (ph->magic == KV_PAGE_MAGIC) return true;
+    if (ph->magic != KV_FREE) return false;
+
+    uint8_t hdrbuf[KV_PAGE_SIZE];
+    memset(hdrbuf, 0xFF, sizeof(hdrbuf));
+    kv_page_hdr_t *nh = (kv_page_hdr_t *)hdrbuf;
+    nh->magic = KV_PAGE_MAGIC;
 
     uint32_t ints = save_and_disable_interrupts();
-    flash_range_program(flash_offset, zeros, KV_PAGE_SIZE);
+    flash_range_program(page_off, hdrbuf, KV_PAGE_SIZE);
+    restore_interrupts(ints);
+    return true;
+}
+
+static bool select_append_page(uint16_t need) {
+    if ((uint32_t)g_write_off + need <= KV_SECTOR_SIZE) return true;
+
+    for (uint32_t i = 1; i <= KV_SECTOR_COUNT; i++) {
+        uint16_t cand = (uint16_t)((g_write_page + i) % KV_SECTOR_COUNT);
+        uint32_t page_off = KV_REGION_START + (uint32_t)cand * KV_SECTOR_SIZE;
+        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+        if (ph->magic == KV_FREE) {
+            g_write_page = cand;
+            g_write_off = sizeof(kv_page_hdr_t);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void deadlog_reset_page(uint16_t p) {
+    uint32_t off = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(off, KV_SECTOR_SIZE);
+    restore_interrupts(ints);
+}
+
+static bool deadlog_init_page_if_needed(uint16_t p) {
+    uint32_t off = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
+    const deadlog_hdr_t *h = (const deadlog_hdr_t *)xip_ptr(off);
+    if (h->magic == KV_DEADLOG_MAGIC) return true;
+    if (h->magic != KV_FREE) return false;
+
+    uint8_t buf[KV_PAGE_SIZE];
+    memset(buf, 0xFF, sizeof(buf));
+    ((deadlog_hdr_t *)buf)->magic = KV_DEADLOG_MAGIC;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(off, buf, KV_PAGE_SIZE);
+    restore_interrupts(ints);
+    return true;
+}
+
+static bool deadlog_append(uint16_t page_idx) {
+    for (uint32_t n = 0; n < KV_DEADLOG_SECTORS; n++) {
+        uint16_t p = (uint16_t)((g_deadlog_write_page + n) % KV_DEADLOG_SECTORS);
+        if (!deadlog_init_page_if_needed(p)) continue;
+        uint32_t base = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
+
+        uint16_t off = (p == g_deadlog_write_page) ? g_deadlog_write_off : sizeof(deadlog_hdr_t);
+        while ((uint32_t)off + sizeof(deadlog_entry_t) <= KV_SECTOR_SIZE) {
+            const uint16_t *probe = (const uint16_t *)xip_ptr(base + off);
+            if (*probe == 0xFFFFu) break;
+            off = (uint16_t)(off + sizeof(deadlog_entry_t));
+        }
+        if ((uint32_t)off + sizeof(deadlog_entry_t) <= KV_SECTOR_SIZE) {
+            deadlog_entry_t e = {.page_idx = page_idx, .reserved = 0};
+            uint32_t ints = save_and_disable_interrupts();
+            flash_range_program(base + off, (const uint8_t *)&e, sizeof(e));
+            restore_interrupts(ints);
+            g_deadlog_write_page = p;
+            g_deadlog_write_off = (uint16_t)(off + sizeof(deadlog_entry_t));
+            return true;
+        }
+    }
+    deadlog_reset_page(g_deadlog_write_page);
+    g_deadlog_write_off = sizeof(deadlog_hdr_t);
+    if (!deadlog_init_page_if_needed(g_deadlog_write_page)) return false;
+    deadlog_entry_t e = {.page_idx = page_idx, .reserved = 0};
+    uint32_t base = KV_DEADLOG_START + (uint32_t)g_deadlog_write_page * KV_SECTOR_SIZE;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(base + g_deadlog_write_off, (const uint8_t *)&e, sizeof(e));
+    restore_interrupts(ints);
+    g_deadlog_write_off = (uint16_t)(g_deadlog_write_off + sizeof(deadlog_entry_t));
+    return true;
+}
+
+static bool page_has_live_refs(uint16_t page_idx) {
+    for (uint32_t i = 0; i < g_count; i++) {
+        uint16_t p = 0;
+        unpack_loc(g_locs[i], &p, NULL, NULL);
+        if (p == page_idx) return true;
+    }
+    return false;
+}
+
+static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, uint16_t version,
+                          uint8_t flags, uint32_t *out_loc) {
+    uint8_t enc[KV_MAX_VALUE + 64];
+    const uint8_t *stored = raw;
+    uint16_t stored_len = raw_len;
+    uint8_t rec_flags = flags;
+
+    uint16_t enc_cap = sizeof(enc);
+    if (raw_len > 0 && encode_rle_lite(raw, raw_len, enc, &enc_cap) && enc_cap < raw_len) {
+        stored = enc;
+        stored_len = enc_cap;
+        rec_flags |= KV_REC_FLAG_COMP;
+    }
+
+    kv_rec_prefix_t rp;
+    memset(&rp, 0, sizeof(rp));
+    rp.hdr.magic = KV_MAGIC;
+    rp.hdr.key = key;
+    rp.hdr.raw_len = raw_len;
+    rp.hdr.store_len = stored_len;
+    rp.hdr.version = version;
+    rp.hdr.flags = rec_flags;
+    rp.hdr.checksum = crc32(stored, stored_len);
+    rp.rec_len = (uint16_t)(sizeof(kv_rec_prefix_t) + stored_len);
+    uint16_t rec_len_aligned = (uint16_t)((rp.rec_len + 3u) & ~3u);
+
+    if (!select_append_page(rec_len_aligned)) return false;
+    if (!ensure_page_ready(g_write_page)) return false;
+
+    uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
+    uint32_t rec_off = page_off + g_write_off;
+
+    static uint8_t buf[KV_MAX_VALUE + 128];
+    memset(buf, 0xFF, rec_len_aligned);
+    memcpy(buf, &rp, sizeof(rp));
+    if (stored_len > 0) memcpy(buf + sizeof(rp), stored, stored_len);
+
+    uint16_t prog_len = (uint16_t)((rec_len_aligned + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(rec_off, buf, prog_len);
     restore_interrupts(ints);
 
-    keymap_remove(key);
+    if (out_loc) *out_loc = pack_loc(g_write_page, g_write_off, rec_len_aligned);
+    g_write_off = (uint16_t)(g_write_off + rec_len_aligned);
+    return true;
+}
+
+static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version) {
+    uint16_t page = 0, off = 0;
+    unpack_loc(loc, &page, &off, NULL);
+    if (page >= KV_SECTOR_COUNT) return false;
+
+    uint32_t rec_flash_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE + off;
+    const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)xip_ptr(rec_flash_off);
+
+    if (rp->hdr.magic != KV_MAGIC || rp->hdr.key != key) return false;
+    if (rp->hdr.flags & KV_REC_FLAG_TOMB) return false;
+    if (rp->hdr.raw_len > KV_MAX_VALUE || rp->hdr.store_len > KV_MAX_VALUE) return false;
+    if (rp->rec_len < sizeof(kv_rec_prefix_t)) return false;
+    if ((uint32_t)off + rp->rec_len > KV_SECTOR_SIZE) return false;
+
+    const uint8_t *stored = xip_ptr(rec_flash_off + sizeof(kv_rec_prefix_t));
+    if (crc32(stored, rp->hdr.store_len) != rp->hdr.checksum) return false;
+
+    if (len && *len < rp->hdr.raw_len) return false;
+    if (out && len) {
+        if (rp->hdr.flags & KV_REC_FLAG_COMP) {
+            if (!decode_rle_lite(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
+        } else if (rp->hdr.raw_len > 0) {
+            memcpy(out, stored, rp->hdr.raw_len);
+        }
+        *len = rp->hdr.raw_len;
+    } else if (len) {
+        *len = rp->hdr.raw_len;
+    }
+    if (version) *version = rp->hdr.version;
+    return true;
+}
+
+void kv_init(void) {
+    g_count = 0;
+    g_write_page = 0;
+    g_write_off = sizeof(kv_page_hdr_t);
+
+    uint16_t last_page = 0;
+    uint16_t last_off = sizeof(kv_page_hdr_t);
+    bool saw_data = false;
+
+    for (uint16_t p = 0; p < KV_SECTOR_COUNT; p++) {
+        uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
+        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+        if (ph->magic != KV_PAGE_MAGIC) continue;
+
+        uint16_t off = sizeof(kv_page_hdr_t);
+        while ((uint32_t)off + sizeof(kv_rec_prefix_t) <= KV_SECTOR_SIZE) {
+            const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)xip_ptr(page_off + off);
+            if (rp->rec_len == 0xFFFFu) break;
+            if (rp->rec_len < sizeof(kv_rec_prefix_t)) break;
+            uint16_t alen = (uint16_t)((rp->rec_len + 3u) & ~3u);
+            if ((uint32_t)off + alen > KV_SECTOR_SIZE) break;
+            if (rp->hdr.magic != KV_MAGIC) break;
+            if (rp->hdr.raw_len > KV_MAX_VALUE || rp->hdr.store_len > KV_MAX_VALUE) break;
+
+            const uint8_t *stored = xip_ptr(page_off + off + sizeof(kv_rec_prefix_t));
+            if (crc32(stored, rp->hdr.store_len) == rp->hdr.checksum) {
+                int f = idx_find_linear(rp->hdr.key);
+                uint16_t old_ver = 0;
+                if (f >= 0) old_ver = g_versions[(uint32_t)f];
+                if (f < 0 || rp->hdr.version >= old_ver) {
+                    if (rp->hdr.flags & KV_REC_FLAG_TOMB) {
+                        idx_remove(rp->hdr.key);
+                    } else {
+                        idx_set(rp->hdr.key, pack_loc(p, off, alen), rp->hdr.version, rp->hdr.flags);
+                    }
+                }
+            }
+
+            off = (uint16_t)(off + alen);
+        }
+
+        if (off > sizeof(kv_page_hdr_t)) {
+            saw_data = true;
+            last_page = p;
+            last_off = off;
+        }
+    }
+
+    if (saw_data) {
+        g_write_page = last_page;
+        g_write_off = last_off;
+        if (g_write_off >= KV_SECTOR_SIZE) {
+            g_write_page = (uint16_t)((g_write_page + 1u) % KV_SECTOR_COUNT);
+            g_write_off = sizeof(kv_page_hdr_t);
+        }
+    }
+
+    g_deadlog_write_page = 0;
+    g_deadlog_write_off = sizeof(deadlog_hdr_t);
+    g_deadlog_read_page = 0;
+    g_deadlog_read_off = sizeof(deadlog_hdr_t);
+    for (uint16_t p = 0; p < KV_DEADLOG_SECTORS; p++) {
+        uint32_t base = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
+        const deadlog_hdr_t *h = (const deadlog_hdr_t *)xip_ptr(base);
+        if (h->magic != KV_DEADLOG_MAGIC) continue;
+        uint16_t off = sizeof(deadlog_hdr_t);
+        while ((uint32_t)off + sizeof(deadlog_entry_t) <= KV_SECTOR_SIZE) {
+            const uint16_t *probe = (const uint16_t *)xip_ptr(base + off);
+            if (*probe == 0xFFFFu) break;
+            off = (uint16_t)(off + sizeof(deadlog_entry_t));
+        }
+        g_deadlog_write_page = p;
+        g_deadlog_write_off = off;
+    }
+
+    printf("[kv] Init: keys=%lu write_page=%u write_off=%u\n",
+           (unsigned long)g_count, g_write_page, g_write_off);
+}
+
+bool kv_put_if_version(uint32_t key, const uint8_t *value, uint16_t len,
+                       uint16_t expected_version, uint16_t *new_version) {
+    if (len > KV_MAX_VALUE) return false;
+
+    uint16_t cur_ver = 0;
+    uint32_t old_loc = 0;
+    bool exists = idx_get(key, &old_loc, &cur_ver, NULL);
+    if (expected_version != KV_VERSION_ANY && expected_version != cur_ver) return false;
+
+    uint16_t next_ver = (uint16_t)(cur_ver + 1u);
+    uint32_t new_loc = 0;
+    if (!append_record(key, value, len, next_ver, 0, &new_loc)) return false;
+    if (!idx_set(key, new_loc, next_ver, 0)) return false;
+
+    if (exists) {
+        uint16_t old_page = 0;
+        unpack_loc(old_loc, &old_page, NULL, NULL);
+        deadlog_append(old_page);
+    }
+
+    if (new_version) *new_version = next_ver;
+    return true;
+}
+
+bool kv_put(uint32_t key, const uint8_t *value, uint16_t len) {
+    return kv_put_if_version(key, value, len, KV_VERSION_ANY, NULL);
+}
+
+const uint8_t *kv_get(uint32_t key, uint16_t *len) {
+    static uint8_t scratch[KV_MAX_VALUE];
+    uint16_t cap = KV_MAX_VALUE;
+    if (!kv_get_copy(key, scratch, &cap, NULL)) return NULL;
+    if (len) *len = cap;
+    return scratch;
+}
+
+bool kv_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version) {
+    uint32_t loc = 0;
+    if (!idx_get(key, &loc, NULL, NULL)) return false;
+    return read_record(loc, key, out, len, version);
+}
+
+bool kv_delete(uint32_t key) {
+    uint16_t cur_ver = 0;
+    uint32_t old_loc = 0;
+    if (!idx_get(key, &old_loc, &cur_ver, NULL)) return false;
+
+    uint32_t tomb_loc = 0;
+    if (!append_record(key, NULL, 0, (uint16_t)(cur_ver + 1u), KV_REC_FLAG_TOMB, &tomb_loc)) return false;
+    idx_remove(key);
+
+    uint16_t old_page = 0;
+    unpack_loc(old_loc, &old_page, NULL, NULL);
+    deadlog_append(old_page);
+    (void)tomb_loc;
     return true;
 }
 
 bool kv_exists(uint32_t key) {
-    return keymap_get(key) >= 0;
+    return idx_find_linear(key) >= 0;
 }
 
-// ============================================================
-// Range query: find all keys for a RecordTypeId
-// Returns count, fills out_keys/out_sectors up to max_results.
-// Exploits sorted order — binary search to start, linear scan.
-// ============================================================
+bool kv_compact_step(void) {
+    for (uint32_t spin = 0; spin < KV_DEADLOG_SECTORS; spin++) {
+        uint16_t p = (uint16_t)((g_deadlog_read_page + spin) % KV_DEADLOG_SECTORS);
+        uint32_t base = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
+        const deadlog_hdr_t *h = (const deadlog_hdr_t *)xip_ptr(base);
+        if (h->magic != KV_DEADLOG_MAGIC) continue;
+
+        uint16_t off = (p == g_deadlog_read_page) ? g_deadlog_read_off : sizeof(deadlog_hdr_t);
+        if ((uint32_t)off + sizeof(deadlog_entry_t) > KV_SECTOR_SIZE) continue;
+        const deadlog_entry_t *e = (const deadlog_entry_t *)xip_ptr(base + off);
+        if (e->page_idx == 0xFFFFu) continue;
+        if (e->page_idx >= KV_SECTOR_COUNT) {
+            g_deadlog_read_page = p;
+            g_deadlog_read_off = (uint16_t)(off + sizeof(deadlog_entry_t));
+            return false;
+        }
+
+        uint16_t dead_page = e->page_idx;
+        g_deadlog_read_page = p;
+        g_deadlog_read_off = (uint16_t)(off + sizeof(deadlog_entry_t));
+
+        if (dead_page == g_write_page) return false;
+        if (page_has_live_refs(dead_page)) return false;
+
+        uint32_t page_off = KV_REGION_START + (uint32_t)dead_page * KV_SECTOR_SIZE;
+        const uint32_t *magic = (const uint32_t *)xip_ptr(page_off);
+        if (*magic == KV_FREE) return false;
+
+        uint32_t ints = save_and_disable_interrupts();
+        flash_range_erase(page_off, KV_SECTOR_SIZE);
+        restore_interrupts(ints);
+        return true;
+    }
+    return false;
+}
+
+uint32_t kv_reclaim(void) {
+    uint32_t n = 0;
+    while (kv_compact_step()) n++;
+    return n;
+}
+
+kv_stats_t kv_stats(void) {
+    kv_stats_t s = {0, 0, 0, KV_SECTOR_COUNT};
+    s.active = g_count;
+
+    uint32_t used_pages = 0;
+    for (uint16_t p = 0; p < KV_SECTOR_COUNT; p++) {
+        uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
+        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+        if (ph->magic == KV_PAGE_MAGIC) used_pages++;
+    }
+    s.free = KV_SECTOR_COUNT - used_pages;
+    s.dead = (used_pages > s.active) ? (used_pages - s.active) : 0;
+    return s;
+}
 
 uint32_t kv_range(uint32_t key_prefix, uint32_t prefix_mask,
                   uint32_t *out_keys, uint16_t *out_sectors, uint32_t max_results) {
-    // Find first key >= (key_prefix & prefix_mask)
-    uint32_t lo_key = key_prefix & prefix_mask;
-    uint32_t hi_key = lo_key | ~prefix_mask;
-
-    // Binary search for lo_key
-    int lo = 0, hi = (int)g_keymap_count - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (g_keymap[mid].key < lo_key) lo = mid + 1;
-        else hi = mid - 1;
-    }
-
     uint32_t count = 0;
-    for (uint32_t i = (uint32_t)lo; i < g_keymap_count && count < max_results; i++) {
-        if (g_keymap[i].key > hi_key) break;
-        if ((g_keymap[i].key & prefix_mask) == (key_prefix & prefix_mask)) {
-            if (out_keys) out_keys[count] = g_keymap[i].key;
-            if (out_sectors) out_sectors[count] = g_keymap[i].sector;
+    for (uint32_t i = 0; i < g_count && count < max_results; i++) {
+        if ((g_keys[i] & prefix_mask) == (key_prefix & prefix_mask)) {
+            if (out_keys) out_keys[count] = g_keys[i];
+            if (out_sectors) {
+                uint16_t page = 0;
+                unpack_loc(g_locs[i], &page, NULL, NULL);
+                out_sectors[count] = page;
+            }
             count++;
         }
     }
     return count;
 }
 
-// ============================================================
-// Reclaim dead sectors
-// ============================================================
-
-uint32_t kv_reclaim(void) {
-    uint32_t reclaimed = 0;
-    for (uint32_t i = 0; i < KV_SECTOR_COUNT; i++) {
-        if (sector_hdr(i)->magic == KV_DEAD) {
-            uint32_t flash_offset = KV_REGION_START + i * KV_SECTOR_SIZE;
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_erase(flash_offset, KV_SECTOR_SIZE);
-            restore_interrupts(ints);
-            reclaimed++;
-        }
-    }
-    return reclaimed;
+uint32_t kv_record_count(void) {
+    return g_count;
 }
 
-kv_stats_t kv_stats(void) {
-    kv_stats_t s = {0, 0, 0, KV_SECTOR_COUNT};
-    for (uint32_t i = 0; i < KV_SECTOR_COUNT; i++) {
-        uint32_t magic = sector_hdr(i)->magic;
-        if (magic == KV_MAGIC) s.active++;
-        else if (magic == KV_DEAD) s.dead++;
-        else s.free++;
+uint32_t kv_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t max_types) {
+    uint32_t n = 0;
+    uint16_t prev_type = 0xFFFF;
+
+    // g_keys is sorted, so records of the same type are contiguous
+    for (uint32_t i = 0; i < g_count; i++) {
+        uint16_t t = (uint16_t)(g_keys[i] >> 22);
+        if (t == prev_type && n > 0) {
+            out_counts[n - 1]++;
+        } else {
+            if (n >= max_types) break;
+            out_types[n] = t;
+            out_counts[n] = 1;
+            prev_type = t;
+            n++;
+        }
     }
-    return s;
+    return n;
 }

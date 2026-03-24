@@ -112,6 +112,11 @@ typedef struct {
     // --- Compaction stats ---
     volatile uint32_t compactions;
     volatile uint32_t slots_reclaimed;
+
+    // --- Request counters (Core 1 increments) ---
+    volatile uint32_t req_appends;
+    volatile uint32_t req_reads;
+    volatile uint32_t req_total;
 } wal_state_t;
 
 // ============================================================

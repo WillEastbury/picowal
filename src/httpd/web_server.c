@@ -42,7 +42,7 @@ void web_server_set_psk(const uint8_t psk[32]) {
 // ============================================================
 
 static const char PAGE_ROOT[] =
-"<!DOCTYPE html><html><head><meta charset=utf-8><title>PicoWAL</title>"
+"<!DOCTYPE html><html><head><meta charset=utf-8><title>Storage Appliance</title>"
 "<meta name=viewport content='width=device-width,initial-scale=1'>"
 "<style>"
 "*{margin:0;padding:0;box-sizing:border-box}"
@@ -56,7 +56,7 @@ static const char PAGE_ROOT[] =
 ".s{display:inline-block;margin:0 8px;padding:4px 8px;background:#0d1117;border-radius:4px}"
 ".s b{color:#0ff}"
 "</style></head><body>"
-"<h1>PicoWAL</h1>"
+"<h1>Storage Appliance</h1>"
 "<div class=c id=st></div>"
 "<div class=c><h2>READ</h2>"
 "Type:<input id=gt size=5 value=0> ID:<input id=gi size=8 value=0> "
@@ -179,9 +179,9 @@ static void handle_kv(struct tcp_pcb *pcb, http_verb_t verb,
     uint32_t key = ((uint32_t)(type_id & 0x3FF) << 22) | (record_id & 0x3FFFFF);
 
     if (verb == VERB_GET) {
-        uint16_t len = 0;
-        const uint8_t *val = kv_get(key, &len);
-        if (!val) {
+        uint8_t val[KV_MAX_VALUE];
+        uint16_t len = KV_MAX_VALUE;
+        if (!kv_get_copy(key, val, &len, NULL)) {
             http_json(pcb, "404 Not Found", "{\"error\":\"not found\"}");
         } else {
             http_respond(pcb, "200 OK", "application/octet-stream", val, len);
