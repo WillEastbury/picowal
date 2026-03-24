@@ -602,7 +602,8 @@ void net_core_run(wal_state_t *wal) {
         while (1) tight_loop_contents();
     }
 
-    // Start HTTP admin server on port 80
+    // Start HTTP admin server on port 80 (shares the PSK)
+    web_server_set_psk(g_psk);
     web_server_init(g_ctx.wal);
 
     // Main poll loop

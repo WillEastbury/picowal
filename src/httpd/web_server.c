@@ -10,203 +10,273 @@
 #include <stdlib.h>
 
 // ============================================================
-// Minimal HTTP/1.0 server — no dependencies beyond raw lwIP TCP
+// Minimal HTTP server with jump-table routing
 //
 // Routes:
-//   GET  /           → admin shell HTML
-//   GET  /api/stats  → JSON KV stats
-//   GET  /api/kv?key=<uint32>  → JSON value for key
-//   POST /api/kv?key=<uint32>  → write value (body = raw bytes)
-//   DELETE /api/kv?key=<uint32> → delete key
-//   GET  /api/keys?type=<uint16> → JSON list of keys for type
+//   GET  /              → embedded root page
+//   GET  /{slug}        → embedded page by slug
+//   GET  /0/{type}/{id} → read KV record (requires Auth header)
+//   POST /0/{type}/{id} → write KV record (requires Auth header)
+//
+// Auth: "Authorization: PSK <64-char hex>" header required for /0/
+// Only GET and POST supported. Everything else → 405.
+// type = uint10 (0-1023), id = uint22 (0-4194303)
 // ============================================================
 
 #define HTTP_PORT 80
-#define HTTP_BUF_SIZE 2048
+#define HTTP_BUF_SIZE 4096  // max request size (headers + body up to 4KB value)
 
 static wal_state_t *g_wal;
 
-// ---- Embedded HTML shell ----
-static const char INDEX_HTML[] =
+// Runtime PSK for HTTP auth (set from net_core)
+static uint8_t g_http_psk[32];
+static bool g_http_psk_set = false;
+
+void web_server_set_psk(const uint8_t psk[32]) {
+    memcpy(g_http_psk, psk, 32);
+    g_http_psk_set = true;
+}
+
+// ============================================================
+// Embedded pages — add pages here as {slug, content, len}
+// ============================================================
+
+static const char PAGE_ROOT[] =
 "<!DOCTYPE html><html><head><meta charset=utf-8><title>PicoWAL</title>"
 "<meta name=viewport content='width=device-width,initial-scale=1'>"
 "<style>"
 "*{margin:0;padding:0;box-sizing:border-box}"
 "body{font:14px/1.5 monospace;background:#1a1a2e;color:#e0e0e0;padding:16px}"
 "h1{color:#0ff;margin-bottom:8px}h2{color:#0f0;margin:12px 0 4px}"
-".card{background:#16213e;padding:12px;border-radius:8px;margin:8px 0}"
-"input,button{font:inherit;padding:4px 8px;margin:2px;border:1px solid #444;background:#0d1117;color:#e0e0e0;border-radius:4px}"
-"button{background:#0ff;color:#000;cursor:pointer;font-weight:bold}button:hover{background:#0a0}"
+".c{background:#16213e;padding:12px;border-radius:8px;margin:8px 0}"
+"input,button{font:inherit;padding:4px 8px;margin:2px;border:1px solid #444;"
+"background:#0d1117;color:#e0e0e0;border-radius:4px}"
+"button{background:#0ff;color:#000;cursor:pointer;font-weight:bold}"
 "pre{background:#0d1117;padding:8px;border-radius:4px;overflow-x:auto;margin:4px 0}"
-".stat{display:inline-block;margin:0 12px;padding:4px 8px;background:#0d1117;border-radius:4px}"
-".stat b{color:#0ff}"
+".s{display:inline-block;margin:0 8px;padding:4px 8px;background:#0d1117;border-radius:4px}"
+".s b{color:#0ff}"
 "</style></head><body>"
-"<h1>PicoWAL Admin</h1>"
-"<div class=card id=stats></div>"
-"<div class=card><h2>GET</h2>"
-"Type:<input id=gt size=6 value=0> ID:<input id=gi size=8 value=0> "
-"<button onclick=doGet()>Read</button>"
-"<pre id=gout></pre></div>"
-"<div class=card><h2>PUT</h2>"
-"Type:<input id=pt size=6 value=0> ID:<input id=pi size=8 value=0><br>"
-"Value:<input id=pv size=40 placeholder='text value'> "
-"<button onclick=doPut()>Write</button>"
-"<pre id=pout></pre></div>"
-"<div class=card><h2>DELETE</h2>"
-"Type:<input id=dt size=6 value=0> ID:<input id=di size=8 value=0> "
-"<button onclick=doDel()>Delete</button>"
-"<pre id=dout></pre></div>"
-"<div class=card><h2>LIST KEYS</h2>"
-"Type:<input id=lt size=6 value=0> "
-"<button onclick=doList()>List</button>"
-"<pre id=lout></pre></div>"
+"<h1>PicoWAL</h1>"
+"<div class=c id=st></div>"
+"<div class=c><h2>READ</h2>"
+"Type:<input id=gt size=5 value=0> ID:<input id=gi size=8 value=0> "
+"<button onclick=doGet()>GET</button><pre id=go></pre></div>"
+"<div class=c><h2>WRITE</h2>"
+"Type:<input id=pt size=5 value=0> ID:<input id=pi size=8 value=0><br>"
+"Value:<input id=pv size=40> <button onclick=doPut()>POST</button>"
+"<pre id=po></pre></div>"
+"<div class=c><h2>LIST</h2>"
+"Type:<input id=lt size=5 value=0> <button onclick=doList()>LIST</button>"
+"<pre id=lo></pre></div>"
 "<script>"
-"const TB=10,IB=22,TM=(1<<TB)-1,IM=(1<<IB)-1;"
-"function pk(t,i){return((t&TM)<<IB)|(i&IM)}"
-"function S(){fetch('/api/stats').then(r=>r.json()).then(d=>{"
-"document.getElementById('stats').innerHTML="
-"'<span class=stat>Active: <b>'+d.active+'</b></span>'"
-"+'<span class=stat>Dead: <b>'+d.dead+'</b></span>'"
-"+'<span class=stat>Free: <b>'+d.free+'</b></span>'"
-"+'<span class=stat>Total: <b>'+d.total+'</b></span>'})}"
-"function doGet(){let k=pk(+document.getElementById('gt').value,+document.getElementById('gi').value);"
-"fetch('/api/kv?key='+k).then(r=>r.text()).then(t=>document.getElementById('gout').textContent=t)}"
-"function doPut(){let k=pk(+document.getElementById('pt').value,+document.getElementById('pi').value);"
-"fetch('/api/kv?key='+k,{method:'POST',body:document.getElementById('pv').value})"
-".then(r=>r.text()).then(t=>{document.getElementById('pout').textContent=t;S()})}"
-"function doDel(){let k=pk(+document.getElementById('dt').value,+document.getElementById('di').value);"
-"fetch('/api/kv?key='+k,{method:'DELETE'}).then(r=>r.text()).then(t=>{document.getElementById('dout').textContent=t;S()})}"
-"function doList(){let t=+document.getElementById('lt').value,p=(t&TM)<<IB,m=TM<<IB;"
-"fetch('/api/keys?prefix='+p+'&mask='+m).then(r=>r.text()).then(t=>document.getElementById('lout').textContent=t)}"
+"const K=document.getElementById.bind(document),"
+"P=(t,i)=>'/0/'+t+'/'+i,"
+"H={'Authorization':'PSK '+localStorage.getItem('psk')||''};"
+"function S(){fetch('/0/stats/0',{headers:H}).then(r=>r.ok?r.text():'{}')"
+".then(t=>{try{let d=JSON.parse(t);K('st').innerHTML="
+"'<span class=s>Active:<b>'+d.a+'</b></span>'"
+"+'<span class=s>Dead:<b>'+d.d+'</b></span>'"
+"+'<span class=s>Free:<b>'+d.f+'</b></span>'}catch(e){}})}"
+"function doGet(){fetch(P(K('gt').value,K('gi').value),{headers:H})"
+".then(r=>r.text()).then(t=>K('go').textContent=t)}"
+"function doPut(){fetch(P(K('pt').value,K('pi').value),"
+"{method:'POST',headers:H,body:K('pv').value})"
+".then(r=>r.text()).then(t=>{K('po').textContent=t;S()})}"
+"function doList(){fetch('/0/'+K('lt').value+'/0',{headers:H})"
+".then(r=>r.text()).then(t=>K('lo').textContent=t)}"
+"if(!localStorage.getItem('psk'))"
+"{let p=prompt('Enter PSK (64 hex chars):');if(p)localStorage.setItem('psk',p);"
+"H.Authorization='PSK '+p}"
 "S();setInterval(S,5000);"
 "</script></body></html>";
 
-// ---- HTTP response helpers ----
+typedef struct {
+    const char *slug;     // URL path (without leading /)
+    const char *content;
+    uint16_t    len;
+    const char *mime;
+} embedded_page_t;
 
-static void http_send(struct tcp_pcb *pcb, const char *status,
-                      const char *content_type, const uint8_t *body, uint16_t body_len) {
+static const embedded_page_t PAGES[] = {
+    {"",           PAGE_ROOT, sizeof(PAGE_ROOT) - 1, "text/html"},
+    {"index.html", PAGE_ROOT, sizeof(PAGE_ROOT) - 1, "text/html"},
+    // Add more pages here: {"about", ABOUT_HTML, sizeof(ABOUT_HTML)-1, "text/html"},
+    {NULL, NULL, 0, NULL}
+};
+
+// ============================================================
+// HTTP helpers
+// ============================================================
+
+static void http_respond(struct tcp_pcb *pcb, const char *status,
+                         const char *ctype, const uint8_t *body, uint16_t blen) {
     char hdr[256];
-    int hdr_len = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.0 %s\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %u\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET,POST,DELETE,OPTIONS\r\n"
-        "Connection: close\r\n\r\n",
-        status, content_type, body_len);
-
-    tcp_write(pcb, hdr, hdr_len, TCP_WRITE_FLAG_COPY);
-    if (body_len > 0)
-        tcp_write(pcb, body, body_len, TCP_WRITE_FLAG_COPY);
+    int n = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.0 %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
+        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        status, ctype, blen);
+    tcp_write(pcb, hdr, n, TCP_WRITE_FLAG_COPY);
+    if (blen > 0) tcp_write(pcb, body, blen, TCP_WRITE_FLAG_COPY);
     tcp_output(pcb);
 }
 
-static void http_send_str(struct tcp_pcb *pcb, const char *status,
-                          const char *content_type, const char *body) {
-    http_send(pcb, status, content_type, (const uint8_t *)body, strlen(body));
+static void http_json(struct tcp_pcb *pcb, const char *status, const char *json) {
+    http_respond(pcb, status, "application/json", (const uint8_t *)json, strlen(json));
 }
 
-// ---- URL parsing ----
+// ============================================================
+// Auth: parse "Authorization: PSK <64 hex chars>" from headers
+// Returns true if valid.
+// ============================================================
 
-static uint32_t parse_uint_param(const char *url, const char *name) {
-    char search[32];
-    snprintf(search, sizeof(search), "%s=", name);
-    const char *p = strstr(url, search);
-    if (!p) return 0;
-    return (uint32_t)strtoul(p + strlen(search), NULL, 10);
+static bool hex_decode(const char *hex, uint8_t *out, int len) {
+    for (int i = 0; i < len; i++) {
+        char hi = hex[i * 2], lo = hex[i * 2 + 1];
+        uint8_t v = 0;
+        if (hi >= '0' && hi <= '9') v = (hi - '0') << 4;
+        else if (hi >= 'a' && hi <= 'f') v = (hi - 'a' + 10) << 4;
+        else if (hi >= 'A' && hi <= 'F') v = (hi - 'A' + 10) << 4;
+        else return false;
+        if (lo >= '0' && lo <= '9') v |= lo - '0';
+        else if (lo >= 'a' && lo <= 'f') v |= lo - 'a' + 10;
+        else if (lo >= 'A' && lo <= 'F') v |= lo - 'A' + 10;
+        else return false;
+        out[i] = v;
+    }
+    return true;
 }
 
-// ---- Request handler ----
+static bool check_auth(const char *headers) {
+    if (!g_http_psk_set) return false;
+    const char *auth = strstr(headers, "Authorization: PSK ");
+    if (!auth) auth = strstr(headers, "authorization: PSK ");
+    if (!auth) return false;
+    auth += 19;  // skip "Authorization: PSK "
 
-static void handle_request(struct tcp_pcb *pcb, const char *method,
-                           const char *url, const uint8_t *body, uint16_t body_len) {
+    uint8_t provided[32];
+    if (!hex_decode(auth, provided, 32)) return false;
 
-    // OPTIONS (CORS preflight)
-    if (strcmp(method, "OPTIONS") == 0) {
-        http_send_str(pcb, "204 No Content", "text/plain", "");
-        return;
-    }
+    // Constant-time compare
+    uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) diff |= provided[i] ^ g_http_psk[i];
+    return diff == 0;
+}
 
-    // GET / → admin shell
-    if (strcmp(method, "GET") == 0 && (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0)) {
-        http_send(pcb, "200 OK", "text/html", (const uint8_t *)INDEX_HTML, sizeof(INDEX_HTML) - 1);
-        return;
-    }
+// ============================================================
+// Route handlers — jump table
+// ============================================================
 
-    // GET /api/stats
-    if (strcmp(method, "GET") == 0 && strncmp(url, "/api/stats", 10) == 0) {
-        kv_stats_t s = kv_stats();
-        char json[128];
-        snprintf(json, sizeof(json),
-            "{\"active\":%lu,\"dead\":%lu,\"free\":%lu,\"total\":%lu}",
-            (unsigned long)s.active, (unsigned long)s.dead,
-            (unsigned long)s.free, (unsigned long)s.total);
-        http_send_str(pcb, "200 OK", "application/json", json);
-        return;
-    }
+typedef enum { VERB_GET, VERB_POST, VERB_UNKNOWN } http_verb_t;
 
-    // GET /api/kv?key=N
-    if (strcmp(method, "GET") == 0 && strncmp(url, "/api/kv", 7) == 0) {
-        uint32_t key = parse_uint_param(url, "key");
+typedef void (*route_handler_t)(struct tcp_pcb *pcb, http_verb_t verb,
+                                uint16_t type_id, uint32_t record_id,
+                                const uint8_t *body, uint16_t body_len);
+
+// /0/{type}/{id} — KV operations
+static void handle_kv(struct tcp_pcb *pcb, http_verb_t verb,
+                      uint16_t type_id, uint32_t record_id,
+                      const uint8_t *body, uint16_t body_len) {
+    uint32_t key = ((uint32_t)(type_id & 0x3FF) << 22) | (record_id & 0x3FFFFF);
+
+    if (verb == VERB_GET) {
         uint16_t len = 0;
         const uint8_t *val = kv_get(key, &len);
         if (!val) {
-            http_send_str(pcb, "404 Not Found", "application/json", "{\"error\":\"not found\"}");
+            http_json(pcb, "404 Not Found", "{\"error\":\"not found\"}");
         } else {
-            // Return raw value with length header
-            char hdr_extra[64];
-            snprintf(hdr_extra, sizeof(hdr_extra), "application/octet-stream");
-            http_send(pcb, "200 OK", hdr_extra, val, len);
+            http_respond(pcb, "200 OK", "application/octet-stream", val, len);
         }
-        return;
-    }
-
-    // POST /api/kv?key=N (body = value)
-    if (strcmp(method, "POST") == 0 && strncmp(url, "/api/kv", 7) == 0) {
-        uint32_t key = parse_uint_param(url, "key");
+    } else {
+        // POST — write
+        if (body_len > KV_MAX_VALUE) {
+            http_json(pcb, "413 Payload Too Large", "{\"error\":\"too large\"}");
+            return;
+        }
         if (kv_put(key, body, body_len)) {
-            http_send_str(pcb, "200 OK", "application/json", "{\"ok\":true}");
+            http_json(pcb, "200 OK", "{\"ok\":true}");
         } else {
-            http_send_str(pcb, "507 Insufficient Storage", "application/json", "{\"error\":\"store full\"}");
+            http_json(pcb, "507 Insufficient Storage", "{\"error\":\"full\"}");
         }
-        return;
     }
-
-    // DELETE /api/kv?key=N
-    if (strcmp(method, "DELETE") == 0 && strncmp(url, "/api/kv", 7) == 0) {
-        uint32_t key = parse_uint_param(url, "key");
-        if (kv_delete(key)) {
-            http_send_str(pcb, "200 OK", "application/json", "{\"ok\":true}");
-        } else {
-            http_send_str(pcb, "404 Not Found", "application/json", "{\"error\":\"not found\"}");
-        }
-        return;
-    }
-
-    // GET /api/keys?prefix=N&mask=M
-    if (strcmp(method, "GET") == 0 && strncmp(url, "/api/keys", 9) == 0) {
-        uint32_t prefix = parse_uint_param(url, "prefix");
-        uint32_t mask = parse_uint_param(url, "mask");
-        uint32_t keys[64];
-        uint16_t sectors[64];
-        uint32_t count = kv_range(prefix, mask, keys, sectors, 64);
-
-        // Build JSON array
-        char json[1024];
-        int pos = snprintf(json, sizeof(json), "{\"count\":%lu,\"keys\":[", (unsigned long)count);
-        for (uint32_t i = 0; i < count && pos < (int)sizeof(json) - 20; i++) {
-            if (i > 0) json[pos++] = ',';
-            pos += snprintf(json + pos, sizeof(json) - pos, "%lu", (unsigned long)keys[i]);
-        }
-        pos += snprintf(json + pos, sizeof(json) - pos, "]}");
-        http_send_str(pcb, "200 OK", "application/json", json);
-        return;
-    }
-
-    http_send_str(pcb, "404 Not Found", "text/plain", "Not Found");
 }
 
-// ---- TCP connection state ----
+// ============================================================
+// Request dispatcher
+// ============================================================
+
+static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
+    // Parse method
+    http_verb_t verb = VERB_UNKNOWN;
+    const char *path_start;
+    if (strncmp(req, "GET ", 4) == 0) { verb = VERB_GET; path_start = req + 4; }
+    else if (strncmp(req, "POST ", 5) == 0) { verb = VERB_POST; path_start = req + 5; }
+    else {
+        http_json(pcb, "405 Method Not Allowed", "{\"error\":\"only GET and POST\"}");
+        return;
+    }
+
+    // Extract path (up to space or ?)
+    char path[128];
+    int pi = 0;
+    while (*path_start && *path_start != ' ' && *path_start != '?' && pi < 127)
+        path[pi++] = *path_start++;
+    path[pi] = '\0';
+
+    // Find headers end + body
+    const char *hdr_end = strstr(req, "\r\n\r\n");
+    const uint8_t *body = NULL;
+    uint16_t body_len = 0;
+    if (hdr_end) {
+        body = (const uint8_t *)(hdr_end + 4);
+        body_len = req_len - (uint16_t)(body - (const uint8_t *)req);
+    }
+
+    // ---- Route: GET / or GET /{slug} → embedded pages ----
+    if (verb == VERB_GET && (path[0] == '/' && (path[1] == '\0' || path[1] != '0' || path[2] != '/'))) {
+        const char *slug = path[1] ? path + 1 : "";
+        for (const embedded_page_t *p = PAGES; p->slug; p++) {
+            if (strcmp(slug, p->slug) == 0) {
+                http_respond(pcb, "200 OK", p->mime, (const uint8_t *)p->content, p->len);
+                return;
+            }
+        }
+        http_json(pcb, "404 Not Found", "{\"error\":\"page not found\"}");
+        return;
+    }
+
+    // ---- Route: /0/{type}/{id} → KV operations (auth required) ----
+    if (path[0] == '/' && path[1] == '0' && path[2] == '/') {
+        if (!check_auth(req)) {
+            http_json(pcb, "401 Unauthorized", "{\"error\":\"invalid PSK\"}");
+            return;
+        }
+
+        // Parse /0/{type}/{id}
+        unsigned int type_val = 0, id_val = 0;
+        if (sscanf(path, "/0/%u/%u", &type_val, &id_val) < 2) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"expected /0/{type}/{id}\"}");
+            return;
+        }
+
+        if (type_val > 1023) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"type must be 0-1023\"}");
+            return;
+        }
+        if (id_val > 4194303) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"id must be 0-4194303\"}");
+            return;
+        }
+
+        handle_kv(pcb, verb, (uint16_t)type_val, (uint32_t)id_val, body, body_len);
+        return;
+    }
+
+    http_json(pcb, "404 Not Found", "{\"error\":\"unknown route\"}");
+}
+
+// ============================================================
+// TCP connection plumbing
+// ============================================================
 
 typedef struct {
     uint8_t buf[HTTP_BUF_SIZE];
@@ -215,39 +285,19 @@ typedef struct {
 
 static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
     http_conn_t *conn = (http_conn_t *)arg;
+    if (!p) { if (conn) free(conn); tcp_close(pcb); return ERR_OK; }
 
-    if (!p) {
-        // Connection closed
-        if (conn) free(conn);
-        tcp_close(pcb);
-        return ERR_OK;
-    }
-
-    // Accumulate data
     uint16_t copy = p->tot_len;
-    if (conn->len + copy > HTTP_BUF_SIZE)
-        copy = HTTP_BUF_SIZE - conn->len;
+    if (conn->len + copy > HTTP_BUF_SIZE) copy = HTTP_BUF_SIZE - conn->len;
     pbuf_copy_partial(p, conn->buf + conn->len, copy, 0);
     conn->len += copy;
     tcp_recved(pcb, p->tot_len);
     pbuf_free(p);
 
-    // Check for end of HTTP headers
-    char *hdr_end = strstr((char *)conn->buf, "\r\n\r\n");
-    if (!hdr_end) return ERR_OK;  // keep accumulating
+    if (!strstr((char *)conn->buf, "\r\n\r\n")) return ERR_OK;
 
-    // Parse method + URL
-    char method[8] = {0};
-    char url[128] = {0};
-    sscanf((char *)conn->buf, "%7s %127s", method, url);
+    dispatch(pcb, (const char *)conn->buf, conn->len);
 
-    // Find body
-    uint8_t *body = (uint8_t *)(hdr_end + 4);
-    uint16_t body_len = conn->len - (uint16_t)(body - conn->buf);
-
-    handle_request(pcb, method, url, body, body_len);
-
-    // Close after response
     tcp_arg(pcb, NULL);
     tcp_recv(pcb, NULL);
     free(conn);
@@ -258,26 +308,18 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
 static err_t http_accept(void *arg, struct tcp_pcb *pcb, err_t err) {
     (void)arg;
     if (err != ERR_OK) return err;
-
     http_conn_t *conn = calloc(1, sizeof(http_conn_t));
     if (!conn) { tcp_abort(pcb); return ERR_MEM; }
-
     tcp_arg(pcb, conn);
     tcp_recv(pcb, http_recv);
     return ERR_OK;
 }
 
-// ============================================================
-// Init
-// ============================================================
-
 void web_server_init(wal_state_t *wal) {
     g_wal = wal;
-
     struct tcp_pcb *pcb = tcp_new();
     tcp_bind(pcb, IP_ADDR_ANY, HTTP_PORT);
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, http_accept);
-
-    printf("[http] Web server listening on port %d\n", HTTP_PORT);
+    printf("[http] Listening on port %d\n", HTTP_PORT);
 }
