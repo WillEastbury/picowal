@@ -19,6 +19,7 @@ add_executable(${PROJECT_NAME}
     src/wal_engine.c
     src/wal_dma.c
     src/key_store.c
+    src/kv_flash.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

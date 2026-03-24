@@ -1,6 +1,7 @@
 #include "wal_engine.h"
 #include "wal_defs.h"
 #include "wal_fence.h"
+#include "kv_flash.h"
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -76,6 +77,9 @@ static void wal_do_append(uint8_t req_id) {
     if (hdr.op == DELTA_OP_DELETE) e->flags |= WAL_ENTRY_TOMBSTONE;
 
     g_wal->entry_count++;
+
+    // Persist to flash KV store
+    kv_put(e->key_hash, g_wal->data[req->slot], req->len);
 
     resp->status = WAL_RESP_OK;
     resp->seq    = e->seq;

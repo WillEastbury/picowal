@@ -6,6 +6,7 @@
 #include "xpt2046.h"
 #include "wal_defs.h"
 #include "wal_dma.h"
+#include "kv_flash.h"
 #include "net_core.h"
 #include "wal_engine.h"
 #include "key_store.h"
@@ -94,6 +95,9 @@ int main(void) {
     memset(&wal, 0, sizeof(wal));
     for (int i = 0; i < SLOT_COUNT; i++) wal.slot_free[i] = 1;
     wal.next_seq = 1;
+
+    // Initialize KV flash store (scan sectors, build sorted keymap)
+    kv_init();
 
     // Initialize DMA for buffer transfers
     wal_dma_init();
