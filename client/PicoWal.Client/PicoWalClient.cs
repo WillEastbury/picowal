@@ -218,13 +218,125 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
         return hash;
     }
 
+    // ================================================================
+    // Entity-level API
+    // ================================================================
+
     /// <summary>
-    /// Parse individual delta entries from a ReadResult's data.
-    /// Each entry is: [key_hash:4][value_len:2][op:1][reserved:1][value...]
+    /// Append field changes for a record.
+    /// Key = [RecordTypeId:16][RecordId:16] packed as uint32.
+    /// Value = serialized FieldChange array.
     /// </summary>
-    public static IReadOnlyList<DeltaEntry> ParseDeltas(ReadResult result)
+    public Task<AppendResult> AppendAsync(
+        ushort recordTypeId, ushort recordId, FieldChange[] changes,
+        CancellationToken ct = default)
+        => AppendAsync(recordTypeId, recordId, changes, DeltaOp.Set, ct);
+
+    /// <summary>
+    /// Append field changes with explicit delta op.
+    /// </summary>
+    public Task<AppendResult> AppendAsync(
+        ushort recordTypeId, ushort recordId, FieldChange[] changes,
+        DeltaOp op, CancellationToken ct = default)
     {
-        var entries = new List<DeltaEntry>();
+        uint key = EntityKey.Pack(recordTypeId, recordId);
+        var value = SerializeChanges(changes);
+        return AppendAsync(key, value, op, ct);
+    }
+
+    /// <summary>
+    /// Delete a record (tombstone).
+    /// </summary>
+    public Task<AppendResult> DeleteAsync(
+        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+    {
+        uint key = EntityKey.Pack(recordTypeId, recordId);
+        return AppendAsync(key, ReadOnlyMemory<byte>.Empty, DeltaOp.Delete, ct);
+    }
+
+    /// <summary>
+    /// Read all deltas for a record and parse them into RecordDeltas.
+    /// </summary>
+    public async Task<IReadOnlyList<RecordDelta>> ReadRecordAsync(
+        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+    {
+        uint key = EntityKey.Pack(recordTypeId, recordId);
+        var result = await ReadAsync(key, ct);
+        return ParseRecordDeltas(result);
+    }
+
+    /// <summary>
+    /// Materialize the current state of a record by applying all deltas in order.
+    /// Returns the latest value for each field.
+    /// </summary>
+    public async Task<Dictionary<ushort, byte[]>> MaterializeAsync(
+        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+    {
+        var deltas = await ReadRecordAsync(recordTypeId, recordId, ct);
+        var state = new Dictionary<ushort, byte[]>();
+
+        foreach (var delta in deltas)
+        {
+            if (delta.Op == DeltaOp.Delete)
+            {
+                state.Clear();
+                continue;
+            }
+            foreach (var change in delta.Changes)
+                state[change.FieldId] = change.Data.ToArray();
+        }
+
+        return state;
+    }
+
+    // ================================================================
+    // Serialization
+    // ================================================================
+
+    /// <summary>
+    /// Serialize FieldChange[] to wire format:
+    /// [field_id:2][data_len:2][data...] repeated.
+    /// </summary>
+    public static byte[] SerializeChanges(FieldChange[] changes)
+    {
+        int totalSize = 0;
+        foreach (var c in changes) totalSize += c.WireSize;
+
+        var buf = new byte[totalSize];
+        int pos = 0;
+        foreach (var c in changes)
+        {
+            c.WriteTo(buf.AsSpan(pos));
+            pos += c.WireSize;
+        }
+        return buf;
+    }
+
+    /// <summary>
+    /// Deserialize wire bytes into FieldChange[].
+    /// </summary>
+    public static FieldChange[] DeserializeChanges(ReadOnlySpan<byte> data)
+    {
+        var list = new List<FieldChange>();
+        int pos = 0;
+        while (pos + 4 <= data.Length)
+        {
+            var change = FieldChange.ReadFrom(data[pos..], out int consumed);
+            list.Add(change);
+            pos += consumed;
+        }
+        return [.. list];
+    }
+
+    /// <summary>
+    /// Parse a ReadResult into RecordDeltas.
+    /// Each delta in the compacted response has the wire format:
+    /// [key_hash:4][value_len:2][op:1][reserved:1][value...]
+    /// where value contains serialized FieldChange[].
+    /// </summary>
+    public static IReadOnlyList<RecordDelta> ParseRecordDeltas(ReadResult result)
+    {
+        var entries = new List<RecordDelta>();
         var span = result.Data.Span;
         int pos = 0;
 
@@ -233,16 +345,18 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
             uint keyHash = BinaryPrimitives.ReadUInt32LittleEndian(span[pos..]);
             ushort valueLen = BinaryPrimitives.ReadUInt16LittleEndian(span[(pos + 4)..]);
             var op = (DeltaOp)span[pos + 6];
-            pos += 8; // header
+            pos += 8;
 
-            ReadOnlyMemory<byte> value = ReadOnlyMemory<byte>.Empty;
+            var (typeId, recordId) = EntityKey.Unpack(keyHash);
+            FieldChange[] changes = [];
+
             if (valueLen > 0 && pos + valueLen <= span.Length)
             {
-                value = result.Data.Slice(pos, valueLen);
+                changes = DeserializeChanges(span.Slice(pos, valueLen));
                 pos += valueLen;
             }
 
-            entries.Add(new DeltaEntry(keyHash, valueLen, op, value));
+            entries.Add(new RecordDelta(typeId, recordId, op, changes));
         }
 
         return entries;
