@@ -92,17 +92,30 @@ static void lcd_data(uint16_t data) {
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Bulk pixel write: 2 bytes per pixel, CS held low
+// Bulk pixel write: 2 bytes per pixel, CS held low, fast SPI
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
-    uint8_t hi = color >> 8;
-    uint8_t lo = color & 0xFF;
+    // Ramp up SPI for pixel data
+    spi_set_baudrate(LCD_SPI_PORT, 62500000);  // 62.5MHz max for RP2350
+
+    // Use a line buffer for efficient DMA-friendly transfers
+    uint8_t buf[480 * 2];  // one full scanline
+    uint16_t fill = (count < 480) ? count : 480;
+    for (uint16_t i = 0; i < fill; i++) {
+        buf[i * 2]     = color >> 8;
+        buf[i * 2 + 1] = color & 0xFF;
+    }
+
     gpio_put(LCD_DC_PIN, 1);
     gpio_put(LCD_CS_PIN, 0);
-    for (uint32_t i = 0; i < count; i++) {
-        spi_write_byte(hi);
-        spi_write_byte(lo);
+    while (count > 0) {
+        uint32_t chunk = (count < 480) ? count : 480;
+        spi_write_blocking(LCD_SPI_PORT, buf, chunk * 2);
+        count -= chunk;
     }
     gpio_put(LCD_CS_PIN, 1);
+
+    // Restore conservative speed for commands
+    spi_set_baudrate(LCD_SPI_PORT, 4000000);
 }
 
 void lcd_set_backlight(uint8_t brightness) {
