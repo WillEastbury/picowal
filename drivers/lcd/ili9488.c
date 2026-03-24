@@ -68,45 +68,46 @@ static const uint8_t font5x7[][5] = {
 };
 
 // ============================================================
-// SPI primitives — exact match to Waveshare official demo
+// SPI primitives
 // ============================================================
 
-static void spi_write_byte(uint8_t val) {
-    uint8_t rx;
-    spi_write_read_blocking(LCD_SPI_PORT, &val, &rx, 1);
-}
-
 static void lcd_cmd(uint8_t cmd) {
+    gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 0);
-    gpio_put(LCD_CS_PIN, 0);
-    spi_write_byte(cmd);
+    spi_write_blocking(LCD_SPI_PORT, &cmd, 1);
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Data write: sends 2 bytes (high, low) per Waveshare 3.5" protocol
-static void lcd_data(uint16_t data) {
+static void lcd_data8(uint8_t data) {
+    gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
-    gpio_put(LCD_CS_PIN, 0);
-    spi_write_byte(data >> 8);
-    spi_write_byte(data & 0xFF);
+    spi_write_blocking(LCD_SPI_PORT, &data, 1);
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Bulk pixel write: 2 bytes per pixel, CS held low, buffered
+// Bulk pixel write: 3 bytes per pixel (RGB666), buffered
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
-    // Fill a scanline buffer
-    uint8_t buf[480 * 2];
-    uint16_t fill = (count < 480) ? count : 480;
+    uint8_t r = (color >> 11) & 0x1F;
+    uint8_t g = (color >> 5) & 0x3F;
+    uint8_t b = color & 0x1F;
+    uint8_t r8 = (r << 3) | (r >> 2);
+    uint8_t g8 = (g << 2) | (g >> 4);
+    uint8_t b8 = (b << 3) | (b >> 2);
+
+    // Fill a scanline buffer (160 pixels × 3 bytes = 480 bytes)
+    uint8_t buf[480];
+    uint16_t fill = (count < 160) ? count : 160;
     for (uint16_t i = 0; i < fill; i++) {
-        buf[i * 2]     = color >> 8;
-        buf[i * 2 + 1] = color & 0xFF;
+        buf[i * 3]     = r8;
+        buf[i * 3 + 1] = g8;
+        buf[i * 3 + 2] = b8;
     }
 
-    gpio_put(LCD_DC_PIN, 1);
     gpio_put(LCD_CS_PIN, 0);
+    gpio_put(LCD_DC_PIN, 1);
     while (count > 0) {
-        uint32_t chunk = (count < 480) ? count : 480;
-        spi_write_blocking(LCD_SPI_PORT, buf, chunk * 2);
+        uint32_t chunk = (count < 160) ? count : 160;
+        spi_write_blocking(LCD_SPI_PORT, buf, chunk * 3);
         count -= chunk;
     }
     gpio_put(LCD_CS_PIN, 1);
@@ -117,13 +118,11 @@ void lcd_set_backlight(uint8_t brightness) {
 }
 
 void lcd_init(void) {
-    // Waveshare demo uses 4MHz SPI
-    spi_init(LCD_SPI_PORT, 4000000);
+    spi_init(LCD_SPI_PORT, 30 * 1000 * 1000);  // 30MHz
     gpio_set_function(LCD_CLK_PIN, GPIO_FUNC_SPI);
     gpio_set_function(LCD_MOSI_PIN, GPIO_FUNC_SPI);
     gpio_set_function(LCD_MISO_PIN, GPIO_FUNC_SPI);
 
-    // Control pins
     gpio_init(LCD_CS_PIN);
     gpio_set_dir(LCD_CS_PIN, GPIO_OUT);
     gpio_put(LCD_CS_PIN, 1);
@@ -141,48 +140,55 @@ void lcd_init(void) {
     pwm_set_enabled(slice, true);
     lcd_set_backlight(255);
 
-    // Hardware reset (500ms per Waveshare demo)
+    // Hardware reset
     gpio_put(LCD_RST_PIN, 1);
-    sleep_ms(500);
+    sleep_ms(100);
     gpio_put(LCD_RST_PIN, 0);
-    sleep_ms(500);
+    sleep_ms(100);
     gpio_put(LCD_RST_PIN, 1);
-    sleep_ms(500);
-
-    // ---- Waveshare official 3.5" init sequence (LCD_InitReg) ----
-    lcd_cmd(0x21);     // Display Inversion ON
-    lcd_cmd(0xC2);     lcd_data(0x33);
-    lcd_cmd(0xC5);     lcd_data(0x00); lcd_data(0x1E); lcd_data(0x80);
-    lcd_cmd(0xB1);     lcd_data(0xB0);
-    lcd_cmd(0x36);     lcd_data(0x28);
-    lcd_cmd(0xE0);     // Positive Gamma
-    lcd_data(0x00); lcd_data(0x13); lcd_data(0x18); lcd_data(0x04);
-    lcd_data(0x0F); lcd_data(0x06); lcd_data(0x3A); lcd_data(0x56);
-    lcd_data(0x4D); lcd_data(0x03); lcd_data(0x0A); lcd_data(0x06);
-    lcd_data(0x30); lcd_data(0x3E); lcd_data(0x0F);
-    lcd_cmd(0xE1);     // Negative Gamma
-    lcd_data(0x00); lcd_data(0x13); lcd_data(0x18); lcd_data(0x01);
-    lcd_data(0x11); lcd_data(0x06); lcd_data(0x38); lcd_data(0x34);
-    lcd_data(0x4D); lcd_data(0x06); lcd_data(0x0D); lcd_data(0x0B);
-    lcd_data(0x31); lcd_data(0x37); lcd_data(0x0F);
-    lcd_cmd(0x3A);     lcd_data(0x55);  // 16-bit RGB565
-    lcd_cmd(0x11);     // Sleep Out
     sleep_ms(120);
-    lcd_cmd(0x29);     // Display On
 
-    // ---- LCD_SetGramScanWay (landscape U2D_R2L) ----
-    lcd_cmd(0xB6);     lcd_data(0x00); lcd_data(0x02);
-    lcd_cmd(0x36);     lcd_data(0x28);
+    // ILI9488 init — single-byte register params, RGB666 pixel format
+    lcd_cmd(0xE0);  // Positive Gamma
+    lcd_data8(0x00); lcd_data8(0x03); lcd_data8(0x09); lcd_data8(0x08);
+    lcd_data8(0x16); lcd_data8(0x0A); lcd_data8(0x3F); lcd_data8(0x78);
+    lcd_data8(0x4C); lcd_data8(0x09); lcd_data8(0x0A); lcd_data8(0x08);
+    lcd_data8(0x16); lcd_data8(0x1A); lcd_data8(0x0F);
+
+    lcd_cmd(0xE1);  // Negative Gamma
+    lcd_data8(0x00); lcd_data8(0x16); lcd_data8(0x19); lcd_data8(0x03);
+    lcd_data8(0x0F); lcd_data8(0x05); lcd_data8(0x32); lcd_data8(0x45);
+    lcd_data8(0x46); lcd_data8(0x04); lcd_data8(0x0E); lcd_data8(0x0D);
+    lcd_data8(0x35); lcd_data8(0x37); lcd_data8(0x0F);
+
+    lcd_cmd(0xC0); lcd_data8(0x17); lcd_data8(0x15);  // Power Control 1
+    lcd_cmd(0xC1); lcd_data8(0x41);                    // Power Control 2
+    lcd_cmd(0xC5); lcd_data8(0x00); lcd_data8(0x12); lcd_data8(0x80); // VCOM
+
+    lcd_cmd(0x36); lcd_data8(0x28);  // Memory Access: landscape
+    lcd_cmd(0x3A); lcd_data8(0x66);  // Pixel Format: 18-bit RGB666
+
+    lcd_cmd(0xB0); lcd_data8(0x00);  // Interface Mode Control
+    lcd_cmd(0xB1); lcd_data8(0xA0);  // Frame Rate: 60Hz
+    lcd_cmd(0xB4); lcd_data8(0x02);  // Display Inversion Control
+    lcd_cmd(0xB6); lcd_data8(0x02); lcd_data8(0x02); // Display Function Control
+
+    lcd_cmd(0xE9); lcd_data8(0x00);  // Set Image Function
+    lcd_cmd(0xF7); lcd_data8(0xA9); lcd_data8(0x51); lcd_data8(0x2C); lcd_data8(0x82); // Adjust Control 3
+
+    lcd_cmd(0x11);  // Sleep Out
+    sleep_ms(120);
+    lcd_cmd(0x29);  // Display On
 }
 
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     lcd_cmd(0x2A);
-    lcd_data(x0 >> 8); lcd_data(x0 & 0xFF);
-    lcd_data(x1 >> 8); lcd_data(x1 & 0xFF);
+    lcd_data8(x0 >> 8); lcd_data8(x0 & 0xFF);
+    lcd_data8(x1 >> 8); lcd_data8(x1 & 0xFF);
 
     lcd_cmd(0x2B);
-    lcd_data(y0 >> 8); lcd_data(y0 & 0xFF);
-    lcd_data(y1 >> 8); lcd_data(y1 & 0xFF);
+    lcd_data8(y0 >> 8); lcd_data8(y0 & 0xFF);
+    lcd_data8(y1 >> 8); lcd_data8(y1 & 0xFF);
 
     lcd_cmd(0x2C);
 }
