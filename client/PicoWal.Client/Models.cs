@@ -56,18 +56,18 @@ public enum DeltaOp : byte
 }
 
 /// <summary>
-/// Combines RecordTypeId (14 bits, max 16383) and RecordId (18 bits, max 262143)
+/// Combines RecordTypeId (12 bits, max 4095) and RecordId (20 bits, max 1048575)
 /// into a single uint32 key for the WAL's key_hash field.
 /// </summary>
 public static class EntityKey
 {
-    public const int TypeBits = 14;
-    public const int IdBits = 18;
-    public const ushort MaxTypeId = (1 << TypeBits) - 1;   // 16383
-    public const uint MaxRecordId = (1 << IdBits) - 1;     // 262143
+    public const int TypeBits = 12;
+    public const int IdBits = 20;
+    public const ushort MaxTypeId = (1 << TypeBits) - 1;   // 4095
+    public const uint MaxRecordId = (1 << IdBits) - 1;     // 1048575
 
     /// <summary>
-    /// Pack [RecordTypeId:14][RecordId:18] → uint32.
+    /// Pack [RecordTypeId:12][RecordId:20] → uint32.
     /// </summary>
     public static uint Pack(ushort recordTypeId, uint recordId)
         => ((uint)(recordTypeId & MaxTypeId) << IdBits) | (recordId & MaxRecordId);

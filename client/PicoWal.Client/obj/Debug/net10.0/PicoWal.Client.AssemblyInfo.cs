@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("PicoWal.Client")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d66e2ba563f530969302e9088224ad9d6f22f7c1")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+2efa70630e1df620b47b7a57de39104579a3712e")]
 [assembly: System.Reflection.AssemblyProductAttribute("PicoWal.Client")]
 [assembly: System.Reflection.AssemblyTitleAttribute("PicoWal.Client")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
