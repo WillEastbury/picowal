@@ -6,6 +6,7 @@
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "pico/multicore.h"
+#include "pico/rand.h"
 #include "lwip/tcp.h"
 
 #include <string.h>
@@ -44,32 +45,51 @@ static void free_req_id(uint8_t id) {
 // (true zero-copy). For fragmented payloads, we DMA to a slot.
 // ============================================================
 
+// ============================================================
+// Connection state: auth + data phases
+// ============================================================
+
 typedef enum {
-    RX_OPCODE,       // waiting for 1-byte opcode
-    RX_APPEND_HDR,   // accumulating 7-byte append header
-    RX_APPEND_DATA,  // streaming value data (zero-copy or to slot)
-    RX_READ_KEY,     // accumulating 4-byte key hash
+    CONN_WAIT_AUTH,    // sent challenge, waiting for auth response
+    CONN_AUTHENTICATED // auth passed, accepting WAL ops
+} conn_state_t;
+
+typedef enum {
+    RX_AUTH_RESPONSE,  // accumulating 32-byte auth response
+    RX_OPCODE,         // waiting for 1-byte opcode
+    RX_APPEND_HDR,     // accumulating 7-byte append header
+    RX_APPEND_DATA,    // streaming value data (zero-copy or to slot)
+    RX_READ_KEY,       // accumulating 4-byte key hash
 } rx_phase_t;
 
 typedef struct {
     wal_state_t    *wal;
     struct tcp_pcb *pcb;
+    struct tcp_pcb *listen_pcb;  // listener
     bool            connected;
+    conn_state_t    conn_state;
+
+    // Auth state
+    uint8_t    nonce[AUTH_NONCE_LEN];  // generated per connection
 
     // Frame parser state
     rx_phase_t phase;
-    uint8_t    hdr_buf[8];   // small header accumulator (max 7 bytes)
+    uint8_t    hdr_buf[32];  // accumulator (max 32 bytes for auth response)
     uint8_t    hdr_pos;
 
     // Current APPEND in progress
     uint32_t   cur_key_hash;
     uint16_t   cur_value_len;
     uint8_t    cur_delta_op;
-    int        cur_slot;     // allocated slot for this append
-    uint16_t   cur_written;  // bytes written to slot so far
+    int        cur_slot;
+    uint16_t   cur_written;
 } net_ctx_t;
 
 static net_ctx_t g_ctx;
+
+// Forward declarations for TCP callbacks
+static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);
+static void on_err(void *arg, err_t err);
 
 // ============================================================
 // Find a free buffer slot
@@ -95,6 +115,71 @@ static void tcp_send_bytes(struct tcp_pcb *pcb, const uint8_t *data, uint16_t le
 static void send_error(struct tcp_pcb *pcb, uint8_t code) {
     uint8_t resp[2] = {WIRE_ERROR, code};
     tcp_send_bytes(pcb, resp, 2);
+}
+
+// ============================================================
+// Auth: CRC32-chain keyed HMAC (lightweight, not cryptographic)
+// ============================================================
+
+static uint32_t auth_crc32(const uint8_t *data, uint32_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+static void auth_compute_hmac(const uint8_t *nonce, uint8_t nonce_len,
+                               const uint8_t *key, uint8_t key_len,
+                               uint8_t out[AUTH_RESPONSE_LEN]) {
+    memset(out, 0, AUTH_RESPONSE_LEN);
+    for (int round = 0; round < 8; round++) {
+        uint8_t mix[64];
+        for (int i = 0; i < 32; i++)
+            mix[i] = (i < key_len ? key[i] : 0) ^ (uint8_t)(round * 37);
+        for (int i = 0; i < 32; i++)
+            mix[32 + i] = out[i];
+
+        uint32_t h = auth_crc32(mix, 64);
+        h ^= auth_crc32(nonce, nonce_len);
+        h ^= auth_crc32(key, key_len);
+        h = h * 2654435761u + (uint32_t)round;
+
+        out[round * 4 + 0] = (h >> 0) & 0xFF;
+        out[round * 4 + 1] = (h >> 8) & 0xFF;
+        out[round * 4 + 2] = (h >> 16) & 0xFF;
+        out[round * 4 + 3] = (h >> 24) & 0xFF;
+    }
+}
+
+static void auth_generate_nonce(uint8_t *nonce, uint8_t len) {
+    // Use pico hardware RNG-seeded values
+    for (uint8_t i = 0; i < len; i++) {
+        nonce[i] = (uint8_t)(get_rand_32() & 0xFF);
+    }
+}
+
+static void auth_send_challenge(net_ctx_t *ctx) {
+    auth_generate_nonce(ctx->nonce, AUTH_NONCE_LEN);
+    uint8_t pkt[1 + AUTH_NONCE_LEN];
+    pkt[0] = WIRE_AUTH_CHALLENGE;
+    memcpy(&pkt[1], ctx->nonce, AUTH_NONCE_LEN);
+    tcp_send_bytes(ctx->pcb, pkt, sizeof(pkt));
+    printf("[auth] Challenge sent (%d byte nonce)\n", AUTH_NONCE_LEN);
+}
+
+static bool auth_verify_response(net_ctx_t *ctx, const uint8_t *response) {
+    static const uint8_t psk[] = AUTH_PSK;
+    uint8_t expected[AUTH_RESPONSE_LEN];
+    auth_compute_hmac(ctx->nonce, AUTH_NONCE_LEN, psk, sizeof(psk), expected);
+
+    // Constant-time compare
+    uint8_t diff = 0;
+    for (int i = 0; i < AUTH_RESPONSE_LEN; i++)
+        diff |= expected[i] ^ response[i];
+    return diff == 0;
 }
 
 // ============================================================
@@ -227,7 +312,43 @@ static void process_pbuf_data(net_ctx_t *ctx, struct pbuf *p) {
         while (pos < remaining) {
             switch (ctx->phase) {
 
+            case RX_AUTH_RESPONSE: {
+                // Accumulate 32-byte auth response
+                uint16_t need = AUTH_RESPONSE_LEN - ctx->hdr_pos;
+                uint16_t avail = remaining - pos;
+                uint16_t copy = (avail < need) ? avail : need;
+                memcpy(&ctx->hdr_buf[ctx->hdr_pos], &src[pos], copy);
+                ctx->hdr_pos += copy;
+                pos += copy;
+
+                if (ctx->hdr_pos == AUTH_RESPONSE_LEN) {
+                    if (auth_verify_response(ctx, ctx->hdr_buf)) {
+                        printf("[auth] Authenticated!\n");
+                        ctx->conn_state = CONN_AUTHENTICATED;
+                        uint8_t ok = WIRE_AUTH_OK;
+                        tcp_send_bytes(ctx->pcb, &ok, 1);
+                        ctx->phase = RX_OPCODE;
+                    } else {
+                        printf("[auth] FAILED — disconnecting\n");
+                        uint8_t fail = WIRE_AUTH_FAIL;
+                        tcp_send_bytes(ctx->pcb, &fail, 1);
+                        tcp_close(ctx->pcb);
+                        ctx->pcb = NULL;
+                        ctx->connected = false;
+                        return;
+                    }
+                }
+                break;
+            }
+
             case RX_OPCODE: {
+                if (ctx->conn_state != CONN_AUTHENTICATED) {
+                    send_error(ctx->pcb, WIRE_ERR_AUTH);
+                    tcp_close(ctx->pcb);
+                    ctx->pcb = NULL;
+                    ctx->connected = false;
+                    return;
+                }
                 uint8_t op = src[pos++];
                 switch (op) {
                 case WIRE_OP_NOOP:
@@ -372,13 +493,38 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
     return ERR_OK;
 }
 
-static err_t on_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
+// ============================================================
+// TCP Server: listen, accept, authenticate, then process WAL ops
+// ============================================================
+
+static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     net_ctx_t *ctx = (net_ctx_t *)arg;
-    if (err != ERR_OK) { ctx->connected = false; return err; }
-    printf("[net] Connected to %s:%d\n", WAL_HOST, WAL_PORT);
+
+    if (err != ERR_OK || !newpcb) return ERR_VAL;
+
+    // Only one client at a time
+    if (ctx->connected && ctx->pcb) {
+        printf("[net] Rejecting connection — already have a client\n");
+        tcp_abort(newpcb);
+        return ERR_ABRT;
+    }
+
+    printf("[net] Client connected from %s\n",
+           ip4addr_ntoa(&newpcb->remote_ip));
+
+    ctx->pcb = newpcb;
     ctx->connected = true;
-    ctx->phase = RX_OPCODE;
+    ctx->conn_state = CONN_WAIT_AUTH;
+    ctx->phase = RX_AUTH_RESPONSE;
     ctx->hdr_pos = 0;
+
+    tcp_arg(newpcb, ctx);
+    tcp_recv(newpcb, on_recv);
+    tcp_err(newpcb, on_err);
+
+    // Send challenge immediately
+    auth_send_challenge(ctx);
+
     return ERR_OK;
 }
 
@@ -386,32 +532,33 @@ static void on_err(void *arg, err_t err) {
     net_ctx_t *ctx = (net_ctx_t *)arg;
     printf("[net] TCP error: %d\n", err);
     ctx->connected = false;
+    ctx->conn_state = CONN_WAIT_AUTH;
     ctx->pcb = NULL;
 }
 
-static bool tcp_connect_to_host(net_ctx_t *ctx) {
-    ctx->pcb = tcp_new();
-    if (!ctx->pcb) return false;
-    tcp_arg(ctx->pcb, ctx);
-    tcp_recv(ctx->pcb, on_recv);
-    tcp_err(ctx->pcb, on_err);
+static bool tcp_start_listen(net_ctx_t *ctx) {
+    struct tcp_pcb *pcb = tcp_new();
+    if (!pcb) return false;
 
-    ip_addr_t addr;
-    if (!ip4addr_aton(WAL_HOST, &addr)) { tcp_abort(ctx->pcb); ctx->pcb = NULL; return false; }
-
-    err_t e = tcp_connect(ctx->pcb, &addr, WAL_PORT, on_connected);
-    if (e != ERR_OK) { tcp_abort(ctx->pcb); ctx->pcb = NULL; return false; }
-
-    absolute_time_t deadline = make_timeout_time_ms(10000);
-    while (!ctx->connected && ctx->pcb) {
-        cyw43_arch_poll();
-        sleep_ms(1);
-        if (absolute_time_diff_us(get_absolute_time(), deadline) < 0) {
-            if (ctx->pcb) { tcp_abort(ctx->pcb); ctx->pcb = NULL; }
-            return false;
-        }
+    err_t e = tcp_bind(pcb, IP_ADDR_ANY, WAL_LISTEN_PORT);
+    if (e != ERR_OK) {
+        printf("[net] Bind failed: %d\n", e);
+        tcp_close(pcb);
+        return false;
     }
-    return ctx->connected;
+
+    ctx->listen_pcb = tcp_listen(pcb);
+    if (!ctx->listen_pcb) {
+        printf("[net] Listen failed\n");
+        tcp_close(pcb);
+        return false;
+    }
+
+    tcp_arg(ctx->listen_pcb, ctx);
+    tcp_accept(ctx->listen_pcb, on_accept);
+
+    printf("[net] Listening on port %d\n", WAL_LISTEN_PORT);
+    return true;
 }
 
 // ============================================================
@@ -441,19 +588,18 @@ void net_core_run(wal_state_t *wal) {
     }
     printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
 
-    while (true) {
-        if (!g_ctx.connected) {
-            printf("[net] Connecting to %s:%d...\n", WAL_HOST, WAL_PORT);
-            if (!tcp_connect_to_host(&g_ctx)) {
-                printf("[net] Retry in 2s...\n");
-                sleep_ms(2000);
-                continue;
-            }
-        }
+    // Start TCP server
+    if (!tcp_start_listen(&g_ctx)) {
+        printf("[net] Failed to start listener\n");
+        while (1) tight_loop_contents();
+    }
 
-        // Poll network AND drain Core 1 responses
+    // Main poll loop
+    while (true) {
         cyw43_arch_poll();
-        drain_responses(&g_ctx);
+        if (g_ctx.connected) {
+            drain_responses(&g_ctx);
+        }
         sleep_ms(1);
     }
 }

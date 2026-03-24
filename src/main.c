@@ -56,7 +56,7 @@ int main(void) {
     printf("[main] Core 1 WAL engine launched\n");
 
     lcd_draw_string(40, 190, "CORE1 WAL ENGINE OK", COLOR_GREEN, COLOR_BLACK, 2);
-    lcd_draw_string(40, 220, "CONNECTING...", COLOR_YELLOW, COLOR_BLACK, 2);
+    lcd_draw_string(40, 220, "LISTENING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
     // Core 0: network receiver (never returns)
     net_core_run(&wal);
