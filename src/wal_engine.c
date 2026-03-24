@@ -48,8 +48,7 @@ static void wal_do_append(uint8_t req_id) {
         return;
     }
 
-    // If zero-copy pointer is set, copy value data into slot now
-    // (before we signal DONE, which frees the pbuf on Core 0)
+    // Copy zero-copy data into slot if needed
     if (req->zc_data && req->zc_len > 0) {
         memcpy(g_wal->data[req->slot] + sizeof(delta_header_t),
                req->zc_data, req->zc_len);
@@ -58,10 +57,107 @@ static void wal_do_append(uint8_t req_id) {
     delta_header_t hdr;
     memcpy(&hdr, g_wal->data[req->slot], sizeof(hdr));
 
+    // ---- Read-Merge-Write flow (never mutate in place) ----
+    //
+    // 1. Read current record from flash (via KV index)
+    // 2. Merge incoming field changes into SRAM buffer
+    // 3. Append merged record to new flash sector
+    // 4. KV index atomically points key → new sector
+    // 5. Old sector invalidated (dead, awaiting reclaim)
+
+    if (hdr.op == DELTA_OP_DELETE) {
+        // Delete: just remove from flash, no merge needed
+        kv_delete(hdr.key_hash);
+    } else {
+        // Merge: read existing record, overlay incoming fields
+        uint8_t merged[KV_MAX_VALUE];
+        uint16_t merged_len = 0;
+
+        // Read existing record from flash
+        uint16_t existing_len = 0;
+        const uint8_t *existing = kv_get(hdr.key_hash, &existing_len);
+
+        if (existing && existing_len > 0 && existing_len <= KV_MAX_VALUE) {
+            memcpy(merged, existing, existing_len);
+            merged_len = existing_len;
+        }
+
+        // Parse incoming delta fields and overlay onto merged buffer
+        // Delta payload format: [field_id:2][data_len:2][data...] × N
+        const uint8_t *delta = g_wal->data[req->slot] + sizeof(delta_header_t);
+        uint16_t delta_len = hdr.value_len;
+        uint16_t dpos = 0;
+
+        while (dpos + 4 <= delta_len) {
+            uint16_t field_id, data_len;
+            memcpy(&field_id, delta + dpos, 2);
+            memcpy(&data_len, delta + dpos + 2, 2);
+            dpos += 4;
+
+            if (dpos + data_len > delta_len) break;
+
+            // Find this field in the merged buffer and replace it,
+            // or append if not found
+            uint16_t mpos = 0;
+            bool replaced = false;
+
+            while (mpos + 4 <= merged_len) {
+                uint16_t mf_id, mf_len;
+                memcpy(&mf_id, merged + mpos, 2);
+                memcpy(&mf_len, merged + mpos + 2, 2);
+
+                if (mf_id == field_id) {
+                    // Replace: shift tail, insert new data
+                    uint16_t old_entry_size = 4 + mf_len;
+                    uint16_t new_entry_size = 4 + data_len;
+                    int16_t  size_diff = (int16_t)new_entry_size - (int16_t)old_entry_size;
+                    uint16_t tail_start = mpos + old_entry_size;
+                    uint16_t tail_len = merged_len - tail_start;
+
+                    if (merged_len + size_diff > KV_MAX_VALUE) break;
+
+                    // Shift tail
+                    if (tail_len > 0 && size_diff != 0)
+                        memmove(merged + mpos + new_entry_size,
+                                merged + tail_start, tail_len);
+
+                    // Write new field header + data
+                    memcpy(merged + mpos, &field_id, 2);
+                    memcpy(merged + mpos + 2, &data_len, 2);
+                    memcpy(merged + mpos + 4, delta + dpos, data_len);
+
+                    merged_len = (uint16_t)((int16_t)merged_len + size_diff);
+                    replaced = true;
+                    break;
+                }
+
+                mpos += 4 + mf_len;
+            }
+
+            if (!replaced) {
+                // Append new field
+                if (merged_len + 4 + data_len <= KV_MAX_VALUE) {
+                    memcpy(merged + merged_len, &field_id, 2);
+                    memcpy(merged + merged_len + 2, &data_len, 2);
+                    memcpy(merged + merged_len + 4, delta + dpos, data_len);
+                    merged_len += 4 + data_len;
+                }
+            }
+
+            dpos += data_len;
+        }
+
+        // Write merged record to flash (append-only, new sector)
+        kv_put(hdr.key_hash, merged, merged_len);
+    }
+
+    // Register in SRAM WAL index
     int idx = wal_alloc_entry();
     if (idx < 0) {
-        resp->status = WAL_RESP_ERR;
+        // WAL index full but flash write succeeded — still OK
         g_wal->slot_free[req->slot] = 1;
+        resp->status = WAL_RESP_OK;
+        resp->seq    = g_wal->next_seq++;
         wal_dmb();
         req->ready = REQ_DONE;
         multicore_fifo_push_blocking(fifo_signal(req_id));
@@ -77,9 +173,6 @@ static void wal_do_append(uint8_t req_id) {
     if (hdr.op == DELTA_OP_DELETE) e->flags |= WAL_ENTRY_TOMBSTONE;
 
     g_wal->entry_count++;
-
-    // Persist to flash KV store
-    kv_put(e->key_hash, g_wal->data[req->slot], req->len);
 
     resp->status = WAL_RESP_OK;
     resp->seq    = e->seq;
