@@ -91,13 +91,22 @@ static void lcd_write_data16(uint16_t data) {
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Write bulk pixel data — 2 bytes per pixel (RGB565)
+// Write bulk pixel data — 3 bytes per pixel (RGB666)
+// ILI9488 SPI always receives pixel data as 18-bit (3 bytes) regardless
+// of register 0x3A setting. Convert RGB565 → RGB666 on the fly.
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
-    uint8_t buf[2] = {color >> 8, color & 0xFF};
+    uint8_t r = (color >> 11) & 0x1F;
+    uint8_t g = (color >> 5) & 0x3F;
+    uint8_t b = color & 0x1F;
+    uint8_t buf[3] = {
+        (r << 3) | (r >> 2),
+        (g << 2) | (g >> 4),
+        (b << 3) | (b >> 2),
+    };
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
     for (uint32_t i = 0; i < count; i++) {
-        spi_write_blocking(LCD_SPI_PORT, buf, 2);
+        spi_write_blocking(LCD_SPI_PORT, buf, 3);
     }
     gpio_put(LCD_CS_PIN, 1);
 }
@@ -190,8 +199,8 @@ void lcd_init(void) {
     lcd_write_data(0x37);
     lcd_write_data(0x0F);
 
-    lcd_write_cmd(0x3A);  // Pixel Format — 16-bit RGB565
-    lcd_write_data(0x55);
+    lcd_write_cmd(0x3A);  // Pixel Format — 18-bit RGB666 (ILI9488 SPI requires 3 bytes/pixel)
+    lcd_write_data(0x66);
 
     // Display Function Control — set scan direction
     lcd_write_cmd(0xB6);
