@@ -18,6 +18,7 @@ add_executable(${PROJECT_NAME}
     src/net_core.c
     src/wal_engine.c
     src/wal_dma.c
+    src/key_store.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -33,6 +34,8 @@ target_link_libraries(${PROJECT_NAME}
     hardware_pwm
     hardware_gpio
     hardware_dma
+    hardware_flash
+    pico_rand
     lcd_driver
     touch_driver
 )

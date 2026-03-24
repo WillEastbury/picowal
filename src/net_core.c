@@ -2,6 +2,7 @@
 #include "wal_defs.h"
 #include "wal_fence.h"
 #include "wal_dma.h"
+#include "key_store.h"
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
@@ -170,10 +171,16 @@ static void auth_send_challenge(net_ctx_t *ctx) {
     printf("[auth] Challenge sent (%d byte nonce)\n", AUTH_NONCE_LEN);
 }
 
+// Runtime PSK — loaded from flash at startup
+static uint8_t g_psk[PSK_LEN];
+
+void net_core_set_psk(const uint8_t psk[PSK_LEN]) {
+    memcpy(g_psk, psk, PSK_LEN);
+}
+
 static bool auth_verify_response(net_ctx_t *ctx, const uint8_t *response) {
-    static const uint8_t psk[] = AUTH_PSK;
     uint8_t expected[AUTH_RESPONSE_LEN];
-    auth_compute_hmac(ctx->nonce, AUTH_NONCE_LEN, psk, sizeof(psk), expected);
+    auth_compute_hmac(ctx->nonce, AUTH_NONCE_LEN, g_psk, PSK_LEN, expected);
 
     // Constant-time compare
     uint8_t diff = 0;

@@ -67,36 +67,42 @@ static const uint8_t font5x7[][5] = {
     {0x61,0x51,0x49,0x45,0x43}, // Z
 };
 
-static void lcd_write_cmd(uint8_t cmd) {
+// ============================================================
+// SPI primitives — CS stays low for entire command+data sequence
+// ============================================================
+
+// Send command byte (DC=0)
+static void lcd_cmd(uint8_t cmd) {
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 0);
     spi_write_blocking(LCD_SPI_PORT, &cmd, 1);
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Register parameter: single byte (ILI9488 SPI = 8-bit interface)
-static void lcd_write_data8(uint8_t data) {
+// Send command followed by N data bytes in one CS frame
+static void lcd_cmd_data(uint8_t cmd, const uint8_t *data, uint8_t len) {
     gpio_put(LCD_CS_PIN, 0);
-    gpio_put(LCD_DC_PIN, 1);
-    spi_write_blocking(LCD_SPI_PORT, &data, 1);
+    gpio_put(LCD_DC_PIN, 0);
+    spi_write_blocking(LCD_SPI_PORT, &cmd, 1);
+    if (len > 0) {
+        gpio_put(LCD_DC_PIN, 1);
+        spi_write_blocking(LCD_SPI_PORT, data, len);
+    }
     gpio_put(LCD_CS_PIN, 1);
 }
 
-// Pixel data: 3 bytes per pixel (RGB666 over SPI)
-// ILI9488 SPI interface always uses 18-bit color (3 bytes per pixel)
+// Shorthand for command + 1 data byte
+static void lcd_cmd_1(uint8_t cmd, uint8_t d0) {
+    lcd_cmd_data(cmd, &d0, 1);
+}
+
+// Write bulk pixel data — RGB565 (2 bytes/pixel) for ILI9488W variant
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
-    uint8_t r = (color >> 11) & 0x1F;
-    uint8_t g = (color >> 5) & 0x3F;
-    uint8_t b = color & 0x1F;
-    uint8_t buf[3] = {
-        (r << 3) | (r >> 2),
-        (g << 2) | (g >> 4),
-        (b << 3) | (b >> 2),
-    };
+    uint8_t buf[2] = {color >> 8, color & 0xFF};
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
     for (uint32_t i = 0; i < count; i++) {
-        spi_write_blocking(LCD_SPI_PORT, buf, 3);
+        spi_write_blocking(LCD_SPI_PORT, buf, 2);
     }
     gpio_put(LCD_CS_PIN, 1);
 }
@@ -106,8 +112,8 @@ void lcd_set_backlight(uint8_t brightness) {
 }
 
 void lcd_init(void) {
-    // Init SPI at 40MHz
-    spi_init(LCD_SPI_PORT, 40 * 1000 * 1000);
+    // Init SPI at 20MHz (conservative for reliable init)
+    spi_init(LCD_SPI_PORT, 20 * 1000 * 1000);
     gpio_set_function(LCD_CLK_PIN, GPIO_FUNC_SPI);
     gpio_set_function(LCD_MOSI_PIN, GPIO_FUNC_SPI);
     gpio_set_function(LCD_MISO_PIN, GPIO_FUNC_SPI);
@@ -132,92 +138,53 @@ void lcd_init(void) {
 
     // Hardware reset
     gpio_put(LCD_RST_PIN, 1);
-    sleep_ms(500);
+    sleep_ms(100);
     gpio_put(LCD_RST_PIN, 0);
-    sleep_ms(500);
+    sleep_ms(100);
     gpio_put(LCD_RST_PIN, 1);
-    sleep_ms(500);
-
-    // Waveshare Pico-ResTouch-LCD-3.5 init sequence (from reference driver)
-    lcd_write_cmd(0x21);  // Display Inversion ON
-
-    lcd_write_cmd(0xC2);  // Power Control 3
-    lcd_write_data8(0x33);
-
-    lcd_write_cmd(0xC5);  // VCOM Control
-    lcd_write_data8(0x00);
-    lcd_write_data8(0x1E);
-    lcd_write_data8(0x80);
-
-    lcd_write_cmd(0xB1);  // Frame Rate Control
-    lcd_write_data8(0xB0);
-
-    lcd_write_cmd(0x36);  // Memory Access Control (landscape)
-    lcd_write_data8(0x28);
-
-    lcd_write_cmd(0xE0);  // Positive Gamma Control
-    lcd_write_data8(0x00);
-    lcd_write_data8(0x13);
-    lcd_write_data8(0x18);
-    lcd_write_data8(0x04);
-    lcd_write_data8(0x0F);
-    lcd_write_data8(0x06);
-    lcd_write_data8(0x3A);
-    lcd_write_data8(0x56);
-    lcd_write_data8(0x4D);
-    lcd_write_data8(0x03);
-    lcd_write_data8(0x0A);
-    lcd_write_data8(0x06);
-    lcd_write_data8(0x30);
-    lcd_write_data8(0x3E);
-    lcd_write_data8(0x0F);
-
-    lcd_write_cmd(0xE1);  // Negative Gamma Control
-    lcd_write_data8(0x00);
-    lcd_write_data8(0x13);
-    lcd_write_data8(0x18);
-    lcd_write_data8(0x01);
-    lcd_write_data8(0x11);
-    lcd_write_data8(0x06);
-    lcd_write_data8(0x38);
-    lcd_write_data8(0x34);
-    lcd_write_data8(0x4D);
-    lcd_write_data8(0x06);
-    lcd_write_data8(0x0D);
-    lcd_write_data8(0x0B);
-    lcd_write_data8(0x31);
-    lcd_write_data8(0x37);
-    lcd_write_data8(0x0F);
-
-    lcd_write_cmd(0x3A);  // Pixel Format — 18-bit RGB666 (ILI9488 SPI requires 3 bytes/pixel)
-    lcd_write_data8(0x66);
-
-    // Display Function Control — set scan direction
-    lcd_write_cmd(0xB6);
-    lcd_write_data8(0x00);
-    lcd_write_data8(0x02);
-
-    lcd_write_cmd(0x11);  // Sleep Out
     sleep_ms(120);
 
-    lcd_write_cmd(0x29);  // Display On
-    sleep_ms(200);
+    // ---- ILI9488W (Waveshare) init sequence ----
+    // From PicoMite reference: ILI9488W variant, RGB565, 16-bit pixels
+
+    static const uint8_t c2d[] = {0x33};
+    lcd_cmd_data(0xC2, c2d, 1);  // Power Control 3
+
+    static const uint8_t c5d[] = {0x00, 0x1E, 0x80};
+    lcd_cmd_data(0xC5, c5d, 3);  // VCOM
+
+    lcd_cmd_1(0xB1, 0xB0);  // Frame rate 70Hz
+
+    lcd_cmd_1(0x36, 0x28);  // Memory Access: landscape, BGR
+
+    static const uint8_t pgamma[] = {0x00,0x13,0x18,0x04,0x0F,0x06,0x3A,0x56,
+                                     0x4D,0x03,0x0A,0x06,0x30,0x3E,0x0F};
+    lcd_cmd_data(0xE0, pgamma, 15);
+
+    static const uint8_t ngamma[] = {0x00,0x13,0x18,0x01,0x11,0x06,0x38,0x34,
+                                     0x4D,0x06,0x0D,0x0B,0x31,0x37,0x0F};
+    lcd_cmd_data(0xE1, ngamma, 15);
+
+    lcd_cmd_1(0x3A, 0x55);  // Pixel Format: 16-bit RGB565
+
+    lcd_cmd(0x11);  // Sleep Out
+    sleep_ms(120);
+
+    lcd_cmd(0x29);  // Display On
+    sleep_ms(25);
+
+    // Ramp SPI up to 40MHz for pixel data
+    spi_set_baudrate(LCD_SPI_PORT, 40 * 1000 * 1000);
 }
 
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
-    lcd_write_cmd(0x2A);
-    lcd_write_data8(x0 >> 8);
-    lcd_write_data8(x0 & 0xFF);
-    lcd_write_data8(x1 >> 8);
-    lcd_write_data8(x1 & 0xFF);
+    uint8_t xd[] = {x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF};
+    lcd_cmd_data(0x2A, xd, 4);
 
-    lcd_write_cmd(0x2B);
-    lcd_write_data8(y0 >> 8);
-    lcd_write_data8(y0 & 0xFF);
-    lcd_write_data8(y1 >> 8);
-    lcd_write_data8(y1 & 0xFF);
+    uint8_t yd[] = {y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF};
+    lcd_cmd_data(0x2B, yd, 4);
 
-    lcd_write_cmd(0x2C);
+    lcd_cmd(0x2C);
 }
 
 void lcd_draw_pixel(uint16_t x, uint16_t y, uint16_t color) {

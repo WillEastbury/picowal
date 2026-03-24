@@ -8,6 +8,7 @@
 #include "wal_dma.h"
 #include "net_core.h"
 #include "wal_engine.h"
+#include "key_store.h"
 
 // ============================================================
 // WAL state — 192 × 2KB = 384KB in BSS
@@ -37,6 +38,52 @@ int main(void) {
     lcd_init();
     touch_init();
 
+    lcd_clear(COLOR_BLACK);
+    lcd_draw_string(60, 30, "WAL APPLIANCE", COLOR_CYAN, COLOR_BLACK, 4);
+
+    // ---- PSK: load or generate on first boot ----
+    uint8_t psk[PSK_LEN];
+    bool first_boot = !key_store_load(psk);
+
+    if (first_boot) {
+        printf("[key] First boot — generating PSK\n");
+        key_store_generate(psk);
+
+        char hex[PSK_LEN * 2 + 1];
+        key_store_format_hex(psk, hex);
+
+        lcd_draw_string(20, 80, "FIRST BOOT", COLOR_YELLOW, COLOR_BLACK, 3);
+        lcd_draw_string(20, 120, "YOUR PSK:", COLOR_WHITE, COLOR_BLACK, 2);
+
+        // Display PSK in 2 rows of 32 hex chars each
+        char line1[33], line2[33];
+        memcpy(line1, hex, 32); line1[32] = '\0';
+        memcpy(line2, hex + 32, 32); line2[32] = '\0';
+
+        lcd_draw_string(20, 150, line1, COLOR_GREEN, COLOR_BLACK, 2);
+        lcd_draw_string(20, 175, line2, COLOR_GREEN, COLOR_BLACK, 2);
+
+        lcd_draw_string(20, 220, "SAVE THIS KEY!", COLOR_RED, COLOR_BLACK, 2);
+        lcd_draw_string(20, 250, "TOUCH TO CONTINUE", COLOR_WHITE, COLOR_BLACK, 2);
+
+        printf("[key] PSK: %s\n", hex);
+        printf("[key] Touch screen to continue...\n");
+
+        // Wait for touch to acknowledge
+        sleep_ms(1000);  // debounce
+        while (true) {
+            touch_point_t tp = touch_read();
+            if (tp.pressed) break;
+            sleep_ms(50);
+        }
+        sleep_ms(300);  // debounce release
+    } else {
+        printf("[key] PSK loaded from flash\n");
+    }
+
+    net_core_set_psk(psk);
+
+    // ---- Normal boot screen ----
     lcd_clear(COLOR_BLACK);
     lcd_draw_string(60, 30, "WAL APPLIANCE", COLOR_CYAN, COLOR_BLACK, 4);
     lcd_draw_string(40, 90, "192 X 2KB SLOTS", COLOR_WHITE, COLOR_BLACK, 2);
