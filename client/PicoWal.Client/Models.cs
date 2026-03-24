@@ -42,7 +42,7 @@ public readonly record struct FieldChange(ushort FieldId, ReadOnlyMemory<byte> D
 /// </summary>
 public readonly record struct RecordDelta(
     ushort RecordTypeId,
-    ushort RecordId,
+    uint RecordId,
     DeltaOp Op,
     IReadOnlyList<FieldChange> Changes);
 
@@ -56,20 +56,25 @@ public enum DeltaOp : byte
 }
 
 /// <summary>
-/// Combines RecordTypeId and RecordId into a single uint32 key
-/// for the WAL's key_hash field.
+/// Combines RecordTypeId (14 bits, max 16383) and RecordId (18 bits, max 262143)
+/// into a single uint32 key for the WAL's key_hash field.
 /// </summary>
 public static class EntityKey
 {
+    public const int TypeBits = 14;
+    public const int IdBits = 18;
+    public const ushort MaxTypeId = (1 << TypeBits) - 1;   // 16383
+    public const uint MaxRecordId = (1 << IdBits) - 1;     // 262143
+
     /// <summary>
-    /// Pack [RecordTypeId:16][RecordId:16] → uint32.
+    /// Pack [RecordTypeId:14][RecordId:18] → uint32.
     /// </summary>
-    public static uint Pack(ushort recordTypeId, ushort recordId)
-        => ((uint)recordTypeId << 16) | recordId;
+    public static uint Pack(ushort recordTypeId, uint recordId)
+        => ((uint)(recordTypeId & MaxTypeId) << IdBits) | (recordId & MaxRecordId);
 
     /// <summary>
     /// Unpack uint32 → (RecordTypeId, RecordId).
     /// </summary>
-    public static (ushort RecordTypeId, ushort RecordId) Unpack(uint key)
-        => ((ushort)(key >> 16), (ushort)(key & 0xFFFF));
+    public static (ushort RecordTypeId, uint RecordId) Unpack(uint key)
+        => ((ushort)(key >> IdBits), key & MaxRecordId);
 }

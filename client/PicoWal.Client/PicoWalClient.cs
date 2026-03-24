@@ -228,7 +228,7 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
     /// Value = serialized FieldChange array.
     /// </summary>
     public Task<AppendResult> AppendAsync(
-        ushort recordTypeId, ushort recordId, FieldChange[] changes,
+        ushort recordTypeId, uint recordId, FieldChange[] changes,
         CancellationToken ct = default)
         => AppendAsync(recordTypeId, recordId, changes, DeltaOp.Set, ct);
 
@@ -236,7 +236,7 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
     /// Append field changes with explicit delta op.
     /// </summary>
     public Task<AppendResult> AppendAsync(
-        ushort recordTypeId, ushort recordId, FieldChange[] changes,
+        ushort recordTypeId, uint recordId, FieldChange[] changes,
         DeltaOp op, CancellationToken ct = default)
     {
         uint key = EntityKey.Pack(recordTypeId, recordId);
@@ -248,7 +248,7 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
     /// Delete a record (tombstone).
     /// </summary>
     public Task<AppendResult> DeleteAsync(
-        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+        ushort recordTypeId, uint recordId, CancellationToken ct = default)
     {
         uint key = EntityKey.Pack(recordTypeId, recordId);
         return AppendAsync(key, ReadOnlyMemory<byte>.Empty, DeltaOp.Delete, ct);
@@ -258,7 +258,7 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
     /// Read all deltas for a record and parse them into RecordDeltas.
     /// </summary>
     public async Task<IReadOnlyList<RecordDelta>> ReadRecordAsync(
-        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+        ushort recordTypeId, uint recordId, CancellationToken ct = default)
     {
         uint key = EntityKey.Pack(recordTypeId, recordId);
         var result = await ReadAsync(key, ct);
@@ -270,7 +270,7 @@ public sealed class PicoWalClient : IAsyncDisposable, IDisposable
     /// Returns the latest value for each field.
     /// </summary>
     public async Task<Dictionary<ushort, byte[]>> MaterializeAsync(
-        ushort recordTypeId, ushort recordId, CancellationToken ct = default)
+        ushort recordTypeId, uint recordId, CancellationToken ct = default)
     {
         var deltas = await ReadRecordAsync(recordTypeId, recordId, ct);
         var state = new Dictionary<ushort, byte[]>();
