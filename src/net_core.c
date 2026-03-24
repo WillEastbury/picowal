@@ -3,6 +3,7 @@
 #include "wal_fence.h"
 #include "wal_dma.h"
 #include "key_store.h"
+#include "httpd/web_server.h"
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
@@ -600,6 +601,9 @@ void net_core_run(wal_state_t *wal) {
         printf("[net] Failed to start listener\n");
         while (1) tight_loop_contents();
     }
+
+    // Start HTTP admin server on port 80
+    web_server_init(g_ctx.wal);
 
     // Main poll loop
     while (true) {

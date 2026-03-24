@@ -20,6 +20,7 @@ add_executable(${PROJECT_NAME}
     src/wal_dma.c
     src/key_store.c
     src/kv_flash.c
+    src/httpd/web_server.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
