@@ -88,6 +88,93 @@ Notes:
 - `char[]` remains supported for compatibility.
 - `utf-8` and `latin-1` are also accepted as aliases when creating field definitions.
 
+## Maintaining metadata
+
+Metadata is persisted in the appliance KV store and is maintained by ordinal.
+
+Practical rules:
+
+- treat ordinals as stable IDs
+- update names, types, and max lengths by writing the same ordinal again
+- do not casually renumber existing types or fields once data exists
+- prefer adding new ordinals over reusing old ones for different meanings
+
+### Type maintenance
+
+Create or update a type by writing its ordinal:
+
+```text
+POST /meta/types/{ordinal}
+Authorization: PSK <key>
+
+<type-name>
+```
+
+Inspect type metadata with:
+
+- `GET /meta/types`
+- `GET /meta/types/{ordinal}`
+- `GET /meta/types/by-name/{name}`
+
+Recommended process:
+
+1. choose a stable type ordinal
+2. assign a clear name
+3. keep that ordinal/name pairing stable over time
+
+### Field maintenance
+
+Create or update a field by writing its ordinal:
+
+```text
+POST /meta/fields/{ordinal}
+Authorization: PSK <key>
+
+NAME|TYPE|MAXLEN
+```
+
+Inspect field metadata with:
+
+- `GET /meta/fields`
+- `GET /meta/fields/{ordinal}`
+- `GET /meta/fields/by-name/{name}`
+
+Recommended process:
+
+1. choose a stable field ordinal
+2. assign a field name
+3. choose the field type
+4. set the maximum length for variable-width fields
+
+### Change management guidance
+
+Safe changes:
+
+- rename a type while keeping its ordinal
+- rename a field while keeping its ordinal
+- increase a field `MAXLEN`
+- add new type ordinals
+- add new field ordinals
+
+Higher-risk changes:
+
+- changing a field type for an ordinal that is already in use
+- shrinking `MAXLEN` below existing stored values
+- reusing an old ordinal for a new meaning
+
+For live systems, prefer schema evolution by adding new ordinals and migrating records intentionally.
+
+### GUI workflow
+
+Current `/gui` metadata workflow:
+
+1. load the PSK
+2. create or update metadata with the HTTP endpoints above
+3. click `LOAD METADATA` in `/gui`
+4. use the returned type/field definitions to save, load, and seed records
+
+At the moment, metadata maintenance is primarily endpoint-driven and GUI-assisted.
+
 ## Quick start
 
 ### 1. Get the PSK
