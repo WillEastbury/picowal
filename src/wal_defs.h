@@ -5,14 +5,14 @@
 #include <stdbool.h>
 
 // ============================================================
-// Buffer Pool: 192 slots × 2KB = 384KB SRAM
+// Buffer Pool: 32 slots × 2KB = 64KB SRAM
 // ============================================================
 
-#define SLOT_COUNT  192
+#define SLOT_COUNT  32
 #define SLOT_SIZE   2048
 
 // ============================================================
-// Request / Response Ring: 256 entries
+// Request / Response Ring: 32 entries
 //
 // Ownership protocol (memory fence discipline):
 //
@@ -32,12 +32,14 @@
 // req_id so Core 0 doesn't have to poll.
 // ============================================================
 
-#define REQ_RING_SIZE 256  // must be power of 2
+#define REQ_RING_SIZE 32  // must be power of 2
 
 // Request ops (stored in ring slot — 0 means empty/noop)
 #define WAL_OP_NOOP   0
 #define WAL_OP_APPEND 1
 #define WAL_OP_READ   2
+#define WAL_OP_KV_GET 3
+#define WAL_OP_KV_PUT 4
 
 typedef struct {
     volatile uint8_t  ready;     // ownership fence: 0=Core0, 1=Core1, 2=Core0
@@ -75,7 +77,7 @@ typedef struct {
 // WAL Delta Metadata
 // ============================================================
 
-#define WAL_MAX_ENTRIES 192
+#define WAL_MAX_ENTRIES 32
 
 typedef struct {
     uint32_t seq;
@@ -117,6 +119,10 @@ typedef struct {
     volatile uint32_t req_appends;
     volatile uint32_t req_reads;
     volatile uint32_t req_total;
+
+    // --- Liveness counters ---
+    volatile uint32_t core0_heartbeat;
+    volatile uint32_t core1_heartbeat;
 } wal_state_t;
 
 // ============================================================

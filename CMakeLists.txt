@@ -20,6 +20,7 @@ add_executable(${PROJECT_NAME}
     src/wal_dma.c
     src/key_store.c
     src/kv_flash.c
+    src/metadata_dict.c
     src/httpd/web_server.c
 )
 

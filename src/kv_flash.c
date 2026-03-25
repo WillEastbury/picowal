@@ -85,57 +85,106 @@ static const uint8_t *xip_ptr(uint32_t flash_off) {
     return (const uint8_t *)(XIP_BASE_ADDR + flash_off);
 }
 
-static bool encode_rle_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
-    uint16_t ip = 0, op = 0;
-    while (ip < in_len) {
-        uint8_t b = in[ip];
-        uint16_t run = 1;
-        while ((ip + run) < in_len && in[ip + run] == b && run < 255) run++;
+#define KV_LZ_WINDOW      512u
+#define KV_LZ_MIN_MATCH   3u
+#define KV_LZ_MAX_MATCH   18u
 
-        if (run >= 4) {
-            if ((uint32_t)op + 3u > *out_len) return false;
-            out[op++] = 0xFFu;
-            out[op++] = (uint8_t)run;
-            out[op++] = b;
-            ip = (uint16_t)(ip + run);
-        } else {
-            if (b == 0xFFu) {
-                if ((uint32_t)op + 2u > *out_len) return false;
-                out[op++] = 0xFFu;
-                out[op++] = 0x00u;
-            } else {
-                if ((uint32_t)op + 1u > *out_len) return false;
-                out[op++] = b;
+static bool encode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
+    uint16_t ip = 0;
+    uint16_t op = 0;
+    uint16_t lit_start = 0;
+    uint16_t lit_len = 0;
+
+    while (ip < in_len) {
+        uint16_t best_len = 0;
+        uint16_t best_off = 0;
+        uint16_t search = (ip < KV_LZ_WINDOW) ? ip : KV_LZ_WINDOW;
+
+        for (uint16_t off = 1; off <= search; off++) {
+            uint16_t match_len = 0;
+            while (match_len < KV_LZ_MAX_MATCH &&
+                   (uint32_t)ip + match_len < in_len &&
+                   in[ip - off + match_len] == in[ip + match_len]) {
+                match_len++;
             }
-            ip++;
+            if (match_len >= KV_LZ_MIN_MATCH && match_len > best_len) {
+                best_len = match_len;
+                best_off = off;
+                if (best_len == KV_LZ_MAX_MATCH) break;
+            }
+        }
+
+        if (best_len >= KV_LZ_MIN_MATCH) {
+            if (lit_len > 0) {
+                if ((uint32_t)op + 1u + lit_len > *out_len) return false;
+                out[op++] = (uint8_t)(lit_len - 1u);
+                memcpy(out + op, in + lit_start, lit_len);
+                op = (uint16_t)(op + lit_len);
+                lit_len = 0;
+            }
+
+            if ((uint32_t)op + 2u > *out_len) return false;
+            uint16_t offm1 = (uint16_t)(best_off - 1u);
+            out[op++] = (uint8_t)(0x80u | ((uint8_t)(best_len - KV_LZ_MIN_MATCH) << 4) | ((offm1 >> 8) & 0x0Fu));
+            out[op++] = (uint8_t)(offm1 & 0xFFu);
+            ip = (uint16_t)(ip + best_len);
+            lit_start = ip;
+            continue;
+        }
+
+        if (lit_len == 0) lit_start = ip;
+        lit_len++;
+        ip++;
+
+        if (lit_len == 128u) {
+            if ((uint32_t)op + 1u + lit_len > *out_len) return false;
+            out[op++] = (uint8_t)(lit_len - 1u);
+            memcpy(out + op, in + lit_start, lit_len);
+            op = (uint16_t)(op + lit_len);
+            lit_len = 0;
         }
     }
+
+    if (lit_len > 0) {
+        if ((uint32_t)op + 1u + lit_len > *out_len) return false;
+        out[op++] = (uint8_t)(lit_len - 1u);
+        memcpy(out + op, in + lit_start, lit_len);
+        op = (uint16_t)(op + lit_len);
+    }
+
     *out_len = op;
     return true;
 }
 
-static bool decode_rle_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
-    uint16_t ip = 0, op = 0;
+static bool decode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
+    uint16_t ip = 0;
+    uint16_t op = 0;
+
     while (ip < in_len) {
-        uint8_t b = in[ip++];
-        if (b != 0xFFu) {
-            if (op >= out_len) return false;
-            out[op++] = b;
-            continue;
-        }
-        if (ip >= in_len) return false;
         uint8_t tag = in[ip++];
-        if (tag == 0) {
-            if (op >= out_len) return false;
-            out[op++] = 0xFFu;
+        if ((tag & 0x80u) == 0) {
+            uint16_t lit_len = (uint16_t)tag + 1u;
+            if ((uint32_t)ip + lit_len > in_len) return false;
+            if ((uint32_t)op + lit_len > out_len) return false;
+            memcpy(out + op, in + ip, lit_len);
+            ip = (uint16_t)(ip + lit_len);
+            op = (uint16_t)(op + lit_len);
             continue;
         }
+
         if (ip >= in_len) return false;
-        uint8_t rb = in[ip++];
-        if ((uint32_t)op + tag > out_len) return false;
-        memset(out + op, rb, tag);
-        op = (uint16_t)(op + tag);
+        uint16_t match_len = (uint16_t)(((tag >> 4) & 0x07u) + KV_LZ_MIN_MATCH);
+        uint16_t off = (uint16_t)((((uint16_t)tag & 0x0Fu) << 8) | in[ip++]);
+        off = (uint16_t)(off + 1u);
+        if (off == 0 || off > op) return false;
+        if ((uint32_t)op + match_len > out_len) return false;
+
+        for (uint16_t i = 0; i < match_len; i++) {
+            out[op] = out[op - off];
+            op++;
+        }
     }
+
     return op == out_len;
 }
 
@@ -217,7 +266,6 @@ static bool ensure_page_ready(uint16_t page) {
     uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
     const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
     if (ph->magic == KV_PAGE_MAGIC) return true;
-    if (ph->magic != KV_FREE) return false;
 
     uint8_t hdrbuf[KV_PAGE_SIZE];
     memset(hdrbuf, 0xFF, sizeof(hdrbuf));
@@ -225,19 +273,26 @@ static bool ensure_page_ready(uint16_t page) {
     nh->magic = KV_PAGE_MAGIC;
 
     uint32_t ints = save_and_disable_interrupts();
+    if (ph->magic != KV_FREE) {
+        flash_range_erase(page_off, KV_SECTOR_SIZE);
+    }
     flash_range_program(page_off, hdrbuf, KV_PAGE_SIZE);
     restore_interrupts(ints);
     return true;
 }
 
 static bool select_append_page(uint16_t need) {
-    if ((uint32_t)g_write_off + need <= KV_SECTOR_SIZE) return true;
+    if ((uint32_t)g_write_off + need <= KV_SECTOR_SIZE) {
+        uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
+        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+        if (ph->magic == KV_PAGE_MAGIC || ph->magic == KV_FREE) return true;
+    }
 
     for (uint32_t i = 1; i <= KV_SECTOR_COUNT; i++) {
         uint16_t cand = (uint16_t)((g_write_page + i) % KV_SECTOR_COUNT);
         uint32_t page_off = KV_REGION_START + (uint32_t)cand * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic == KV_FREE) {
+        if (ph->magic == KV_FREE || ph->magic != KV_PAGE_MAGIC) {
             g_write_page = cand;
             g_write_off = sizeof(kv_page_hdr_t);
             return true;
@@ -319,7 +374,7 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
     uint8_t rec_flags = flags;
 
     uint16_t enc_cap = sizeof(enc);
-    if (raw_len > 0 && encode_rle_lite(raw, raw_len, enc, &enc_cap) && enc_cap < raw_len) {
+    if (raw_len > 0 && encode_lz_lite(raw, raw_len, enc, &enc_cap) && enc_cap < raw_len) {
         stored = enc;
         stored_len = enc_cap;
         rec_flags |= KV_REC_FLAG_COMP;
@@ -378,7 +433,7 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     if (len && *len < rp->hdr.raw_len) return false;
     if (out && len) {
         if (rp->hdr.flags & KV_REC_FLAG_COMP) {
-            if (!decode_rle_lite(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
+            if (!decode_lz_lite(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
         } else if (rp->hdr.raw_len > 0) {
             memcpy(out, stored, rp->hdr.raw_len);
         }
@@ -577,14 +632,30 @@ kv_stats_t kv_stats(void) {
     kv_stats_t s = {0, 0, 0, KV_SECTOR_COUNT};
     s.active = g_count;
 
-    uint32_t used_pages = 0;
+    bool live_pages[KV_SECTOR_COUNT];
+    memset(live_pages, 0, sizeof(live_pages));
+
+    uint32_t indexed_pages = 0;
+    for (uint32_t i = 0; i < g_count; i++) {
+        uint16_t page = 0;
+        unpack_loc(g_locs[i], &page, NULL, NULL);
+        if (page < KV_SECTOR_COUNT && !live_pages[page]) {
+            live_pages[page] = true;
+            indexed_pages++;
+        }
+    }
+
+    uint32_t header_pages = 0;
     for (uint16_t p = 0; p < KV_SECTOR_COUNT; p++) {
         uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic == KV_PAGE_MAGIC) used_pages++;
+        if (ph->magic != KV_PAGE_MAGIC) continue;
+        header_pages++;
     }
-    s.free = KV_SECTOR_COUNT - used_pages;
-    s.dead = (used_pages > s.active) ? (used_pages - s.active) : 0;
+
+    uint32_t used_pages = (header_pages > indexed_pages) ? header_pages : indexed_pages;
+    s.free = (used_pages <= KV_SECTOR_COUNT) ? (KV_SECTOR_COUNT - used_pages) : 0;
+    s.dead = (header_pages > indexed_pages) ? (header_pages - indexed_pages) : 0;
     return s;
 }
 

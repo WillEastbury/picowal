@@ -65,16 +65,18 @@ int main(void) {
         lcd_draw_string(20, 175, line2, COLOR_GREEN, COLOR_BLACK, 2);
 
         lcd_draw_string(20, 220, "SAVE THIS KEY!", COLOR_RED, COLOR_BLACK, 2);
-        lcd_draw_string(20, 250, "TOUCH TO CONTINUE", COLOR_WHITE, COLOR_BLACK, 2);
+        lcd_draw_string(20, 250, "TOUCH OR WAIT 10S", COLOR_WHITE, COLOR_BLACK, 2);
 
         printf("[key] PSK: %s\n", hex);
-        printf("[key] Touch screen to continue...\n");
+        printf("[key] Touch screen or wait 10s to continue...\n");
 
-        // Wait for touch to acknowledge
+        // Wait for touch to acknowledge, but continue automatically.
         sleep_ms(1000);  // debounce
+        absolute_time_t deadline = make_timeout_time_ms(10000);
         while (true) {
             touch_point_t tp = touch_read();
             if (tp.pressed) break;
+            if (absolute_time_diff_us(get_absolute_time(), deadline) <= 0) break;
             sleep_ms(50);
         }
         sleep_ms(300);  // debounce release

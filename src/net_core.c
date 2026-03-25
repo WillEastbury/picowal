@@ -5,12 +5,15 @@
 #include "key_store.h"
 #include "kv_flash.h"
 #include "ili9488.h"
+#include "xpt2046.h"
 #include "httpd/web_server.h"
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
+#include "cyw43.h"
 #include "pico/multicore.h"
 #include "pico/rand.h"
+#include "lwip/netif.h"
 #include "lwip/tcp.h"
 
 #include <string.h>
@@ -176,9 +179,20 @@ static void auth_send_challenge(net_ctx_t *ctx) {
 
 // Runtime PSK — loaded from flash at startup
 static uint8_t g_psk[PSK_LEN];
+static bool g_show_psk = false;
+static bool g_touch_was_pressed = false;
 
 void net_core_set_psk(const uint8_t psk[PSK_LEN]) {
     memcpy(g_psk, psk, PSK_LEN);
+}
+
+static void format_psk_hex(char out[PSK_LEN * 2 + 1]) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (uint32_t i = 0; i < PSK_LEN; i++) {
+        out[i * 2] = hex[g_psk[i] >> 4];
+        out[i * 2 + 1] = hex[g_psk[i] & 0x0F];
+    }
+    out[PSK_LEN * 2] = '\0';
 }
 
 static bool auth_verify_response(net_ctx_t *ctx, const uint8_t *response) {
@@ -577,9 +591,44 @@ static bool tcp_start_listen(net_ctx_t *ctx) {
 // ============================================================
 
 #define LCD_REFRESH_MS 30000u
+#define LCD_LIVE_MS 1000u
 #define LCD_MAX_TYPE_ROWS 8u
+#define HTTP_UI_QUIET_MS 150u
 
 static uint32_t g_lcd_last_ms = 0;
+static uint32_t g_lcd_live_last_ms = 0;
+
+static void lcd_refresh_live_strip(wal_state_t *wal) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((now - g_lcd_live_last_ms) < LCD_LIVE_MS && g_lcd_live_last_ms != 0) return;
+    g_lcd_live_last_ms = now;
+
+    uint32_t pending = 0;
+    uint32_t done = 0;
+    uint32_t empty = 0;
+    for (uint32_t i = 0; i < REQ_RING_SIZE; i++) {
+        uint8_t ready = wal->requests[i].ready;
+        if (ready == REQ_PENDING) pending++;
+        else if (ready == REQ_DONE) done++;
+        else empty++;
+    }
+
+    uint16_t c0 = (wal->core0_heartbeat & 0x10u) ? COLOR_GREEN : COLOR_BLUE;
+    uint16_t c1 = (wal->core1_heartbeat & 0x10u) ? COLOR_GREEN : COLOR_BLUE;
+
+    lcd_fill_rect(0, 298, LCD_WIDTH, 22, COLOR_BLACK);
+    lcd_fill_rect(10, 302, 14, 14, c0);
+    lcd_fill_rect(90, 302, 14, 14, c1);
+
+    char line[96];
+    lcd_draw_string(30, 302, "C0", COLOR_WHITE, COLOR_BLACK, 2);
+    lcd_draw_string(110, 302, "C1", COLOR_WHITE, COLOR_BLACK, 2);
+    snprintf(line, sizeof(line), "FIFO P:%lu D:%lu E:%lu",
+             (unsigned long)pending,
+             (unsigned long)done,
+             (unsigned long)empty);
+    lcd_draw_string(170, 302, line, COLOR_YELLOW, COLOR_BLACK, 2);
+}
 
 static void lcd_refresh_dashboard(wal_state_t *wal) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -592,47 +641,87 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
     uint32_t counts[LCD_MAX_TYPE_ROWS];
     uint32_t n_types = kv_type_counts(types, counts, LCD_MAX_TYPE_ROWS);
 
+    const char *ip_text = ip4addr_ntoa(netif_ip4_addr(netif_list));
     char line[64];
 
     lcd_clear(COLOR_BLACK);
     lcd_draw_string(20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
 
-    snprintf(line, sizeof(line), "Records: %lu", (unsigned long)records);
+    if (g_show_psk) {
+        char psk_hex[PSK_LEN * 2 + 1];
+        char line1[33];
+        char line2[33];
+        format_psk_hex(psk_hex);
+        memcpy(line1, psk_hex, 32);
+        line1[32] = '\0';
+        memcpy(line2, psk_hex + 32, 32);
+        line2[32] = '\0';
+
+        lcd_draw_string(20, 60, "PSK", COLOR_YELLOW, COLOR_BLACK, 3);
+        lcd_draw_string(20, 110, line1, COLOR_GREEN, COLOR_BLACK, 2);
+        lcd_draw_string(20, 140, line2, COLOR_GREEN, COLOR_BLACK, 2);
+        lcd_draw_string(20, 190, "TAP SCREEN TO HIDE", COLOR_WHITE, COLOR_BLACK, 2);
+        lcd_draw_string(20, 220, "HTTP AND WAL STAY ACTIVE", COLOR_WHITE, COLOR_BLACK, 2);
+        lcd_refresh_live_strip(wal);
+        return;
+    }
+
+    snprintf(line, sizeof(line), "HTTP: %s:80", ip_text);
     lcd_draw_string(20, 50, line, COLOR_WHITE, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "Pages Used: %lu  Free: %lu",
-             (unsigned long)(st.total - st.free), (unsigned long)st.free);
+    snprintf(line, sizeof(line), "RECORDS: %lu", (unsigned long)records);
     lcd_draw_string(20, 75, line, COLOR_WHITE, COLOR_BLACK, 2);
 
-    uint32_t usage_pct = 0;
-    if (st.total > 0) usage_pct = ((st.total - st.free) * 100u) / st.total;
-    snprintf(line, sizeof(line), "Usage: %lu%%  Dead Pages: %lu",
-             (unsigned long)usage_pct, (unsigned long)st.dead);
-    lcd_draw_string(20, 100, line, COLOR_YELLOW, COLOR_BLACK, 2);
+    uint32_t used_pages = st.total - st.free;
+    uint32_t used_bytes = used_pages * KV_SECTOR_SIZE;
+    uint32_t free_bytes = st.free * KV_SECTOR_SIZE;
+    snprintf(line, sizeof(line), "USED BYTES: %lu", (unsigned long)used_bytes);
+    lcd_draw_string(20, 100, line, COLOR_WHITE, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "Requests: %lu", (unsigned long)wal->req_total);
-    lcd_draw_string(20, 130, line, COLOR_GREEN, COLOR_BLACK, 2);
+    uint32_t usage_tenths = 0;
+    if (st.total > 0) usage_tenths = (used_pages * 1000u) / st.total;
+    snprintf(line, sizeof(line), "FREE BYTES: %lu", (unsigned long)free_bytes);
+    lcd_draw_string(20, 125, line, COLOR_YELLOW, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "Writes: %lu  Reads: %lu",
+    snprintf(line, sizeof(line), "USAGE: %lu.%lu%%  DEAD: %lu",
+             (unsigned long)(usage_tenths / 10u),
+             (unsigned long)(usage_tenths % 10u),
+             (unsigned long)st.dead);
+    lcd_draw_string(20, 150, line, COLOR_YELLOW, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "REQUESTS: %lu", (unsigned long)wal->req_total);
+    lcd_draw_string(20, 175, line, COLOR_GREEN, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "WRITES: %lu  READS: %lu",
              (unsigned long)wal->req_appends,
              (unsigned long)wal->req_reads);
-    lcd_draw_string(20, 155, line, COLOR_GREEN, COLOR_BLACK, 2);
+    lcd_draw_string(20, 200, line, COLOR_GREEN, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "Compactions: %lu  Reclaimed: %lu",
+    snprintf(line, sizeof(line), "COMPACTIONS: %lu  RECLAIMED: %lu",
              (unsigned long)wal->compactions,
              (unsigned long)wal->slots_reclaimed);
-    lcd_draw_string(20, 180, line, COLOR_GREEN, COLOR_BLACK, 2);
+    lcd_draw_string(20, 225, line, COLOR_GREEN, COLOR_BLACK, 2);
 
-    lcd_draw_string(20, 210, "TYPE     COUNT", COLOR_CYAN, COLOR_BLACK, 2);
-    uint16_t y = 233;
+    lcd_draw_string(20, 250, "TYPE     COUNT", COLOR_CYAN, COLOR_BLACK, 2);
+    uint16_t y = 273;
     for (uint32_t i = 0; i < n_types && i < LCD_MAX_TYPE_ROWS; i++) {
         snprintf(line, sizeof(line), "%-8u %lu", types[i], (unsigned long)counts[i]);
         lcd_draw_string(20, y, line, COLOR_WHITE, COLOR_BLACK, 2);
         y += 20;
     }
     if (n_types == 0) {
-        lcd_draw_string(20, y, "(empty)", COLOR_WHITE, COLOR_BLACK, 2);
+        lcd_draw_string(20, y, "(EMPTY)", COLOR_WHITE, COLOR_BLACK, 2);
     }
+    lcd_refresh_live_strip(wal);
+}
+
+static void lcd_handle_touch_toggle(void) {
+    touch_point_t tp = touch_read();
+    if (tp.pressed && !g_touch_was_pressed) {
+        g_show_psk = !g_show_psk;
+        g_lcd_last_ms = 0;
+    }
+    g_touch_was_pressed = tp.pressed;
 }
 
 // ============================================================
@@ -660,13 +749,9 @@ void net_core_run(wal_state_t *wal) {
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); sleep_ms(200);
         }
     }
-    printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
 
-    // Start TCP server
-    if (!tcp_start_listen(&g_ctx)) {
-        printf("[net] Failed to start listener\n");
-        while (1) tight_loop_contents();
-    }
+    printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
 
     // Start HTTP admin server on port 80 (shares the PSK)
     web_server_set_psk(g_psk);
@@ -674,11 +759,16 @@ void net_core_run(wal_state_t *wal) {
 
     // Main poll loop
     while (true) {
+        wal->core0_heartbeat++;
         cyw43_arch_poll();
         if (g_ctx.connected) {
             drain_responses(&g_ctx);
         }
-        lcd_refresh_dashboard(wal);
+        if (!web_server_recent_activity(HTTP_UI_QUIET_MS)) {
+            lcd_handle_touch_toggle();
+            lcd_refresh_live_strip(wal);
+            lcd_refresh_dashboard(wal);
+        }
         sleep_ms(1);
     }
 }

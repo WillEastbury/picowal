@@ -269,6 +269,49 @@ static void wal_do_read(uint8_t req_id) {
     multicore_fifo_push_blocking(fifo_signal(req_id));
 }
 
+static void wal_do_kv_get(uint8_t req_id) {
+    wal_request_t *req = &g_wal->requests[req_id];
+    wal_response_t *resp = &g_wal->responses[req_id];
+    memset(resp, 0, sizeof(*resp));
+
+    int rslot = wal_alloc_slot();
+    if (rslot < 0) {
+        resp->status = WAL_RESP_ERR;
+        wal_dmb();
+        req->ready = REQ_DONE;
+        multicore_fifo_push_blocking(fifo_signal(req_id));
+        return;
+    }
+
+    uint16_t len = SLOT_SIZE;
+    if (!kv_get_copy(req->key_hash, g_wal->data[rslot], &len, NULL)) {
+        g_wal->slot_free[rslot] = 1;
+        resp->status = WAL_RESP_ERR;
+    } else {
+        g_wal->slot_free[rslot] = 0;
+        resp->status = WAL_RESP_OK;
+        resp->result_slot = (uint8_t)rslot;
+        resp->result_len = len;
+    }
+
+    wal_dmb();
+    req->ready = REQ_DONE;
+    multicore_fifo_push_blocking(fifo_signal(req_id));
+}
+
+static void wal_do_kv_put(uint8_t req_id) {
+    wal_request_t *req = &g_wal->requests[req_id];
+    wal_response_t *resp = &g_wal->responses[req_id];
+    memset(resp, 0, sizeof(*resp));
+
+    resp->status = kv_put(req->key_hash, g_wal->data[req->slot], req->len) ? WAL_RESP_OK : WAL_RESP_ERR;
+    g_wal->slot_free[req->slot] = 1;
+
+    wal_dmb();
+    req->ready = REQ_DONE;
+    multicore_fifo_push_blocking(fifo_signal(req_id));
+}
+
 // ============================================================
 // Background Compaction (runs when FIFO is empty)
 // ============================================================
@@ -341,6 +384,8 @@ void wal_engine_run(wal_state_t *wal) {
            SLOT_COUNT, REQ_RING_SIZE);
 
     while (true) {
+        g_wal->core1_heartbeat++;
+
         // Drain all pending request signals (non-blocking check)
         bool did_work = false;
 
@@ -362,6 +407,16 @@ void wal_engine_run(wal_state_t *wal) {
             case WAL_OP_READ:
                 wal_do_read(req_id);
                 g_wal->req_reads++;
+                g_wal->req_total++;
+                break;
+            case WAL_OP_KV_GET:
+                wal_do_kv_get(req_id);
+                g_wal->req_reads++;
+                g_wal->req_total++;
+                break;
+            case WAL_OP_KV_PUT:
+                wal_do_kv_put(req_id);
+                g_wal->req_appends++;
                 g_wal->req_total++;
                 break;
             case WAL_OP_NOOP:
