@@ -166,12 +166,27 @@ For live systems, prefer schema evolution by adding new ordinals and migrating r
 
 ### GUI workflow
 
-Current `/gui` metadata workflow:
+Current GUI split:
+
+- `/gui` for record load/save and bulk seed
+- `/w/0/{id}` for metadata/object editing
+
+Current metadata workflow:
 
 1. load the PSK
-2. create or update metadata with the HTTP endpoints above
-3. click `LOAD METADATA` in `/gui`
-4. use the returned type/field definitions to save, load, and seed records
+2. open `/w/0/{id}` for the object/type you want to maintain
+3. create or update type metadata there
+4. create or update field metadata there
+5. click `LOAD METADATA` in `/gui`
+6. use the returned type/field definitions to save, load, and seed records
+
+The metadata editor page uses the trailing `{id}` from:
+
+```text
+/w/0/{id}
+```
+
+as the default type ordinal in the editor.
 
 At the moment, metadata maintenance is primarily endpoint-driven and GUI-assisted.
 
@@ -242,7 +257,7 @@ Authorization: PSK <key>
 when|isodatetime|20
 ```
 
-### 3. Open the GUI
+### 3. Open the GUIs
 
 Open:
 
@@ -256,6 +271,12 @@ Then:
 - set `TYPE` to `1`
 - set `ID` to `1`
 - click `LOAD METADATA`
+
+For metadata editing, also open:
+
+```text
+http://<pico-ip>/w/0/1
+```
 
 ### 4. Save your first binary record
 

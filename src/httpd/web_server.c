@@ -43,6 +43,7 @@ static const char GUI_HTML[] =
 "<meta name=viewport content='width=device-width,initial-scale=1'>"
 "<link rel=stylesheet href=/gui.css></head><body>"
 "<h1>Storage Appliance GUI</h1>"
+"<p><a href=/w/0/0>OPEN METADATA EDITOR</a></p>"
 "<label>PSK</label><input id=psk placeholder='64 hex chars'>"
 "<div class=row><div><label>TYPE</label><input id=type value=0></div><div><label>ID</label><input id=id value=0></div></div>"
 "<button id=loadBtn>LOAD</button><button id=saveBtn>SAVE</button>"
@@ -52,6 +53,24 @@ static const char GUI_HTML[] =
 "<div class=row3><div><label>RECORDS</label><input id=seedCount type=number min=1 max=5000 value=5000></div><div><label>START ID</label><input id=seedStartId type=number min=0 max=4194303 value=1></div><div><label>BATCH SIZE</label><input id=seedBatch type=number min=1 max=32 value=8></div></div>"
 "<button id=seedBtn>SEED FROM METADATA</button><pre id=status>READY</pre>"
 "<script src=/gui_codec.js></script><script src=/gui_app.js></script></body></html>";
+
+static const char META_EDITOR_HTML[] =
+"<!DOCTYPE html><html><head><meta charset=utf-8><title>Metadata Editor</title>"
+"<meta name=viewport content='width=device-width,initial-scale=1'>"
+"<link rel=stylesheet href=/gui.css></head><body>"
+"<h1>Metadata Editor</h1>"
+"<p><a href=/gui>BACK TO RECORD GUI</a></p>"
+"<label>PSK</label><input id=psk placeholder='64 hex chars'>"
+"<label>OBJECT ID</label><input id=objId readonly>"
+"<h2>Type</h2>"
+"<div class=row><div><label>TYPE ORDINAL</label><input id=typeOrd value=0></div><div><label>TYPE NAME</label><input id=typeName></div></div>"
+"<button id=saveTypeBtn>SAVE TYPE</button>"
+"<h2>Field</h2>"
+"<div class=row3><div><label>FIELD ORDINAL</label><input id=fieldOrd value=1></div><div><label>FIELD NAME</label><input id=fieldName></div><div><label>FIELD TYPE</label><input id=fieldType placeholder='utf8'></div></div>"
+"<div class=row><div><label>MAX LEN</label><input id=fieldMaxLen value=32></div><div></div></div>"
+"<button id=saveFieldBtn>SAVE FIELD</button>"
+"<h2>Metadata Snapshot</h2><button id=reloadMetaBtn>RELOAD</button><pre id=meta>NOT LOADED</pre><pre id=status>READY</pre>"
+"<script src=/meta_editor.js></script></body></html>";
 
 static const char GUI_CSS[] =
 "body{font:14px monospace;background:#111;color:#eee;padding:16px;max-width:900px}"
@@ -93,6 +112,17 @@ static const char GUI_APP_JS[] =
 "async function saveValue(){setStatus('SAVING...');try{if(!metaCache)await loadMetadata();const obj=JSON.parse($('value').value),body=window.guiCodec.encodeBinaryRecord(metaCache,obj),r=await fetch(path(),{method:'POST',headers:hdr({'Content-Type':'application/octet-stream'}),body});setStatus('SAVE '+r.status+' '+await r.text())}catch(e){setStatus('SAVE ERROR '+e)}}"
 "async function seedRecords(){if(!metaCache)await loadMetadata();if(!metaCache||!metaCache.types||metaCache.types.length===0){setStatus('SEED ERROR no metadata types');return}if(!metaCache.fields||metaCache.fields.length===0){setStatus('SEED ERROR no metadata fields');return}const total=Math.max(1,Math.min(parseInt($('seedCount').value||'5000',10),5000)),startId=Math.max(0,Math.min(parseInt($('seedStartId').value||'1',10),4194303)),batchSize=Math.max(1,Math.min(parseInt($('seedBatch').value||'8',10),32));let ok=0,fail=0;setStatus('SEEDING 0/'+total);for(let base=0;base<total;base+=batchSize){const jobs=[];for(let offset=0;offset<batchSize&&(base+offset)<total;offset++){const seq=base+offset,typeDef=metaCache.types[seq%metaCache.types.length],recordId=startId+seq,body=window.guiCodec.encodeBinaryRecord(metaCache,buildSeedObject(typeDef,metaCache.fields,seq,recordId));jobs.push(fetch('/0/'+typeDef.ordinal+'/'+recordId,{method:'POST',headers:hdr({'Content-Type':'application/octet-stream'}),body}).then(async r=>{if(!r.ok)throw new Error(await r.text());ok++}).catch(async()=>{fail++}))}await Promise.all(jobs);setStatus('SEEDING '+Math.min(base+batchSize,total)+'/'+total+' OK='+ok+' FAIL='+fail)}setStatus('SEED DONE OK='+ok+' FAIL='+fail)}"
 "$('loadBtn').addEventListener('click',loadValue);$('saveBtn').addEventListener('click',saveValue);$('metaBtn').addEventListener('click',loadMetadata);$('seedBtn').addEventListener('click',seedRecords)})();";
+
+static const char META_EDITOR_JS[] =
+"(()=>{const $=id=>document.getElementById(id);const objId=(location.pathname.split('/').pop()||'0').trim();$('objId').value=objId;$('typeOrd').value=objId;$('psk').value=localStorage.getItem('psk')||'';"
+"function hdr(){const p=$('psk').value.trim();localStorage.setItem('psk',p);return {'Authorization':'PSK '+p}}"
+"function setStatus(t){$('status').textContent=t}"
+"async function readText(r){const t=await r.text();if(!r.ok)throw new Error(r.status+' '+t);return t}"
+"async function readJson(r){return JSON.parse(await readText(r))}"
+"async function reload(){setStatus('LOADING METADATA...');try{const [typesRes,fieldsRes]=await Promise.all([fetch('/meta/types',{headers:hdr()}),fetch('/meta/fields',{headers:hdr()})]);const meta={types:(await readJson(typesRes)).types||[],fields:(await readJson(fieldsRes)).fields||[]};$('meta').textContent=JSON.stringify(meta,null,2);setStatus('METADATA LOADED')}catch(e){setStatus('LOAD ERROR '+e)}}"
+"async function saveType(){setStatus('SAVING TYPE...');try{const r=await fetch('/meta/types/'+$('typeOrd').value.trim(),{method:'POST',headers:hdr(),body:$('typeName').value.trim()});setStatus('TYPE '+r.status+' '+await r.text());await reload()}catch(e){setStatus('TYPE ERROR '+e)}}"
+"async function saveField(){setStatus('SAVING FIELD...');try{const body=$('fieldName').value.trim()+'|'+$('fieldType').value.trim()+'|'+$('fieldMaxLen').value.trim();const r=await fetch('/meta/fields/'+$('fieldOrd').value.trim(),{method:'POST',headers:hdr(),body});setStatus('FIELD '+r.status+' '+await r.text());await reload()}catch(e){setStatus('FIELD ERROR '+e)}}"
+"$('reloadMetaBtn').addEventListener('click',reload);$('saveTypeBtn').addEventListener('click',saveType);$('saveFieldBtn').addEventListener('click',saveField)})();";
 
 typedef struct {
     uint8_t buf[HTTP_BUF_SIZE];
@@ -713,6 +743,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         return;
     }
 
+    if (verb == VERB_GET && strncmp(path, "/w/0/", 5) == 0) {
+        (void)http_respond(pcb, "200 OK", "text/html", (const uint8_t *)META_EDITOR_HTML, sizeof(META_EDITOR_HTML) - 1);
+        return;
+    }
+
     if (verb == VERB_GET && strcmp(path, "/gui.css") == 0) {
         (void)http_respond(pcb, "200 OK", "text/css", (const uint8_t *)GUI_CSS, sizeof(GUI_CSS) - 1);
         return;
@@ -725,6 +760,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
     if (verb == VERB_GET && strcmp(path, "/gui_app.js") == 0) {
         (void)http_respond(pcb, "200 OK", "application/javascript", (const uint8_t *)GUI_APP_JS, sizeof(GUI_APP_JS) - 1);
+        return;
+    }
+
+    if (verb == VERB_GET && strcmp(path, "/meta_editor.js") == 0) {
+        (void)http_respond(pcb, "200 OK", "application/javascript", (const uint8_t *)META_EDITOR_JS, sizeof(META_EDITOR_JS) - 1);
         return;
     }
 
