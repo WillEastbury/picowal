@@ -3,6 +3,8 @@
 #include "wal_fence.h"
 #include "wal_dma.h"
 #include "key_store.h"
+#include "kv_flash.h"
+#include "ili9488.h"
 #include "httpd/web_server.h"
 
 #include "pico/stdlib.h"
@@ -570,6 +572,70 @@ static bool tcp_start_listen(net_ctx_t *ctx) {
 }
 
 // ============================================================
+// LCD Dashboard — refreshed every 30s from Core 0 poll loop
+// (LCD SPI must only be driven from Core 0)
+// ============================================================
+
+#define LCD_REFRESH_MS 30000u
+#define LCD_MAX_TYPE_ROWS 8u
+
+static uint32_t g_lcd_last_ms = 0;
+
+static void lcd_refresh_dashboard(wal_state_t *wal) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((now - g_lcd_last_ms) < LCD_REFRESH_MS && g_lcd_last_ms != 0) return;
+    g_lcd_last_ms = now;
+
+    kv_stats_t st = kv_stats();
+    uint32_t records = kv_record_count();
+    uint16_t types[LCD_MAX_TYPE_ROWS];
+    uint32_t counts[LCD_MAX_TYPE_ROWS];
+    uint32_t n_types = kv_type_counts(types, counts, LCD_MAX_TYPE_ROWS);
+
+    char line[64];
+
+    lcd_clear(COLOR_BLACK);
+    lcd_draw_string(20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
+
+    snprintf(line, sizeof(line), "Records: %lu", (unsigned long)records);
+    lcd_draw_string(20, 50, line, COLOR_WHITE, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "Pages Used: %lu  Free: %lu",
+             (unsigned long)(st.total - st.free), (unsigned long)st.free);
+    lcd_draw_string(20, 75, line, COLOR_WHITE, COLOR_BLACK, 2);
+
+    uint32_t usage_pct = 0;
+    if (st.total > 0) usage_pct = ((st.total - st.free) * 100u) / st.total;
+    snprintf(line, sizeof(line), "Usage: %lu%%  Dead Pages: %lu",
+             (unsigned long)usage_pct, (unsigned long)st.dead);
+    lcd_draw_string(20, 100, line, COLOR_YELLOW, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "Requests: %lu", (unsigned long)wal->req_total);
+    lcd_draw_string(20, 130, line, COLOR_GREEN, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "Writes: %lu  Reads: %lu",
+             (unsigned long)wal->req_appends,
+             (unsigned long)wal->req_reads);
+    lcd_draw_string(20, 155, line, COLOR_GREEN, COLOR_BLACK, 2);
+
+    snprintf(line, sizeof(line), "Compactions: %lu  Reclaimed: %lu",
+             (unsigned long)wal->compactions,
+             (unsigned long)wal->slots_reclaimed);
+    lcd_draw_string(20, 180, line, COLOR_GREEN, COLOR_BLACK, 2);
+
+    lcd_draw_string(20, 210, "TYPE     COUNT", COLOR_CYAN, COLOR_BLACK, 2);
+    uint16_t y = 233;
+    for (uint32_t i = 0; i < n_types && i < LCD_MAX_TYPE_ROWS; i++) {
+        snprintf(line, sizeof(line), "%-8u %lu", types[i], (unsigned long)counts[i]);
+        lcd_draw_string(20, y, line, COLOR_WHITE, COLOR_BLACK, 2);
+        y += 20;
+    }
+    if (n_types == 0) {
+        lcd_draw_string(20, y, "(empty)", COLOR_WHITE, COLOR_BLACK, 2);
+    }
+}
+
+// ============================================================
 // Core 0 Main Loop
 // ============================================================
 
@@ -612,6 +678,7 @@ void net_core_run(wal_state_t *wal) {
         if (g_ctx.connected) {
             drain_responses(&g_ctx);
         }
+        lcd_refresh_dashboard(wal);
         sleep_ms(1);
     }
 }

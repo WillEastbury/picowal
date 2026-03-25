@@ -2,7 +2,6 @@
 #include "wal_defs.h"
 #include "wal_fence.h"
 #include "kv_flash.h"
-#include "ili9488.h"
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -271,71 +270,6 @@ static void wal_do_read(uint8_t req_id) {
 }
 
 // ============================================================
-// LCD Dashboard — refreshed every 30s from Core 1 idle path
-// ============================================================
-
-#define LCD_REFRESH_MS 30000u
-#define LCD_MAX_TYPE_ROWS 8u
-
-static uint32_t g_lcd_last_ms = 0;
-
-static void lcd_refresh_dashboard(void) {
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if ((now - g_lcd_last_ms) < LCD_REFRESH_MS && g_lcd_last_ms != 0) return;
-    g_lcd_last_ms = now;
-
-    kv_stats_t st = kv_stats();
-    uint32_t records = kv_record_count();
-    uint16_t types[LCD_MAX_TYPE_ROWS];
-    uint32_t counts[LCD_MAX_TYPE_ROWS];
-    uint32_t n_types = kv_type_counts(types, counts, LCD_MAX_TYPE_ROWS);
-
-    char line[64];
-
-    lcd_clear(COLOR_BLACK);
-    lcd_draw_string(20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
-
-    // Records / pages / usage
-    snprintf(line, sizeof(line), "Records: %lu", (unsigned long)records);
-    lcd_draw_string(20, 50, line, COLOR_WHITE, COLOR_BLACK, 2);
-
-    snprintf(line, sizeof(line), "Pages: %lu used  %lu free",
-             (unsigned long)(st.total - st.free), (unsigned long)st.free);
-    lcd_draw_string(20, 75, line, COLOR_WHITE, COLOR_BLACK, 2);
-
-    uint32_t usage_pct = 0;
-    if (st.total > 0) usage_pct = ((st.total - st.free) * 100u) / st.total;
-    snprintf(line, sizeof(line), "Usage: %lu%%  Dead: %lu",
-             (unsigned long)usage_pct, (unsigned long)st.dead);
-    lcd_draw_string(20, 100, line, COLOR_YELLOW, COLOR_BLACK, 2);
-
-    // Request counters
-    snprintf(line, sizeof(line), "Reqs: %lu  W:%lu  R:%lu",
-             (unsigned long)g_wal->req_total,
-             (unsigned long)g_wal->req_appends,
-             (unsigned long)g_wal->req_reads);
-    lcd_draw_string(20, 130, line, COLOR_GREEN, COLOR_BLACK, 2);
-
-    // Compaction stats
-    snprintf(line, sizeof(line), "Compact: %lu  Reclaim: %lu",
-             (unsigned long)g_wal->compactions,
-             (unsigned long)g_wal->slots_reclaimed);
-    lcd_draw_string(20, 155, line, COLOR_GREEN, COLOR_BLACK, 2);
-
-    // Object types table
-    lcd_draw_string(20, 185, "TYPE   COUNT", COLOR_CYAN, COLOR_BLACK, 2);
-    uint16_t y = 210;
-    for (uint32_t i = 0; i < n_types && i < LCD_MAX_TYPE_ROWS; i++) {
-        snprintf(line, sizeof(line), "%-6u %lu", types[i], (unsigned long)counts[i]);
-        lcd_draw_string(20, y, line, COLOR_WHITE, COLOR_BLACK, 2);
-        y += 20;
-    }
-    if (n_types == 0) {
-        lcd_draw_string(20, y, "(empty)", COLOR_WHITE, COLOR_BLACK, 2);
-    }
-}
-
-// ============================================================
 // Background Compaction (runs when FIFO is empty)
 // ============================================================
 
@@ -441,11 +375,10 @@ void wal_engine_run(wal_state_t *wal) {
             }
         }
 
-        // Background compaction + LCD refresh when no FIFO work
+        // Background compaction when no FIFO work
         if (!did_work) {
             wal_compact_step();
             kv_compact_step();
-            lcd_refresh_dashboard();
         }
 
         tight_loop_contents();
