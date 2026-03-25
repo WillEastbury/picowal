@@ -21,6 +21,8 @@ The old raw WAL TCP listener on port `8001` is no longer used.
 ### Appliance
 
 - `GET /`
+  - Returns a small HTML landing page with links to status, key, record editor, and metadata editor
+- `GET /status`
   - Returns plain-text appliance stats
 - `GET /gui`
   - Serves the browser GUI shell
@@ -37,6 +39,12 @@ The old raw WAL TCP listener on port `8001` is no longer used.
   - Reads a record body
 - `POST /0/{type}/{id}`
   - Writes a record body
+- `GET /w/{type}/`
+  - Returns a plain-text list of all instance IDs for that type
+  - First line is `COUNT=<n>`, followed by one ID per line
+- `GET /Ids/{type}/`
+  - Returns a packed little-endian `uint16[]` ID list as `application/octet-stream`
+  - Fails if an ID does not fit in `uint16`
 
 These routes require:
 
@@ -170,6 +178,7 @@ Current GUI split:
 
 - `/gui` for record load/save and bulk seed
 - `/w/0/{id}` for metadata/object editing
+- `/` for quick navigation to appliance pages
 
 Current metadata workflow:
 
@@ -334,6 +343,7 @@ The GUI supports:
 - metadata-aware binary encode/decode
 - bulk record seeding from metadata
 - split HTML/CSS/JS assets for smaller downloads on-device
+- plain `field=value` editing instead of JSON blobs
 
 ### GUI save/load format
 
@@ -359,21 +369,19 @@ Design goals:
 - ordinal-based lookup instead of field names in stored records
 - fixed-width values stay inline in the field table
 - variable-width values use `offset + length` into the heap
-- only fields present in the JSON editor are emitted
+- only fields present in the editor are emitted
 
-The GUI decodes records back into JSON using the field metadata dictionary.
+The GUI decodes records back into `field=value` lines using the field metadata dictionary.
 
-### JSON editor shape
+### Value editor shape
 
-In `/gui`, the `VALUE` box is a JSON object keyed by field name. Example:
+In `/gui`, the `VALUE` box is a plain text list of `field=value` pairs, one per line. Example:
 
-```json
-{
-  "enabled": true,
-  "title": "Hello",
-  "count": 42,
-  "when": "2026-03-25T16:00:00Z"
-}
+```text
+enabled=true
+title=Hello
+count=42
+when=2026-03-25T16:00:00Z
 ```
 
 On save:
@@ -384,7 +392,7 @@ On save:
 On load:
 
 - the binary record is decoded using field ordinals and metadata
-- the JSON editor is repopulated with typed values
+- the value editor is repopulated with decoded `field=value` lines
 
 ### Bulk seeding
 

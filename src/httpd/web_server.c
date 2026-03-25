@@ -47,7 +47,7 @@ static const char GUI_HTML[] =
 "<label>PSK</label><input id=psk placeholder='64 hex chars'>"
 "<div class=row><div><label>TYPE</label><input id=type value=0></div><div><label>ID</label><input id=id value=0></div></div>"
 "<button id=loadBtn>LOAD</button><button id=saveBtn>SAVE</button>"
-"<label>VALUE (JSON object keyed by field name)</label><textarea id=value>{\n  \"example\": true\n}</textarea>"
+"<label>VALUE (field=value lines)</label><textarea id=value>enabled=true\nname=cafe-01\ncount=42\n</textarea>"
 "<h2>Metadata</h2><button id=metaBtn>LOAD METADATA</button><pre id=meta>NOT LOADED</pre>"
 "<h2>Seed Data</h2>"
 "<div class=row3><div><label>RECORDS</label><input id=seedCount type=number min=1 max=5000 value=5000></div><div><label>START ID</label><input id=seedStartId type=number min=0 max=4194303 value=1></div><div><label>BATCH SIZE</label><input id=seedBatch type=number min=1 max=32 value=8></div></div>"
@@ -66,7 +66,7 @@ static const char META_EDITOR_HTML[] =
 "<div class=row><div><label>TYPE ORDINAL</label><input id=typeOrd value=0></div><div><label>TYPE NAME</label><input id=typeName></div></div>"
 "<button id=saveTypeBtn>SAVE TYPE</button>"
 "<h2>Field</h2>"
-"<div class=row3><div><label>FIELD ORDINAL</label><input id=fieldOrd value=1></div><div><label>FIELD NAME</label><input id=fieldName></div><div><label>FIELD TYPE</label><input id=fieldType placeholder='utf8'></div></div>"
+"<div class=row3><div><label>FIELD ORDINAL</label><input id=fieldOrd value=1></div><div><label>FIELD NAME</label><input id=fieldName></div><div><label>FIELD TYPE</label><select id=fieldType></select></div></div>"
 "<div class=row><div><label>MAX LEN</label><input id=fieldMaxLen value=32></div><div></div></div>"
 "<button id=saveFieldBtn>SAVE FIELD</button>"
 "<h2>Metadata Snapshot</h2><button id=reloadMetaBtn>RELOAD</button><pre id=meta>NOT LOADED</pre><pre id=status>READY</pre>"
@@ -94,7 +94,7 @@ static const char GUI_CODEC_JS[] =
 "function encodeFieldValue(field,value){const safe=(value===undefined||value===null)?'':value;switch(field.type){case 'bool':return Uint8Array.of(value?1:0);case 'char':return Uint8Array.of(String(value||' ').charCodeAt(0)&255);case 'char[]':return latin1Encode(safe,field.max_len||255);case 'utf8':return utf8enc.encode(clipText(safe,field.max_len||255));case 'latin1':return latin1Encode(safe,field.max_len||255);case 'byte':return Uint8Array.of((Number(value)||0)&255);case 'byte[]':{const arr=Array.isArray(value)?value:[],len=Math.min(arr.length,field.max_len||255),out=new Uint8Array(len);for(let i=0;i<len;i++)out[i]=(Number(arr[i])||0)&255;return out}case 'uint8':return Uint8Array.of((Number(value)||0)&255);case 'int8':return Uint8Array.of((Number(value)||0)&255);case 'int16':return i16le(value);case 'int32':return i32le(value);case 'uint16':return u16le((Number(value)||0)&65535);case 'uint32':return u32le((Number(value)||0)>>>0);case 'isodate':case 'isotime':case 'isodatetime':return utf8enc.encode(clipText(safe,field.max_len||32));default:return utf8enc.encode(String(safe))}}"
 "function decodeFieldValue(field,bytes){const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);switch(field.type){case 'bool':return bytes.length?bytes[0]!==0:false;case 'char':return bytes.length?String.fromCharCode(bytes[0]):'';case 'char[]':return latin1Decode(bytes);case 'utf8':return utf8dec.decode(bytes);case 'latin1':return latin1Decode(bytes);case 'byte':return bytes.length?bytes[0]:0;case 'byte[]':return Array.from(bytes);case 'uint8':return bytes.length?bytes[0]:0;case 'int8':return bytes.length?dv.getInt8(0):0;case 'int16':return bytes.length>=2?dv.getInt16(0,true):0;case 'int32':return bytes.length>=4?dv.getInt32(0,true):0;case 'uint16':return bytes.length>=2?dv.getUint16(0,true):0;case 'uint32':return bytes.length>=4?dv.getUint32(0,true):0;case 'isodate':case 'isotime':case 'isodatetime':return utf8dec.decode(bytes);default:return Array.from(bytes)}}"
 "function encodeBinaryRecord(meta,obj){const entries=[],heap=[];let heapLen=0;for(const field of meta.fields){if(!Object.prototype.hasOwnProperty.call(obj,field.name))continue;const payload=encodeFieldValue(field,obj[field.name]),heapField=isHeapField(field),flags=heapField?FLAG_HEAP:0,data=heapField?heapLen:inlineU32(payload);entries.push(concatBytes([u16le(field.ordinal),Uint8Array.of(field.field_type),Uint8Array.of(flags),u16le(payload.length),u32le(data)]));if(heapField){heap.push(payload);heapLen+=payload.length}}return concatBytes([Uint8Array.from(MAGIC),u16le(entries.length),u16le(heapLen),...entries,...heap])}"
-"function decodeBinaryRecord(meta,bytes){if(bytes.length<8||bytes[0]!==MAGIC[0]||bytes[1]!==MAGIC[1]||bytes[2]!==MAGIC[2]||bytes[3]!==MAGIC[3])return null;const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let off=4;const count=dv.getUint16(off,true);off+=2;const heapLen=dv.getUint16(off,true);off+=2;const heapBase=off+count*10;if(heapBase+heapLen>bytes.length)throw new Error('truncated heap');const obj={};for(let i=0;i<count;i++){if(off+10>bytes.length)throw new Error('truncated record');const ord=dv.getUint16(off,true);off+=2;const storedType=bytes[off++],flags=bytes[off++],len=dv.getUint16(off,true);off+=2;const data=dv.getUint32(off,true);off+=4;const field=meta.fieldsByOrdinal[ord],payload=(flags&FLAG_HEAP)?bytes.slice(heapBase+data,heapBase+data+len):inlineBytes(len,data);if((flags&FLAG_HEAP)&&(data+len>heapLen))throw new Error('heap range out of bounds');if(!field)continue;obj[field.name]=decodeFieldValue(field,payload);obj['_'+field.name+'_ordinal']=ord;obj['_'+field.name+'_heap']=(flags&FLAG_HEAP)!==0;if(field.field_type!==storedType)obj['_'+field.name+'_type_mismatch']={stored:storedType,meta:field.field_type}}return obj}"
+"function decodeBinaryRecord(meta,bytes){if(bytes.length<8||bytes[0]!==MAGIC[0]||bytes[1]!==MAGIC[1]||bytes[2]!==MAGIC[2]||bytes[3]!==MAGIC[3])return null;const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let off=4;const count=dv.getUint16(off,true);off+=2;const heapLen=dv.getUint16(off,true);off+=2;const heapBase=off+count*10;if(heapBase+heapLen>bytes.length)throw new Error('truncated heap');const obj={};for(let i=0;i<count;i++){if(off+10>bytes.length)throw new Error('truncated record');const ord=dv.getUint16(off,true);off+=2;const storedType=bytes[off++],flags=bytes[off++],len=dv.getUint16(off,true);off+=2;const data=dv.getUint32(off,true);off+=4;const field=meta.fieldsByOrdinal[ord],payload=(flags&FLAG_HEAP)?bytes.slice(heapBase+data,heapBase+data+len):inlineBytes(len,data);if((flags&FLAG_HEAP)&&(data+len>heapLen))throw new Error('heap range out of bounds');if(!field)continue;if(field.field_type!==storedType)continue;obj[field.name]=decodeFieldValue(field,payload)}return obj}"
 "window.guiCodec={utf8dec,encodeBinaryRecord,decodeBinaryRecord,clipText}})();";
 
 static const char GUI_APP_JS[] =
@@ -104,25 +104,32 @@ static const char GUI_APP_JS[] =
 "async function readText(r){const t=await r.text();if(!r.ok)throw new Error(r.status+' '+t);return t}"
 "async function readBytes(r){const b=new Uint8Array(await r.arrayBuffer());if(!r.ok)throw new Error(r.status+' '+window.guiCodec.utf8dec.decode(b));return b}"
 "async function readJson(r){return JSON.parse(await readText(r))}function setStatus(t){$('status').textContent=t}"
+"function formatValue(v){return Array.isArray(v)?v.join(','):String(v)}"
+"function parseValue(field,raw){switch(field.type){case 'bool': return /^true$/i.test(raw);case 'byte[]': return raw.trim()===''?[]:raw.split(',').map(v=>parseInt(v.trim(),10)||0);case 'byte':case 'uint8':case 'int8':case 'int16':case 'int32':case 'uint16':case 'uint32': return parseInt(raw.trim(),10)||0;default: return raw}}"
+"function formatRecord(obj){return Object.keys(obj).sort().map(k=>k+'='+formatValue(obj[k])).join('\\n')}"
+"function parseRecord(text){const obj={};for(const line of text.split(/\\r?\\n/)){const trimmed=line.trim();if(!trimmed)continue;const eq=trimmed.indexOf('=');if(eq<=0)continue;const key=trimmed.slice(0,eq).trim();const raw=trimmed.slice(eq+1);const field=metaCache.fieldsByName[key];if(!field)continue;obj[key]=parseValue(field,raw)}return obj}"
+"function formatMeta(meta){const lines=['TYPES'];for(const t of meta.types)lines.push(t.ordinal+'='+t.name);lines.push('','FIELDS');for(const f of meta.fields)lines.push(f.ordinal+'='+f.name+'|'+f.type+'|'+f.max_len);return lines.join('\\n')}"
 "function normalizeMeta(){if(!metaCache)return;metaCache.fields=(metaCache.fields||[]).slice().sort((a,b)=>a.ordinal-b.ordinal);metaCache.fieldsByName={};metaCache.fieldsByOrdinal={};for(const f of metaCache.fields){metaCache.fieldsByName[f.name]=f;metaCache.fieldsByOrdinal[f.ordinal]=f}}"
 "function makeFieldValue(field,seq,typeOrd,recordId){const base=field.name+'_'+typeOrd+'_'+recordId+'_'+seq;switch(field.type){case 'bool':return((seq+typeOrd+recordId)&1)===0;case 'char':return String.fromCharCode(65+((seq+typeOrd+recordId)%26));case 'char[]':return window.guiCodec.clipText(base,field.max_len||24);case 'utf8':return window.guiCodec.clipText('utf8_\\u00e9_\\u03a9_'+base,field.max_len||24);case 'latin1':return window.guiCodec.clipText('\\u00c4\\u00d6\\u00dc_'+base,field.max_len||24);case 'byte':return(seq+recordId+typeOrd)&255;case 'byte[]':{const len=Math.max(1,Math.min(field.max_len||8,16)),out=[];for(let i=0;i<len;i++)out.push((seq+recordId+typeOrd+i)&255);return out}case 'uint8':return(seq+recordId+typeOrd)&255;case 'int8':return((seq+recordId+typeOrd)%127)-63;case 'int16':return((seq*31+recordId+typeOrd)%32767)-16384;case 'int32':return((seq*1009)+recordId+typeOrd)|0;case 'uint16':return(seq*17+recordId+typeOrd)&65535;case 'uint32':return((seq*4099)+recordId+typeOrd)>>>0;case 'isodate':return new Date(Date.UTC(2026,0,1+((seq+typeOrd)%28))).toISOString().slice(0,10);case 'isotime':return new Date(Date.UTC(2026,0,1,(seq+typeOrd)%24,(recordId+seq)%60,(seq*7)%60)).toISOString().slice(11,19);case 'isodatetime':return new Date(Date.UTC(2026,0,1+((seq+typeOrd)%28),(seq+typeOrd)%24,(recordId+seq)%60,(seq*7)%60)).toISOString().slice(0,19)+'Z';default:return window.guiCodec.clipText(base,24)}}"
 "function buildSeedObject(typeDef,fields,seq,recordId){const obj={};for(const field of fields)obj[field.name]=makeFieldValue(field,seq,typeDef.ordinal,recordId);return obj}"
-"async function loadMetadata(){setStatus('LOADING METADATA...');try{const [typesRes,fieldsRes]=await Promise.all([fetch('/meta/types',{headers:hdr()}),fetch('/meta/fields',{headers:hdr()})]);const types=await readJson(typesRes),fields=await readJson(fieldsRes);metaCache={types:types.types||[],fields:fields.fields||[]};normalizeMeta();$('meta').textContent=JSON.stringify(metaCache,null,2);setStatus('METADATA '+metaCache.types.length+' TYPES, '+metaCache.fields.length+' FIELDS')}catch(e){setStatus('METADATA ERROR '+e)}}"
-"async function loadValue(){setStatus('LOADING...');try{if(!metaCache)await loadMetadata();const r=await fetch(path(),{headers:hdr()}),bytes=await readBytes(r),obj=window.guiCodec.decodeBinaryRecord(metaCache,bytes);if(obj){$('value').value=JSON.stringify(obj,null,2);setStatus('LOAD 200 BINARY '+bytes.length+'B')}else{$('value').value=window.guiCodec.utf8dec.decode(bytes);setStatus('LOAD 200 RAW '+bytes.length+'B')}}catch(e){setStatus('LOAD ERROR '+e)}}"
-"async function saveValue(){setStatus('SAVING...');try{if(!metaCache)await loadMetadata();const obj=JSON.parse($('value').value),body=window.guiCodec.encodeBinaryRecord(metaCache,obj),r=await fetch(path(),{method:'POST',headers:hdr({'Content-Type':'application/octet-stream'}),body});setStatus('SAVE '+r.status+' '+await r.text())}catch(e){setStatus('SAVE ERROR '+e)}}"
+"async function loadMetadata(){setStatus('LOADING METADATA...');try{const [typesRes,fieldsRes]=await Promise.all([fetch('/meta/types',{headers:hdr()}),fetch('/meta/fields',{headers:hdr()})]);const types=await readJson(typesRes),fields=await readJson(fieldsRes);metaCache={types:types.types||[],fields:fields.fields||[]};normalizeMeta();$('meta').textContent=formatMeta(metaCache);setStatus('METADATA '+metaCache.types.length+' TYPES, '+metaCache.fields.length+' FIELDS')}catch(e){setStatus('METADATA ERROR '+e)}}"
+"async function loadValue(){setStatus('LOADING...');try{if(!metaCache)await loadMetadata();const r=await fetch(path(),{headers:hdr()}),bytes=await readBytes(r),obj=window.guiCodec.decodeBinaryRecord(metaCache,bytes);if(obj){$('value').value=formatRecord(obj);setStatus('LOAD 200 BINARY '+bytes.length+'B')}else{$('value').value=window.guiCodec.utf8dec.decode(bytes);setStatus('LOAD 200 RAW '+bytes.length+'B')}}catch(e){setStatus('LOAD ERROR '+e)}}"
+"async function saveValue(){setStatus('SAVING...');try{if(!metaCache)await loadMetadata();const obj=parseRecord($('value').value),body=window.guiCodec.encodeBinaryRecord(metaCache,obj),r=await fetch(path(),{method:'POST',headers:hdr({'Content-Type':'application/octet-stream'}),body});setStatus('SAVE '+r.status+' '+await r.text())}catch(e){setStatus('SAVE ERROR '+e)}}"
 "async function seedRecords(){if(!metaCache)await loadMetadata();if(!metaCache||!metaCache.types||metaCache.types.length===0){setStatus('SEED ERROR no metadata types');return}if(!metaCache.fields||metaCache.fields.length===0){setStatus('SEED ERROR no metadata fields');return}const total=Math.max(1,Math.min(parseInt($('seedCount').value||'5000',10),5000)),startId=Math.max(0,Math.min(parseInt($('seedStartId').value||'1',10),4194303)),batchSize=Math.max(1,Math.min(parseInt($('seedBatch').value||'8',10),32));let ok=0,fail=0;setStatus('SEEDING 0/'+total);for(let base=0;base<total;base+=batchSize){const jobs=[];for(let offset=0;offset<batchSize&&(base+offset)<total;offset++){const seq=base+offset,typeDef=metaCache.types[seq%metaCache.types.length],recordId=startId+seq,body=window.guiCodec.encodeBinaryRecord(metaCache,buildSeedObject(typeDef,metaCache.fields,seq,recordId));jobs.push(fetch('/0/'+typeDef.ordinal+'/'+recordId,{method:'POST',headers:hdr({'Content-Type':'application/octet-stream'}),body}).then(async r=>{if(!r.ok)throw new Error(await r.text());ok++}).catch(async()=>{fail++}))}await Promise.all(jobs);setStatus('SEEDING '+Math.min(base+batchSize,total)+'/'+total+' OK='+ok+' FAIL='+fail)}setStatus('SEED DONE OK='+ok+' FAIL='+fail)}"
 "$('loadBtn').addEventListener('click',loadValue);$('saveBtn').addEventListener('click',saveValue);$('metaBtn').addEventListener('click',loadMetadata);$('seedBtn').addEventListener('click',seedRecords)})();";
 
 static const char META_EDITOR_JS[] =
 "(()=>{const $=id=>document.getElementById(id);const objId=(location.pathname.split('/').pop()||'0').trim();$('objId').value=objId;$('typeOrd').value=objId;$('psk').value=localStorage.getItem('psk')||'';"
+"const fieldTypes=[['bool','Boolean',0],['char','Character',1],['char[]','Latin text (legacy)',2],['byte','Byte',3],['byte[]','Binary blob',4],['uint8','Unsigned 8-bit integer',5],['int8','Signed 8-bit integer',6],['int16','Signed 16-bit integer',7],['int32','Signed 32-bit integer',8],['uint16','Unsigned 16-bit integer',9],['uint32','Unsigned 32-bit integer',10],['isodate','ISO date',11],['isotime','ISO time',12],['isodatetime','ISO datetime',13],['utf8','UTF-8 string',14],['latin1','Latin-1 string',15]];"
 "function hdr(){const p=$('psk').value.trim();localStorage.setItem('psk',p);return {'Authorization':'PSK '+p}}"
 "function setStatus(t){$('status').textContent=t}"
 "async function readText(r){const t=await r.text();if(!r.ok)throw new Error(r.status+' '+t);return t}"
 "async function readJson(r){return JSON.parse(await readText(r))}"
-"async function reload(){setStatus('LOADING METADATA...');try{const [typesRes,fieldsRes]=await Promise.all([fetch('/meta/types',{headers:hdr()}),fetch('/meta/fields',{headers:hdr()})]);const meta={types:(await readJson(typesRes)).types||[],fields:(await readJson(fieldsRes)).fields||[]};$('meta').textContent=JSON.stringify(meta,null,2);setStatus('METADATA LOADED')}catch(e){setStatus('LOAD ERROR '+e)}}"
+"function initFieldTypeSelect(){const sel=$('fieldType');sel.innerHTML='';for(const [value,label,ord] of fieldTypes){const opt=document.createElement('option');opt.value=value;opt.textContent=label+' ('+value+', '+ord+')';sel.appendChild(opt)}sel.value='utf8'}"
+"async function reload(){setStatus('LOADING METADATA...');try{const [typesRes,fieldsRes]=await Promise.all([fetch('/meta/types',{headers:hdr()}),fetch('/meta/fields',{headers:hdr()})]);const meta={types:(await readJson(typesRes)).types||[],fields:(await readJson(fieldsRes)).fields||[]};const lines=['TYPES'];for(const t of meta.types)lines.push(t.ordinal+'='+t.name);lines.push('','FIELDS');for(const f of meta.fields)lines.push(f.ordinal+'='+f.name+'|'+f.type+'|'+f.max_len);$('meta').textContent=lines.join('\\n');setStatus('METADATA LOADED')}catch(e){setStatus('LOAD ERROR '+e)}}"
 "async function saveType(){setStatus('SAVING TYPE...');try{const r=await fetch('/meta/types/'+$('typeOrd').value.trim(),{method:'POST',headers:hdr(),body:$('typeName').value.trim()});setStatus('TYPE '+r.status+' '+await r.text());await reload()}catch(e){setStatus('TYPE ERROR '+e)}}"
 "async function saveField(){setStatus('SAVING FIELD...');try{const body=$('fieldName').value.trim()+'|'+$('fieldType').value.trim()+'|'+$('fieldMaxLen').value.trim();const r=await fetch('/meta/fields/'+$('fieldOrd').value.trim(),{method:'POST',headers:hdr(),body});setStatus('FIELD '+r.status+' '+await r.text());await reload()}catch(e){setStatus('FIELD ERROR '+e)}}"
-"$('reloadMetaBtn').addEventListener('click',reload);$('saveTypeBtn').addEventListener('click',saveType);$('saveFieldBtn').addEventListener('click',saveField)})();";
+"initFieldTypeSelect();$('reloadMetaBtn').addEventListener('click',reload);$('saveTypeBtn').addEventListener('click',saveType);$('saveFieldBtn').addEventListener('click',saveField)})();";
 
 typedef struct {
     uint8_t buf[HTTP_BUF_SIZE];
@@ -269,6 +276,42 @@ static void http_root_stats(struct tcp_pcb *pcb) {
     }
 
     (void)http_respond(pcb, "200 OK", "text/plain", (const uint8_t *)body, (uint16_t)n);
+}
+
+static void http_root_page(struct tcp_pcb *pcb) {
+    kv_stats_t st = kv_stats();
+    uint32_t records = kv_record_count();
+    const char *ip_text = netif_list ? ip4addr_ntoa(netif_ip4_addr(netif_list)) : "0.0.0.0";
+    uint32_t used_pages = st.total - st.free;
+    uint32_t used_bytes = used_pages * KV_SECTOR_SIZE;
+    uint32_t free_bytes = st.free * KV_SECTOR_SIZE;
+
+    char body[1024];
+    int n = snprintf(body, sizeof(body),
+                     "<!DOCTYPE html><html><head><meta charset=utf-8><title>Storage Appliance</title>"
+                     "<meta name=viewport content='width=device-width,initial-scale=1'></head><body>"
+                     "<h1>Storage Appliance</h1>"
+                     "<p><a href=/status>STATUS</a></p>"
+                     "<p><a href=/key>KEY</a></p>"
+                     "<p><a href=/gui>RECORD EDITOR</a></p>"
+                     "<p><a href=/w/0/0>METADATA EDITOR</a></p>"
+                     "<pre>"
+                     "HTTP: %s:80\n"
+                     "RECORDS: %lu\n"
+                     "USED BYTES: %lu\n"
+                     "FREE BYTES: %lu\n"
+                     "</pre>"
+                     "</body></html>",
+                     ip_text,
+                     (unsigned long)records,
+                     (unsigned long)used_bytes,
+                     (unsigned long)free_bytes);
+    if (n <= 0 || n >= (int)sizeof(body)) {
+        http_json(pcb, "500 Internal Server Error", "{\"error\":\"root page overflow\"}");
+        return;
+    }
+
+    (void)http_respond(pcb, "200 OK", "text/html", (const uint8_t *)body, (uint16_t)n);
 }
 
 // ============================================================
@@ -774,9 +817,82 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         return;
     }
 
-    if (verb == VERB_GET && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+    if (verb == VERB_GET && strcmp(path, "/status") == 0) {
         http_root_stats(pcb);
         return;
+    }
+
+    if (verb == VERB_GET && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+        http_root_page(pcb);
+        return;
+    }
+
+    if (verb == VERB_GET && path[0] == '/' && path[1] == 'I' && path[2] == 'd' && path[3] == 's' && path[4] == '/') {
+        if (!check_auth(req)) {
+            http_json(pcb, "401 Unauthorized", "{\"error\":\"invalid PSK\"}");
+            return;
+        }
+
+        unsigned int type_val = 0;
+        if (sscanf(path, "/Ids/%u/", &type_val) == 1) {
+            uint32_t keys[2049];
+            uint8_t body[4096];
+            uint32_t count = kv_range(((uint32_t)(type_val & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 2049u);
+            if (count > 2048u) {
+                http_json(pcb, "413 Payload Too Large", "{\"error\":\"too many ids\"}");
+                return;
+            }
+
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t id_val = keys[i] & 0x3FFFFFu;
+                if (id_val > 0xFFFFu) {
+                    http_json(pcb, "422 Unprocessable Entity", "{\"error\":\"id exceeds uint16\"}");
+                    return;
+                }
+                body[i * 2u] = (uint8_t)(id_val & 0xFFu);
+                body[i * 2u + 1u] = (uint8_t)((id_val >> 8) & 0xFFu);
+            }
+
+            (void)http_respond(pcb, "200 OK", "application/octet-stream", body, (uint16_t)(count * 2u));
+            return;
+        }
+    }
+
+    if (verb == VERB_GET && path[0] == '/' && path[1] == 'w' && path[2] == '/') {
+        if (!check_auth(req)) {
+            http_json(pcb, "401 Unauthorized", "{\"error\":\"invalid PSK\"}");
+            return;
+        }
+
+        unsigned int type_val = 0;
+        if (sscanf(path, "/w/%u/", &type_val) == 1) {
+            uint32_t keys[257];
+            uint32_t count = kv_range(((uint32_t)(type_val & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 257u);
+            if (count > 256u) {
+                http_json(pcb, "413 Payload Too Large", "{\"error\":\"too many instances\"}");
+                return;
+            }
+
+            char body[4096];
+            int n = snprintf(body, sizeof(body), "COUNT=%lu\n", (unsigned long)count);
+            if (n < 0 || n >= (int)sizeof(body)) {
+                http_json(pcb, "500 Internal Server Error", "{\"error\":\"instance list overflow\"}");
+                return;
+            }
+
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t id_val = keys[i] & 0x3FFFFFu;
+                int wrote = snprintf(body + n, sizeof(body) - (size_t)n, "%lu\n", (unsigned long)id_val);
+                if (wrote < 0 || wrote >= (int)(sizeof(body) - (size_t)n)) {
+                    http_json(pcb, "500 Internal Server Error", "{\"error\":\"instance list overflow\"}");
+                    return;
+                }
+                n += wrote;
+            }
+
+            (void)http_respond(pcb, "200 OK", "text/plain", (const uint8_t *)body, (uint16_t)n);
+            return;
+        }
     }
 
     // ---- Route: /0/{type}/{id} → KV operations (auth required) ----
