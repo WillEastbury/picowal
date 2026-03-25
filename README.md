@@ -8,9 +8,9 @@ The current firmware exposes a small authenticated HTTP API, an on-device metada
 
 - Wi-Fi STA mode on the Pico 2W
 - HTTP service on port `80`
-- LCD dashboard with live appliance stats
+- Minimal LCD status panel refreshed every `10s`
 - PSK-based authentication for record and metadata writes
-- Flash-backed KV record store with per-record compression
+- Flash-backed KV record store with record-level compression for larger payloads
 - On-device metadata dictionaries for record types and fields
 - Browser GUI at `/gui`
 
@@ -23,7 +23,10 @@ The old raw WAL TCP listener on port `8001` is no longer used.
 - `GET /`
   - Returns plain-text appliance stats
 - `GET /gui`
-  - Serves the browser GUI
+  - Serves the browser GUI shell
+- `GET /gui.css`
+- `GET /gui_codec.js`
+- `GET /gui_app.js`
 - `GET /key`
   - Returns the current PSK as hex
   - Restricted to clients on the same subnet
@@ -222,6 +225,7 @@ The GUI supports:
 - metadata loading from `/meta/types` and `/meta/fields`
 - metadata-aware binary encode/decode
 - bulk record seeding from metadata
+- split HTML/CSS/JS assets for smaller downloads on-device
 
 ### GUI save/load format
 
@@ -291,13 +295,15 @@ Seeding behavior:
 - 4 KB pages
 - Multiple records can share a page
 - In-memory sorted key index
-- Record-level compression on saved values
+- Record-level compression on larger saved values
 - Background reclaim of dead pages
+- Opportunistic prewarming of the next append page to flatten write latency
 
 Current storage stats shown on the LCD and `/` include:
 
 - record count
-- used bytes
+- LCD: boot state, `IP:port`, record count, space state, free bytes, used pages
+- HTTP `/`: used bytes
 - free bytes
 - usage percentage
 - dead pages

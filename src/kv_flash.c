@@ -88,6 +88,7 @@ static const uint8_t *xip_ptr(uint32_t flash_off) {
 #define KV_LZ_WINDOW      512u
 #define KV_LZ_MIN_MATCH   3u
 #define KV_LZ_MAX_MATCH   18u
+#define KV_COMPRESS_MIN   256u
 
 static bool encode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
     uint16_t ip = 0;
@@ -281,6 +282,39 @@ static bool ensure_page_ready(uint16_t page) {
     return true;
 }
 
+static bool page_is_prepared_empty(uint16_t page) {
+    uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
+    const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+    if (ph->magic != KV_PAGE_MAGIC) return false;
+    const uint32_t *probe = (const uint32_t *)xip_ptr(page_off + sizeof(kv_page_hdr_t));
+    return *probe == 0xFFFFFFFFu;
+}
+
+static bool find_next_append_page(uint16_t start_page, uint16_t *out_page) {
+    for (uint32_t i = 1; i <= KV_SECTOR_COUNT; i++) {
+        uint16_t cand = (uint16_t)((start_page + i) % KV_SECTOR_COUNT);
+        uint32_t page_off = KV_REGION_START + (uint32_t)cand * KV_SECTOR_SIZE;
+        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+        if (ph->magic == KV_FREE || ph->magic != KV_PAGE_MAGIC || page_is_prepared_empty(cand)) {
+            *out_page = cand;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void prewarm_next_append_page(void) {
+    uint16_t next_page = 0;
+    if (!find_next_append_page(g_write_page, &next_page)) return;
+    if (next_page == g_write_page) return;
+
+    uint32_t page_off = KV_REGION_START + (uint32_t)next_page * KV_SECTOR_SIZE;
+    const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
+    if (ph->magic == KV_FREE) {
+        (void)ensure_page_ready(next_page);
+    }
+}
+
 static bool select_append_page(uint16_t need) {
     if ((uint32_t)g_write_off + need <= KV_SECTOR_SIZE) {
         uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
@@ -288,17 +322,11 @@ static bool select_append_page(uint16_t need) {
         if (ph->magic == KV_PAGE_MAGIC || ph->magic == KV_FREE) return true;
     }
 
-    for (uint32_t i = 1; i <= KV_SECTOR_COUNT; i++) {
-        uint16_t cand = (uint16_t)((g_write_page + i) % KV_SECTOR_COUNT);
-        uint32_t page_off = KV_REGION_START + (uint32_t)cand * KV_SECTOR_SIZE;
-        const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic == KV_FREE || ph->magic != KV_PAGE_MAGIC) {
-            g_write_page = cand;
-            g_write_off = sizeof(kv_page_hdr_t);
-            return true;
-        }
-    }
-    return false;
+    uint16_t cand = 0;
+    if (!find_next_append_page(g_write_page, &cand)) return false;
+    g_write_page = cand;
+    g_write_off = sizeof(kv_page_hdr_t);
+    return true;
 }
 
 static void deadlog_reset_page(uint16_t p) {
@@ -374,7 +402,9 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
     uint8_t rec_flags = flags;
 
     uint16_t enc_cap = sizeof(enc);
-    if (raw_len > 0 && encode_lz_lite(raw, raw_len, enc, &enc_cap) && enc_cap < raw_len) {
+    if (raw_len >= KV_COMPRESS_MIN &&
+        encode_lz_lite(raw, raw_len, enc, &enc_cap) &&
+        enc_cap < raw_len) {
         stored = enc;
         stored_len = enc_cap;
         rec_flags |= KV_REC_FLAG_COMP;
@@ -410,6 +440,7 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
 
     if (out_loc) *out_loc = pack_loc(g_write_page, g_write_off, rec_len_aligned);
     g_write_off = (uint16_t)(g_write_off + rec_len_aligned);
+    prewarm_next_append_page();
     return true;
 }
 
