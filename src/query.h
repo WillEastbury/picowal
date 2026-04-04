@@ -50,16 +50,24 @@ typedef enum {
 
 // Parsed WHERE clause
 typedef struct {
-    char      field[32];
+    char      pack[32];      // optional pack prefix (e.g. "days" in "days.Name")
+    char      field[32];     // field name
     query_op_t op;
-    char      value[64];     // raw value string (or comma-sep for IN/NI)
+    char      value[64];
 } query_where_t;
+
+// Parsed SELECT field
+typedef struct {
+    char      pack[32];      // optional pack prefix
+    char      field[32];
+} query_select_t;
 
 // Parsed query
 typedef struct {
-    char      select_fields[QUERY_MAX_SELECT][32];
+    query_select_t select_fields[QUERY_MAX_SELECT];
     uint8_t   select_count;
-    char      from_deck[32];
+    char      from_decks[4][32];   // up to 4 FROM packs
+    uint8_t   from_count;
     query_where_t where[QUERY_MAX_WHERE];
     uint8_t   where_count;
     bool      valid;
@@ -68,8 +76,11 @@ typedef struct {
 // Parse a query string (multi-line, \n separated)
 query_t query_parse(const char *text);
 
-// Execute a parsed query. Writes JSON result to buf.
-// Returns bytes written.
-int query_execute(const query_t *q, char *buf, int buf_size);
+// Execute a parsed query. Writes pipe-delimited rows to buf.
+// Sets *pack_name and *count. Returns bytes written to buf.
+// Each row: field1|field2|field3\r\n
+// Pipes in data escaped as \|, CR/LF escaped as \r \n
+int query_execute(const query_t *q, char *buf, int buf_size,
+                  const char **pack_name, int *count);
 
 #endif

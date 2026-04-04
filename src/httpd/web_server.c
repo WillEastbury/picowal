@@ -1804,6 +1804,17 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         *p1 = '\0'; *p2 = '\0';
         char *fname = fbuf; char *ftname = p1 + 1; uint8_t fmaxlen = (uint8_t)atoi(p2 + 1);
 
+        // Validate field name: A-Za-z0-9_+-*/.  only
+        for (char *v = fname; *v; v++) {
+            char c = *v;
+            if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '+' ||
+                  c == '-' || c == '*' || c == '/' || c == '.')) {
+                http_json(pcb, "400 Bad Request", "{\"error\":\"field name: A-Za-z0-9_+-*/. only\"}");
+                return;
+            }
+        }
+
         // Resolve type code
         uint8_t ftype_code = 255;
         if (!metadata_field_type_parse(ftname, &ftype_code)) {
@@ -2621,9 +2632,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
         query_t q = query_parse(qbuf);
         char result[4096];
-        int rlen = query_execute(&q, result, sizeof(result));
-        http_respond(pcb, "200 OK", "application/json",
-                    (const uint8_t *)result, (uint16_t)rlen);
+        const char *pack_name = "";
+        int result_count = 0;
+        int rlen = query_execute(&q, result, sizeof(result), &pack_name, &result_count);
+
+        // Pack name and count in headers, body is pipe-delimited rows
+        char extra_hdrs[128];
+        snprintf(extra_hdrs, sizeof(extra_hdrs),
+                 "X-Pack: %s\r\nX-Count: %d\r\n", pack_name, result_count);
+        http_respond_with_headers(pcb, "200 OK", "text/plain",
+                                  extra_hdrs, (const uint8_t *)result, (uint16_t)rlen);
         return;
     }
 
@@ -2641,16 +2659,19 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "<textarea id=qtext style='width:100%;min-height:120px;font-family:monospace'"
             " placeholder='S:name,code\nF:countries\nW:code|IN|GB,US,DE'>S:name,code\nF:countries</textarea>"
             "<button onclick=runQuery() style='margin-top:8px;width:100%'>Run Query</button>"
-            "<pre id=qresult style='margin-top:8px;max-height:400px;overflow-y:auto'>Results will appear here</pre>"
+            "<div id=qhdrs style='margin-top:8px;font-size:12px;color:#888'></div>"
+            "<pre id=qresult style='margin-top:4px;max-height:400px;overflow-y:auto'>Results will appear here</pre>"
             "</div>"
             "<script>"
             "function runQuery(){"
             "var q=document.getElementById('qtext').value;"
             "fetch('/query',{method:'POST',credentials:'same-origin',body:q})"
-            ".then(function(r){return r.text()})"
-            ".then(function(t){"
-            "try{document.getElementById('qresult').textContent=JSON.stringify(JSON.parse(t),null,2)}"
-            "catch(e){document.getElementById('qresult').textContent=t}})}"
+            ".then(function(r){"
+            "var pack=r.headers.get('X-Pack')||'?';"
+            "var count=r.headers.get('X-Count')||'?';"
+            "document.getElementById('qhdrs').textContent='Pack: '+pack+' | Count: '+count;"
+            "return r.text()})"
+            ".then(function(t){document.getElementById('qresult').textContent=t})}"
             "</script>";
 
         http_page_req(pcb, req, qpage, sizeof(qpage) - 1);

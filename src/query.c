@@ -25,43 +25,85 @@ static query_op_t parse_op(const char *s) {
     return QOP_EQ;
 }
 
+
+// Split "pack.field" into pack and field parts. If no dot, pack is empty.
+static void split_dotted(const char *s, char *pack, int pack_max, char *field, int field_max) {
+    const char *dot = strchr(s, '.');
+    if (dot) {
+        int plen = (int)(dot - s); if (plen >= pack_max) plen = pack_max - 1;
+        memcpy(pack, s, plen); pack[plen] = '\0';
+        strncpy(field, dot + 1, field_max - 1); field[field_max - 1] = '\0';
+    } else {
+        pack[0] = '\0';
+        strncpy(field, s, field_max - 1); field[field_max - 1] = '\0';
+    }
+}
 query_t query_parse(const char *text) {
     query_t q;
     memset(&q, 0, sizeof(q));
     q.valid = false;
 
+    // Pre-split into lines (max 16)
     char buf[512];
-    if (strlen(text) >= sizeof(buf)) return q;
-    strncpy(buf, text, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    uint16_t tlen = (uint16_t)strlen(text);
+    if (tlen >= sizeof(buf)) return q;
+    memcpy(buf, text, tlen + 1);
+    // Sanitize: replace \r with \n, strip all other control chars
+    for (uint16_t i = 0; i < tlen; i++) {
+        char c = buf[i];
+        if (c == '\r') buf[i] = '\n';
+        else if (c < 0x20 && c != '\n') buf[i] = ' ';
+    }
 
-    char *line = strtok(buf, "\n\r");
-    while (line) {
-        // Skip whitespace
+    char *lines[16];
+    int nlines = 0;
+    char *p = buf;
+    while (*p && nlines < 16) {
+        while (*p == '\r' || *p == '\n') *p++ = '\0';
+        if (!*p) break;
+        lines[nlines++] = p;
+        while (*p && *p != '\r' && *p != '\n') p++;
+    }
+
+    // Process each line
+    for (int li = 0; li < nlines; li++) {
+        char *line = lines[li];
         while (*line == ' ') line++;
 
         if (line[0] == 'S' && line[1] == ':') {
-            // S:field1,field2,field3
-            char *fields = line + 2;
-            char *f = strtok(fields, ",");
-            while (f && q.select_count < QUERY_MAX_SELECT) {
-                while (*f == ' ') f++;
-                char *end = f + strlen(f) - 1;
-                while (end > f && *end == ' ') *end-- = '\0';
-                strncpy(q.select_fields[q.select_count], f, 31);
+            char *f = line + 2;
+            while (*f && q.select_count < QUERY_MAX_SELECT) {
+                while (*f == ' ' || *f == ',') f++;
+                if (!*f) break;
+                char *end = f;
+                while (*end && *end != ',') end++;
+                char saved = *end; *end = '\0';
+                // Trim trailing spaces
+                char *te = end - 1;
+                while (te > f && *te == ' ') *te-- = '\0';
+                split_dotted(f, q.select_fields[q.select_count].pack, 32,
+                             q.select_fields[q.select_count].field, 32);
                 q.select_count++;
-                f = strtok(NULL, ",");
+                *end = saved;
+                f = (*end) ? end + 1 : end;
             }
         } else if (line[0] == 'F' && line[1] == ':') {
-            // F:deckname
-            char *name = line + 2;
-            while (*name == ' ') name++;
-            strncpy(q.from_deck, name, 31);
-            // Trim trailing space
-            char *end = q.from_deck + strlen(q.from_deck) - 1;
-            while (end > q.from_deck && *end == ' ') *end-- = '\0';
+            char *f = line + 2;
+            while (*f && q.from_count < 4) {
+                while (*f == ' ' || *f == ',') f++;
+                if (!*f) break;
+                char *end = f;
+                while (*end && *end != ',') end++;
+                char saved = *end; *end = '\0';
+                char *te = end - 1;
+                while (te > f && *te == ' ') *te-- = '\0';
+                strncpy(q.from_decks[q.from_count], f, 31);
+                q.from_decks[q.from_count][31] = '\0';
+                q.from_count++;
+                *end = saved;
+                f = (*end) ? end + 1 : end;
+            }
         } else if (line[0] == 'W' && line[1] == ':' && q.where_count < QUERY_MAX_WHERE) {
-            // W:field|op|value
             char *rest = line + 2;
             char *p1 = strchr(rest, '|');
             if (p1) {
@@ -69,27 +111,20 @@ query_t query_parse(const char *text) {
                 char *p2 = strchr(p1 + 1, '|');
                 if (p2) {
                     *p2 = '\0';
-                    // rest = field, p1+1 = op, p2+1 = value
-                    char *field = rest;
-                    while (*field == ' ') field++;
-                    strncpy(q.where[q.where_count].field, field, 31);
-
-                    char *op_str = p1 + 1;
-                    while (*op_str == ' ') op_str++;
+                    char *field = rest; while (*field == ' ') field++;
+                    split_dotted(field, q.where[q.where_count].pack, 32,
+                                 q.where[q.where_count].field, 32);
+                    char *op_str = p1 + 1; while (*op_str == ' ') op_str++;
                     q.where[q.where_count].op = parse_op(op_str);
-
-                    char *val = p2 + 1;
-                    while (*val == ' ') val++;
+                    char *val = p2 + 1; while (*val == ' ') val++;
                     strncpy(q.where[q.where_count].value, val, 63);
-
                     q.where_count++;
                 }
             }
         }
-        line = strtok(NULL, "\n\r");
     }
 
-    q.valid = (q.from_deck[0] != '\0');
+    q.valid = (q.from_count > 0);
     return q;
 }
 
@@ -230,19 +265,37 @@ static bool is_numeric_type(uint8_t tc) {
 // Execute query — scan pack, filter, project
 // ============================================================
 
-int query_execute(const query_t *q, char *buf, int buf_size) {
-    if (!q->valid) return snprintf(buf, buf_size, "{\"error\":\"invalid query\"}");
+// Escape a string for pipe-delimited output: | → \|, \r → \r, \n → \n
+static int escape_field(char *out, int max, const char *val) {
+    int n = 0;
+    for (const char *p = val; *p && n < max - 2; p++) {
+        if (*p == '|') { out[n++] = '\\'; out[n++] = '|'; }
+        else if (*p == '\r') { out[n++] = '\\'; out[n++] = 'r'; }
+        else if (*p == '\n') { out[n++] = '\\'; out[n++] = 'n'; }
+        else if (*p == '\\') { out[n++] = '\\'; out[n++] = '\\'; }
+        else out[n++] = *p;
+    }
+    out[n] = '\0';
+    return n;
+}
 
-    // Resolve pack name → pack ordinal
-    // Scan pack 0 schema cards to find the pack
+static const char *g_result_pack = "";
+
+int query_execute(const query_t *q, char *buf, int buf_size,
+                  const char **pack_name, int *count) {
+    *count = 0;
+    *pack_name = "";
+
+    if (!q->valid) {
+        return snprintf(buf, buf_size, "error: invalid query\r\n");
+    }
+
+    // Resolve pack name → ordinal + schema
     uint32_t keys[64];
     uint32_t pack_count = kv_range(0, 0xFFC00000u, keys, NULL, 64);
     int16_t pack_ord = -1;
-
-    // Schema field info for the target pack
-    uint8_t field_ords[32], field_types[32];
+    uint8_t field_ords[32], field_types[32], field_count = 0;
     char field_names[32][32];
-    uint8_t field_count = 0;
 
     for (uint32_t i = 0; i < pack_count; i++) {
         uint32_t pord = keys[i] & 0x3FFFFF;
@@ -250,7 +303,6 @@ int query_execute(const query_t *q, char *buf, int buf_size) {
         if (!kv_get_copy(keys[i], sbuf, &slen, NULL)) continue;
         if (slen < 6 || sbuf[0] != 0x7D || sbuf[1] != 0xCA) continue;
 
-        // Parse pack name from schema card
         char pname[32] = "";
         uint16_t off = 4;
         while (off + 1 < slen) {
@@ -262,15 +314,15 @@ int query_execute(const query_t *q, char *buf, int buf_size) {
             }
             if (ord == 1 && flen >= 1) field_count = sbuf[off];
             if (ord == 2) {
-                for (uint8_t fi = 0; fi < field_count && fi < 32 && fi * 3 + 2 < flen; fi++) {
-                    field_ords[fi] = sbuf[off + fi * 3] & 0x1F;
-                    field_types[fi] = sbuf[off + fi * 3 + 1];
+                for (uint8_t fi = 0; fi < field_count && fi < 32 && fi*3+2 < flen; fi++) {
+                    field_ords[fi] = sbuf[off + fi*3] & 0x1F;
+                    field_types[fi] = sbuf[off + fi*3 + 1];
                 }
             }
             if (ord == 5 && flen > 0) {
                 uint8_t ni = 0; uint16_t si = 0;
                 for (uint16_t j = 0; j < flen && ni < field_count && ni < 32; j++) {
-                    if (sbuf[off + j] == '\0') {
+                    if (sbuf[off+j] == '\0') {
                         uint8_t len = (uint8_t)(j - si); if (len > 31) len = 31;
                         memcpy(field_names[ni], sbuf + off + si, len);
                         field_names[ni][len] = '\0';
@@ -281,113 +333,96 @@ int query_execute(const query_t *q, char *buf, int buf_size) {
             off += flen;
         }
 
-        // Case-insensitive match
         bool match = true;
-        for (int ci = 0; pname[ci] && q->from_deck[ci]; ci++) {
-            char a = pname[ci], b = q->from_deck[ci];
+        for (int ci = 0; pname[ci] && q->from_decks[0][ci]; ci++) {
+            char a = pname[ci], b = q->from_decks[0][ci];
             if (a >= 'A' && a <= 'Z') a += 32;
             if (b >= 'A' && b <= 'Z') b += 32;
             if (a != b) { match = false; break; }
         }
-        if (match && strlen(pname) == strlen(q->from_deck)) {
+        if (match && strlen(pname) == strlen(q->from_decks[0])) {
             pack_ord = (int16_t)pord;
+            // Store pack name for header
+            static char s_pname[32];
+            strncpy(s_pname, pname, 31); s_pname[31] = '\0';
+            g_result_pack = s_pname;
+            *pack_name = g_result_pack;
             break;
         }
     }
 
     if (pack_ord < 0)
-        return snprintf(buf, buf_size, "{\"error\":\"pack '%s' not found\"}", q->from_deck);
+        return snprintf(buf, buf_size, "error: pack '%s' not found\r\n", q->from_decks[0]);
 
-    // Resolve WHERE field names to ordinals + types
-    uint8_t w_ords[QUERY_MAX_WHERE];
-    uint8_t w_types[QUERY_MAX_WHERE];
+    // Resolve WHERE fields
+    uint8_t w_ords[QUERY_MAX_WHERE], w_types[QUERY_MAX_WHERE];
     for (uint8_t wi = 0; wi < q->where_count; wi++) {
         w_ords[wi] = 0xFF;
         for (uint8_t fi = 0; fi < field_count; fi++) {
             if (strcmp(q->where[wi].field, field_names[fi]) == 0) {
-                w_ords[wi] = field_ords[fi];
-                w_types[wi] = field_types[fi];
-                break;
+                w_ords[wi] = field_ords[fi]; w_types[wi] = field_types[fi]; break;
             }
         }
     }
 
-    // Resolve SELECT field names to ordinals
-    uint8_t s_ords[QUERY_MAX_SELECT];
-    uint8_t s_types[QUERY_MAX_SELECT];
+    // Resolve SELECT fields
+    uint8_t s_ords[QUERY_MAX_SELECT], s_types[QUERY_MAX_SELECT];
     uint8_t s_count = q->select_count;
+    const char *s_names[QUERY_MAX_SELECT];
     if (s_count == 0) {
-        // Select all fields
         s_count = field_count;
         for (uint8_t i = 0; i < field_count && i < QUERY_MAX_SELECT; i++) {
-            s_ords[i] = field_ords[i];
-            s_types[i] = field_types[i];
+            s_ords[i] = field_ords[i]; s_types[i] = field_types[i]; s_names[i] = field_names[i];
         }
     } else {
         for (uint8_t si = 0; si < s_count; si++) {
-            s_ords[si] = 0xFF;
+            s_ords[si] = 0xFF; s_names[si] = q->select_fields[si].field;
             for (uint8_t fi = 0; fi < field_count; fi++) {
-                if (strcmp(q->select_fields[si], field_names[fi]) == 0) {
-                    s_ords[si] = field_ords[fi];
-                    s_types[si] = field_types[fi];
-                    break;
+                if (strcmp(q->select_fields[si].field, field_names[fi]) == 0) {
+                    s_ords[si] = field_ords[fi]; s_types[si] = field_types[fi]; break;
                 }
             }
         }
     }
 
-    // Scan cards in the pack
+    // Scan and filter
     uint32_t card_keys[256];
-    uint32_t card_count = kv_range(((uint32_t)pack_ord << 22), 0xFFC00000u,
-                                    card_keys, NULL, 256);
+    uint32_t card_count = kv_range(((uint32_t)pack_ord << 22), 0xFFC00000u, card_keys, NULL, 256);
 
-    int n = snprintf(buf, buf_size, "{\"pack\":\"%s\",\"results\":[", q->from_deck);
+    int n = 0;
     int result_count = 0;
 
     for (uint32_t ci = 0; ci < card_count && result_count < QUERY_MAX_RESULTS; ci++) {
-        uint32_t card_id = card_keys[ci] & 0x3FFFFF;
         uint8_t card[2048]; uint16_t clen = sizeof(card);
         if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
 
-        // Apply WHERE filters (AND)
+        // WHERE filter (AND)
         bool pass = true;
         for (uint8_t wi = 0; wi < q->where_count && pass; wi++) {
             if (w_ords[wi] == 0xFF) { pass = false; break; }
             char actual[64] = "";
             extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
-
             if (is_numeric_type(w_types[wi]))
                 pass = compare_int(actual, q->where[wi].op, q->where[wi].value);
             else
                 pass = compare_str(actual, q->where[wi].op, q->where[wi].value);
         }
-
         if (!pass) continue;
 
-        // Project selected fields
-        if (result_count > 0 && n < buf_size - 1) buf[n++] = ',';
-        n += snprintf(buf + n, buf_size - n, "{\"_id\":%lu", (unsigned long)card_id);
-
-        for (uint8_t si = 0; si < s_count && n < buf_size - 50; si++) {
-            if (s_ords[si] == 0xFF) continue;
-            char val[64] = "";
-            extract_field_str(card, clen, s_ords[si], s_types[si], val, sizeof(val));
-
-            // Find field name
-            const char *fname = "?";
-            if (q->select_count > 0) {
-                fname = q->select_fields[si];
-            } else {
-                for (uint8_t fi = 0; fi < field_count; fi++) {
-                    if (field_ords[fi] == s_ords[si]) { fname = field_names[fi]; break; }
-                }
+        // Output row: field1|field2|...\r\n
+        for (uint8_t si = 0; si < s_count && n < buf_size - 100; si++) {
+            if (si > 0 && n < buf_size - 1) buf[n++] = '|';
+            if (s_ords[si] != 0xFF) {
+                char val[64] = "";
+                extract_field_str(card, clen, s_ords[si], s_types[si], val, sizeof(val));
+                n += escape_field(buf + n, buf_size - n, val);
             }
-            n += snprintf(buf + n, buf_size - n, ",\"%s\":\"%s\"", fname, val);
         }
-        n += snprintf(buf + n, buf_size - n, "}");
+        if (n < buf_size - 2) { buf[n++] = '\r'; buf[n++] = '\n'; }
         result_count++;
     }
 
-    n += snprintf(buf + n, buf_size - n, "],\"count\":%d}", result_count);
+    buf[n] = '\0';
+    *count = result_count;
     return n;
 }
