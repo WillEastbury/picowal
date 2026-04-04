@@ -206,6 +206,10 @@ static bool extract_field_str(const uint8_t *card, uint16_t card_len,
                     }
                     out[n] = '\0'; return true;
                 }
+                case 0x12: { // lookup — stored as uint32
+                    uint32_t v = 0; if (flen >= 4) memcpy(&v, card + off, 4);
+                    snprintf(out, out_max, "%lu", (unsigned long)v); return true;
+                }
                 default:
                     out[0] = '\0'; return true;
             }
@@ -271,7 +275,8 @@ static bool compare_int(const char *actual, query_op_t op, const char *expected)
 
 static bool is_numeric_type(uint8_t tc) {
     return tc == 0x01 || tc == 0x02 || tc == 0x03 ||
-           tc == 0x04 || tc == 0x05 || tc == 0x06;
+           tc == 0x04 || tc == 0x05 || tc == 0x06 ||
+           tc == 0x12; // lookup stored as uint32
 }
 
 // ============================================================
