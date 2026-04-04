@@ -94,6 +94,20 @@ query_t query_parse(const char *text) {
                 // Trim trailing spaces
                 char *te = end - 1;
                 while (te > f && *te == ' ') *te-- = '\0';
+                // Check for AGG|field syntax (e.g. SUM|price)
+                q.select_fields[q.select_count].agg = QAGG_NONE;
+                char *pipe = strchr(f, '|');
+                if (pipe) {
+                    *pipe = '\0';
+                    if (strcmp(f,"SUM")==0||strcmp(f,"sum")==0) q.select_fields[q.select_count].agg = QAGG_SUM;
+                    else if (strcmp(f,"AVG")==0||strcmp(f,"avg")==0) q.select_fields[q.select_count].agg = QAGG_AVG;
+                    else if (strcmp(f,"MIN")==0||strcmp(f,"min")==0) q.select_fields[q.select_count].agg = QAGG_MIN;
+                    else if (strcmp(f,"MAX")==0||strcmp(f,"max")==0) q.select_fields[q.select_count].agg = QAGG_MAX;
+                    else if (strcmp(f,"COUNT")==0||strcmp(f,"count")==0) q.select_fields[q.select_count].agg = QAGG_COUNT;
+                    else if (strcmp(f,"FIRST")==0||strcmp(f,"first")==0) q.select_fields[q.select_count].agg = QAGG_FIRST;
+                    f = pipe + 1;
+                    while (*f == ' ') f++;
+                }
                 split_dotted(f, q.select_fields[q.select_count].pack, 32,
                              q.select_fields[q.select_count].field, 32);
                 q.select_count++;
@@ -535,17 +549,82 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         }
     }
 
-    // Scan primary pack, filter, project
+    // Check if any aggregates are requested
+    bool has_agg = false;
+    for (uint8_t si = 0; si < s_count; si++) {
+        if (q->select_fields[si].agg != QAGG_NONE) { has_agg = true; break; }
+    }
+    web_log("[query] s_count=%d has_agg=%d\n", s_count, has_agg);
+    for (uint8_t si = 0; si < s_count; si++) {
+        web_log("[query]  S[%d]: agg=%d field='%s' ord=%d type=0x%02x\n",
+                si, q->select_fields[si].agg, s_names[si], s_ords[si], s_types[si]);
+    }
+
+    // Scan primary pack, filter
     uint32_t card_keys[256];
     uint32_t card_count = kv_range(((uint32_t)primary->ord << 22), 0xFFC00000u, card_keys, NULL, 256);
-    int n = 0;
-    int result_count = 0;
 
-    for (uint32_t ci = 0; ci < card_count && result_count < QUERY_MAX_RESULTS; ci++) {
+    if (!has_agg) {
+        // No aggregates — direct output per row
+        int n = 0;
+        int result_count = 0;
+        for (uint32_t ci = 0; ci < card_count && result_count < QUERY_MAX_RESULTS; ci++) {
+            uint8_t card[2048]; uint16_t clen = sizeof(card);
+            if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
+
+            bool pass = true;
+            for (uint8_t wi = 0; wi < w_count && pass; wi++) {
+                char actual[64] = "";
+                extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
+                if (is_numeric_type(w_types[wi]))
+                    pass = compare_int(actual, w_ops[wi], w_values[wi]);
+                else
+                    pass = compare_str(actual, w_ops[wi], w_values[wi]);
+            }
+            if (!pass) continue;
+
+            for (uint8_t si = 0; si < s_count && n < buf_size - 100; si++) {
+                if (si > 0 && n < buf_size - 1) buf[n++] = '|';
+                if (s_ords[si] == 0xFF) continue;
+                if (s_pack_idx[si] <= 0) {
+                    char val[64] = "";
+                    extract_field_str(card, clen, s_ords[si], s_types[si], val, sizeof(val));
+                    n += escape_field(buf + n, buf_size - n, val);
+                } else {
+                    int8_t lf = find_lookup_to(primary, &packs[s_pack_idx[si]]);
+                    if (lf >= 0) {
+                        char ref_id_str[16] = "";
+                        extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
+                        uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
+                        uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
+                        uint8_t ref_card[2048]; uint16_t rclen = sizeof(ref_card);
+                        if (kv_get_copy(ref_key, ref_card, &rclen, NULL)) {
+                            char val[64] = "";
+                            extract_field_str(ref_card, rclen, s_ords[si], s_types[si], val, sizeof(val));
+                            n += escape_field(buf + n, buf_size - n, val);
+                        }
+                    }
+                }
+            }
+            if (n < buf_size - 2) { buf[n++] = '\r'; buf[n++] = '\n'; }
+            result_count++;
+        }
+        buf[n] = '\0';
+        *count = result_count;
+        return n;
+    }
+
+    // ---- Aggregation path ----
+    // Collect values per field for all matching rows
+    #define AGG_MAX_ROWS 256
+    #define AGG_MAX_GROUPS 64
+    char row_vals[AGG_MAX_ROWS][QUERY_MAX_SELECT][32];
+    int row_count = 0;
+
+    for (uint32_t ci = 0; ci < card_count && row_count < AGG_MAX_ROWS; ci++) {
         uint8_t card[2048]; uint16_t clen = sizeof(card);
         if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
 
-        // WHERE filter
         bool pass = true;
         for (uint8_t wi = 0; wi < w_count && pass; wi++) {
             char actual[64] = "";
@@ -557,39 +636,111 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         }
         if (!pass) continue;
 
-        // Project fields
-        for (uint8_t si = 0; si < s_count && n < buf_size - 100; si++) {
-            if (si > 0 && n < buf_size - 1) buf[n++] = '|';
+        for (uint8_t si = 0; si < s_count; si++) {
+            row_vals[row_count][si][0] = '\0';
             if (s_ords[si] == 0xFF) continue;
-
             if (s_pack_idx[si] <= 0) {
-                // Field from primary card
-                char val[64] = "";
-                extract_field_str(card, clen, s_ords[si], s_types[si], val, sizeof(val));
-                n += escape_field(buf + n, buf_size - n, val);
+                extract_field_str(card, clen, s_ords[si], s_types[si], row_vals[row_count][si], 32);
             } else {
-                // Field from joined pack — need to follow lookup
                 int8_t lf = find_lookup_to(primary, &packs[s_pack_idx[si]]);
                 if (lf >= 0) {
                     char ref_id_str[16] = "";
-                    extract_field_str(card, clen, primary->field_ords[lf],
-                                     primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
+                    extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
                     uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
                     uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
                     uint8_t ref_card[2048]; uint16_t rclen = sizeof(ref_card);
-                    if (kv_get_copy(ref_key, ref_card, &rclen, NULL)) {
-                        char val[64] = "";
-                        extract_field_str(ref_card, rclen, s_ords[si], s_types[si], val, sizeof(val));
-                        n += escape_field(buf + n, buf_size - n, val);
-                    }
+                    if (kv_get_copy(ref_key, ref_card, &rclen, NULL))
+                        extract_field_str(ref_card, rclen, s_ords[si], s_types[si], row_vals[row_count][si], 32);
                 }
             }
         }
+        row_count++;
+    }
+
+    // Group by non-aggregate fields, compute aggregates
+    // Group key = concatenation of all QAGG_NONE field values
+    char group_keys[AGG_MAX_GROUPS][128];
+    long  agg_vals[AGG_MAX_GROUPS][QUERY_MAX_SELECT]; // running aggregates
+    int   agg_counts[AGG_MAX_GROUPS];
+    char  agg_first[AGG_MAX_GROUPS][QUERY_MAX_SELECT][32]; // FIRST values
+    int   group_count = 0;
+
+    for (int ri = 0; ri < row_count; ri++) {
+        // Build group key
+        char gk[128] = "";
+        int gklen = 0;
+        for (uint8_t si = 0; si < s_count; si++) {
+            if (q->select_fields[si].agg == QAGG_NONE) {
+                if (gklen > 0) gk[gklen++] = '|';
+                int sl = (int)strlen(row_vals[ri][si]);
+                memcpy(gk + gklen, row_vals[ri][si], sl);
+                gklen += sl;
+            }
+        }
+        gk[gklen] = '\0';
+
+        // Find or create group
+        int gi = -1;
+        for (int g = 0; g < group_count; g++) {
+            if (strcmp(group_keys[g], gk) == 0) { gi = g; break; }
+        }
+        if (gi < 0 && group_count < AGG_MAX_GROUPS) {
+            gi = group_count++;
+            strcpy(group_keys[gi], gk);
+            agg_counts[gi] = 0;
+            for (uint8_t si = 0; si < s_count; si++) {
+                agg_vals[gi][si] = 0;
+                if (q->select_fields[si].agg == QAGG_MIN) agg_vals[gi][si] = 2147483647L;
+                if (q->select_fields[si].agg == QAGG_MAX) agg_vals[gi][si] = -2147483647L;
+                strncpy(agg_first[gi][si], row_vals[ri][si], 31);
+            }
+        }
+        if (gi < 0) continue;
+
+        agg_counts[gi]++;
+        for (uint8_t si = 0; si < s_count; si++) {
+            long v = strtol(row_vals[ri][si], NULL, 10);
+            switch (q->select_fields[si].agg) {
+                case QAGG_SUM: agg_vals[gi][si] += v; break;
+                case QAGG_AVG: agg_vals[gi][si] += v; break;
+                case QAGG_MIN: if (v < agg_vals[gi][si]) agg_vals[gi][si] = v; break;
+                case QAGG_MAX: if (v > agg_vals[gi][si]) agg_vals[gi][si] = v; break;
+                default: break;
+            }
+        }
+    }
+
+    // Output grouped results
+    int n = 0;
+    for (int gi = 0; gi < group_count && n < buf_size - 100; gi++) {
+        for (uint8_t si = 0; si < s_count; si++) {
+            if (si > 0 && n < buf_size - 1) buf[n++] = '|';
+            switch (q->select_fields[si].agg) {
+                case QAGG_SUM:
+                    n += snprintf(buf + n, buf_size - n, "%ld", agg_vals[gi][si]);
+                    break;
+                case QAGG_AVG:
+                    n += snprintf(buf + n, buf_size - n, "%ld",
+                                 agg_counts[gi] ? agg_vals[gi][si] / agg_counts[gi] : 0);
+                    break;
+                case QAGG_MIN: case QAGG_MAX:
+                    n += snprintf(buf + n, buf_size - n, "%ld", agg_vals[gi][si]);
+                    break;
+                case QAGG_COUNT:
+                    n += snprintf(buf + n, buf_size - n, "%d", agg_counts[gi]);
+                    break;
+                case QAGG_FIRST:
+                    n += escape_field(buf + n, buf_size - n, agg_first[gi][si]);
+                    break;
+                case QAGG_NONE:
+                    n += escape_field(buf + n, buf_size - n, agg_first[gi][si]);
+                    break;
+            }
+        }
         if (n < buf_size - 2) { buf[n++] = '\r'; buf[n++] = '\n'; }
-        result_count++;
     }
 
     buf[n] = '\0';
-    *count = result_count;
+    *count = group_count;
     return n;
 }

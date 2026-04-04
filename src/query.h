@@ -56,10 +56,22 @@ typedef struct {
     char      value[64];
 } query_where_t;
 
+// Aggregate function
+typedef enum {
+    QAGG_NONE = 0,  // no aggregate — group-by key (or FIRST if no aggs)
+    QAGG_SUM,
+    QAGG_AVG,
+    QAGG_MIN,
+    QAGG_MAX,
+    QAGG_COUNT,
+    QAGG_FIRST,
+} query_agg_t;
+
 // Parsed SELECT field
 typedef struct {
     char      pack[32];      // optional pack prefix
     char      field[32];
+    query_agg_t agg;         // aggregate function
 } query_select_t;
 
 // Parsed query
