@@ -263,6 +263,25 @@ static const char *type_friendly(uint8_t code) {
     }
 }
 
+// Prettify a field name: "in_stock" -> "In Stock"
+static void pretty_name(char *out, int max, const char *raw) {
+    int o = 0;
+    bool cap = true;
+    for (int i = 0; raw[i] && o < max - 1; i++) {
+        if (raw[i] == '_') {
+            out[o++] = ' ';
+            cap = true;
+        } else if (cap && raw[i] >= 'a' && raw[i] <= 'z') {
+            out[o++] = raw[i] - 32;
+            cap = false;
+        } else {
+            out[o++] = raw[i];
+            cap = false;
+        }
+    }
+    out[o] = '\0';
+}
+
 // Decode a field value from a card into a display string
 // Type codes match picowal.js / user_auth.c FT_* constants
 static int decode_field_str(char *out, int max, uint8_t type_code,
@@ -1458,9 +1477,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 // Skip password_hash and salt for display (ords 1,2 in pack 1)
                 if (pack_ord == 1 && (ords[i] == 1 || ords[i] == 2)) continue;
 
+                char plabel[32];
+                pretty_name(plabel, sizeof(plabel), names[i]);
                 n += snprintf(pg + n, sizeof(pg) - n,
                     "<div class=fg><label>%s <span style='font-weight:400;color:#505868;font-size:11px'>%s</span></label>",
-                    names[i], type_friendly(ftypes[i]));
+                    plabel, type_friendly(ftypes[i]));
 
                 uint8_t tc = ftypes[i];
                 if (tc == 0x07) {
@@ -1628,8 +1649,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             // Table header with multiple columns
             n += snprintf(pg + n, sizeof(pg) - n,
                 "<table><thead><tr><th style='width:50px'>#</th>");
-            for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 200; c++)
-                n += snprintf(pg + n, sizeof(pg) - n, "<th>%s</th>", names[c]);
+            for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 200; c++) {
+                char ph[32]; pretty_name(ph, sizeof(ph), names[c]);
+                n += snprintf(pg + n, sizeof(pg) - n, "<th>%s</th>", ph);
+            }
             n += snprintf(pg + n, sizeof(pg) - n, "</tr></thead><tbody>");
 
             // Render rows for this page
