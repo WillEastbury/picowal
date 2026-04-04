@@ -208,24 +208,20 @@ static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
 }
 
 static const char *type_name(uint8_t code) {
-    // Type codes match picowal.js / user_auth.c FT_* constants
+    // Authoritative PicoWAL type codes
     switch (code) {
-        case 0x00: return "bool";      // metadata_dict enum value
         case 0x01: return "uint8";
         case 0x02: return "uint16";
         case 0x03: return "uint32";
         case 0x04: return "int8";
         case 0x05: return "int16";
         case 0x06: return "int32";
-        case 0x07: return "bool";      // picowal.js T.BOOL
+        case 0x07: return "bool";
         case 0x08: return "ascii";
         case 0x09: return "utf8";
         case 0x0A: return "date";
         case 0x0B: return "time";
         case 0x0C: return "datetime";
-        case 0x0D: return "ipv4";
-        case 0x0E: return "mac";
-        case 0x0F: return "enum";
         case 0x10: return "array_u16";
         case 0x11: return "blob";
         case 0x12: return "lookup";
@@ -1697,14 +1693,14 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
         // Field type options
         static const char *ft_names[] = {
-            "bool","char","char[]","byte","byte[]","uint8","int8","int16",
-            "int32","uint16","uint32","isodate","isotime","isodatetime",
-            "utf8","latin1","array_u16","blob","lookup"
+            "uint8","uint16","uint32","int8","int16","int32",
+            "bool","ascii","utf8","date","time","datetime",
+            "array_u16","blob","lookup"
         };
-        for (int i = 0; i < 19 && n < (int)sizeof(pg) - 100; i++) {
+        for (int i = 0; i < 15 && n < (int)sizeof(pg) - 100; i++) {
             n += snprintf(pg + n, sizeof(pg) - n,
                 "<option value='%s'%s>%s</option>",
-                ft_names[i], i == 14 ? " selected" : "", ft_names[i]);
+                ft_names[i], strcmp(ft_names[i],"utf8")==0 ? " selected" : "", ft_names[i]);
         }
 
         n += snprintf(pg + n, sizeof(pg) - n,
@@ -1815,9 +1811,20 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             }
         }
 
-        // Resolve type code
+        // Resolve type name to picowal.js type code (NOT metadata_dict enum)
         uint8_t ftype_code = 255;
-        if (!metadata_field_type_parse(ftname, &ftype_code)) {
+        static const struct { const char *name; uint8_t code; } type_map[] = {
+            {"bool",0x07}, {"char",0x08}, {"char[]",0x08},
+            {"uint8",0x01}, {"int8",0x04}, {"int16",0x05}, {"int32",0x06},
+            {"uint16",0x02}, {"uint32",0x03},
+            {"isodate",0x0A}, {"isotime",0x0B}, {"isodatetime",0x0C},
+            {"utf8",0x09}, {"ascii",0x08}, {"latin1",0x08},
+            {"array_u16",0x10}, {"blob",0x11}, {"lookup",0x12},
+        };
+        for (unsigned ti = 0; ti < sizeof(type_map)/sizeof(type_map[0]); ti++) {
+            if (strcmp(ftname, type_map[ti].name) == 0) { ftype_code = type_map[ti].code; break; }
+        }
+        if (ftype_code == 255) {
             http_json(pcb, "400 Bad Request", "{\"error\":\"unknown field type\"}");
             return;
         }

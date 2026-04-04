@@ -26,6 +26,16 @@ static query_op_t parse_op(const char *s) {
 }
 
 
+static int strcasecmp_local(const char *a, const char *b) {
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return ca - cb;
+        a++; b++;
+    }
+    return *a - *b;
+}
 // Split "pack.field" into pack and field parts. If no dot, pack is empty.
 static void split_dotted(const char *s, char *pack, int pack_max, char *field, int field_max) {
     const char *dot = strchr(s, '.');
@@ -265,7 +275,7 @@ static bool is_numeric_type(uint8_t tc) {
 // Execute query — scan pack, filter, project
 // ============================================================
 
-// Escape a string for pipe-delimited output: | → \|, \r → \r, \n → \n
+// Escape for pipe-delimited output
 static int escape_field(char *out, int max, const char *val) {
     int n = 0;
     for (const char *p = val; *p && n < max - 2; p++) {
@@ -279,53 +289,50 @@ static int escape_field(char *out, int max, const char *val) {
     return n;
 }
 
-static const char *g_result_pack = "";
+// Resolve a pack name to ordinal + schema. Returns -1 if not found.
+typedef struct {
+    int16_t  ord;
+    uint8_t  field_ords[32];
+    uint8_t  field_types[32];
+    uint8_t  field_maxlens[32];
+    char     field_names[32][32];
+    uint8_t  field_count;
+    char     name[32];
+} pack_schema_t;
 
-int query_execute(const query_t *q, char *buf, int buf_size,
-                  const char **pack_name, int *count) {
-    *count = 0;
-    *pack_name = "";
-
-    if (!q->valid) {
-        return snprintf(buf, buf_size, "error: invalid query\r\n");
-    }
-
-    // Resolve pack name → ordinal + schema
+static bool resolve_pack(const char *name, pack_schema_t *ps) {
     uint32_t keys[64];
-    uint32_t pack_count = kv_range(0, 0xFFC00000u, keys, NULL, 64);
-    int16_t pack_ord = -1;
-    uint8_t field_ords[32], field_types[32], field_count = 0;
-    char field_names[32][32];
-
-    for (uint32_t i = 0; i < pack_count; i++) {
-        uint32_t pord = keys[i] & 0x3FFFFF;
+    uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 64);
+    for (uint32_t i = 0; i < count; i++) {
         uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
         if (!kv_get_copy(keys[i], sbuf, &slen, NULL)) continue;
         if (slen < 6 || sbuf[0] != 0x7D || sbuf[1] != 0xCA) continue;
 
         char pname[32] = "";
+        uint8_t fc = 0;
         uint16_t off = 4;
         while (off + 1 < slen) {
-            uint8_t ord = sbuf[off] & 0x1F, flen = sbuf[off + 1]; off += 2;
+            uint8_t ord = sbuf[off] & 0x1F, flen = sbuf[off+1]; off += 2;
             if (off + flen > slen) break;
             if (ord == 0 && flen >= 1) {
                 uint8_t nl = sbuf[off]; if (nl > 31) nl = 31;
-                memcpy(pname, sbuf + off + 1, nl); pname[nl] = '\0';
+                memcpy(pname, sbuf+off+1, nl); pname[nl] = '\0';
             }
-            if (ord == 1 && flen >= 1) field_count = sbuf[off];
+            if (ord == 1 && flen >= 1) fc = sbuf[off];
             if (ord == 2) {
-                for (uint8_t fi = 0; fi < field_count && fi < 32 && fi*3+2 < flen; fi++) {
-                    field_ords[fi] = sbuf[off + fi*3] & 0x1F;
-                    field_types[fi] = sbuf[off + fi*3 + 1];
+                for (uint8_t fi = 0; fi < fc && fi < 32 && fi*3+2 < flen; fi++) {
+                    ps->field_ords[fi] = sbuf[off+fi*3] & 0x1F;
+                    ps->field_types[fi] = sbuf[off+fi*3+1];
+                    ps->field_maxlens[fi] = sbuf[off+fi*3+2];
                 }
             }
             if (ord == 5 && flen > 0) {
                 uint8_t ni = 0; uint16_t si = 0;
-                for (uint16_t j = 0; j < flen && ni < field_count && ni < 32; j++) {
+                for (uint16_t j = 0; j < flen && ni < fc && ni < 32; j++) {
                     if (sbuf[off+j] == '\0') {
-                        uint8_t len = (uint8_t)(j - si); if (len > 31) len = 31;
-                        memcpy(field_names[ni], sbuf + off + si, len);
-                        field_names[ni][len] = '\0';
+                        uint8_t len = (uint8_t)(j-si); if (len > 31) len = 31;
+                        memcpy(ps->field_names[ni], sbuf+off+si, len);
+                        ps->field_names[ni][len] = '\0';
                         ni++; si = j + 1;
                     }
                 }
@@ -333,62 +340,196 @@ int query_execute(const query_t *q, char *buf, int buf_size,
             off += flen;
         }
 
-        bool match = true;
-        for (int ci = 0; pname[ci] && q->from_decks[0][ci]; ci++) {
-            char a = pname[ci], b = q->from_decks[0][ci];
+        // Case-insensitive compare
+        bool match = (strlen(pname) == strlen(name));
+        for (int ci = 0; match && pname[ci]; ci++) {
+            char a = pname[ci], b = name[ci];
             if (a >= 'A' && a <= 'Z') a += 32;
             if (b >= 'A' && b <= 'Z') b += 32;
-            if (a != b) { match = false; break; }
+            if (a != b) match = false;
         }
-        if (match && strlen(pname) == strlen(q->from_decks[0])) {
-            pack_ord = (int16_t)pord;
-            // Store pack name for header
-            static char s_pname[32];
-            strncpy(s_pname, pname, 31); s_pname[31] = '\0';
-            g_result_pack = s_pname;
-            *pack_name = g_result_pack;
-            break;
+        if (match) {
+            ps->ord = (int16_t)(keys[i] & 0x3FFFFF);
+            ps->field_count = fc;
+            strncpy(ps->name, pname, 31);
+            return true;
         }
     }
+    return false;
+}
 
-    if (pack_ord < 0)
-        return snprintf(buf, buf_size, "error: pack '%s' not found\r\n", q->from_decks[0]);
+// Find a field in a pack schema by name. Returns field index or -1.
+static int8_t find_field(const pack_schema_t *ps, const char *name) {
+    for (uint8_t i = 0; i < ps->field_count; i++) {
+        if (strcmp(ps->field_names[i], name) == 0) return (int8_t)i;
+    }
+    return -1;
+}
 
-    // Resolve WHERE fields
+// Find which field in pack A is a lookup to pack B. Returns field index or -1.
+static int8_t find_lookup_to(const pack_schema_t *from, const pack_schema_t *to) {
+    for (uint8_t i = 0; i < from->field_count; i++) {
+        if (from->field_types[i] == 0x12) { // lookup type
+            if (from->field_maxlens[i] == (uint8_t)to->ord) return (int8_t)i;
+        }
+    }
+    return -1;
+}
+
+// Search a pack for cards matching field == value, return card IDs
+static uint32_t search_pack_field(const pack_schema_t *ps, uint8_t field_idx,
+                                   const char *value, query_op_t op,
+                                   uint32_t *out_ids, uint32_t max) {
+    uint32_t keys[256];
+    uint32_t count = kv_range(((uint32_t)ps->ord << 22), 0xFFC00000u, keys, NULL, 256);
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < count && found < max; i++) {
+        uint8_t card[2048]; uint16_t clen = sizeof(card);
+        if (!kv_get_copy(keys[i], card, &clen, NULL)) continue;
+        char actual[64] = "";
+        extract_field_str(card, clen, ps->field_ords[field_idx],
+                         ps->field_types[field_idx], actual, sizeof(actual));
+        bool pass;
+        if (is_numeric_type(ps->field_types[field_idx]))
+            pass = compare_int(actual, op, value);
+        else
+            pass = compare_str(actual, op, value);
+        if (pass) out_ids[found++] = keys[i] & 0x3FFFFF;
+    }
+    return found;
+}
+
+static const char *g_result_pack = "";
+
+int query_execute(const query_t *q, char *buf, int buf_size,
+                  const char **pack_name, int *count) {
+    *count = 0;
+    *pack_name = "";
+
+    if (!q->valid || q->from_count == 0)
+        return snprintf(buf, buf_size, "error: invalid query\r\n");
+
+    // Resolve all FROM packs
+    pack_schema_t packs[4];
+    uint8_t pack_resolved = 0;
+    for (uint8_t i = 0; i < q->from_count && i < 4; i++) {
+        if (resolve_pack(q->from_decks[i], &packs[i])) pack_resolved++;
+        else return snprintf(buf, buf_size, "error: pack '%s' not found\r\n", q->from_decks[i]);
+    }
+
+    // Primary pack = first FROM
+    pack_schema_t *primary = &packs[0];
+    static char s_pname[32];
+    strncpy(s_pname, primary->name, 31);
+    g_result_pack = s_pname;
+    *pack_name = g_result_pack;
+
+    // Process WHERE clauses — resolve cross-pack references via lookups
+    // Rewritten WHERE: all targeting primary pack
     uint8_t w_ords[QUERY_MAX_WHERE], w_types[QUERY_MAX_WHERE];
+    char    w_values[QUERY_MAX_WHERE][64];
+    query_op_t w_ops[QUERY_MAX_WHERE];
+    uint8_t w_count = 0;
+
     for (uint8_t wi = 0; wi < q->where_count; wi++) {
-        w_ords[wi] = 0xFF;
-        for (uint8_t fi = 0; fi < field_count; fi++) {
-            if (strcmp(q->where[wi].field, field_names[fi]) == 0) {
-                w_ords[wi] = field_ords[fi]; w_types[wi] = field_types[fi]; break;
+        const char *wpname = q->where[wi].pack;
+        const char *wfield = q->where[wi].field;
+
+        if (wpname[0] == '\0' || strcmp(wpname, primary->name) == 0 ||
+            strcasecmp_local(wpname, q->from_decks[0]) == 0) {
+            // WHERE on primary pack — direct
+            int8_t fi = find_field(primary, wfield);
+            if (fi < 0) return snprintf(buf, buf_size, "error: field '%s' not found in '%s'\r\n", wfield, primary->name);
+            w_ords[w_count] = primary->field_ords[fi];
+            w_types[w_count] = primary->field_types[fi];
+            w_ops[w_count] = q->where[wi].op;
+            strncpy(w_values[w_count], q->where[wi].value, 63);
+            w_count++;
+        } else {
+            // WHERE on joined pack — resolve via lookup
+            // Find which joined pack this refers to
+            pack_schema_t *joined = NULL;
+            for (uint8_t ji = 1; ji < q->from_count; ji++) {
+                if (strcasecmp_local(wpname, q->from_decks[ji]) == 0 ||
+                    strcmp(wpname, packs[ji].name) == 0) {
+                    joined = &packs[ji]; break;
+                }
             }
+            if (!joined) return snprintf(buf, buf_size, "error: pack '%s' not in FROM\r\n", wpname);
+
+            // Find the field on the joined pack
+            int8_t jfi = find_field(joined, wfield);
+            if (jfi < 0) return snprintf(buf, buf_size, "error: field '%s' not found in '%s'\r\n", wfield, joined->name);
+
+            // Search joined pack for matching card IDs
+            uint32_t matched_ids[64];
+            uint32_t nmatched = search_pack_field(joined, (uint8_t)jfi,
+                                                   q->where[wi].value, q->where[wi].op,
+                                                   matched_ids, 64);
+            if (nmatched == 0) { *count = 0; buf[0] = '\0'; return 0; }
+
+            // Find lookup field in primary that points to joined pack
+            int8_t lf = find_lookup_to(primary, joined);
+            if (lf < 0) return snprintf(buf, buf_size, "error: no lookup from '%s' to '%s'\r\n", primary->name, joined->name);
+
+            // Rewrite WHERE: lookup_field IN matched_ids
+            w_ords[w_count] = primary->field_ords[lf];
+            w_types[w_count] = primary->field_types[lf];
+            w_ops[w_count] = QOP_IN;
+            // Build comma-separated ID list
+            char idlist[64] = "";
+            int idlen = 0;
+            for (uint32_t mi = 0; mi < nmatched && idlen < 60; mi++) {
+                if (mi > 0) idlist[idlen++] = ',';
+                idlen += snprintf(idlist + idlen, sizeof(idlist) - idlen, "%lu", (unsigned long)matched_ids[mi]);
+            }
+            strncpy(w_values[w_count], idlist, 63);
+            w_count++;
         }
     }
 
-    // Resolve SELECT fields
+    // Resolve SELECT fields (may reference joined packs)
     uint8_t s_ords[QUERY_MAX_SELECT], s_types[QUERY_MAX_SELECT];
-    uint8_t s_count = q->select_count;
     const char *s_names[QUERY_MAX_SELECT];
+    int8_t s_pack_idx[QUERY_MAX_SELECT]; // -1 = primary, 0+ = joined pack index
+    uint8_t s_count = q->select_count;
+
     if (s_count == 0) {
-        s_count = field_count;
-        for (uint8_t i = 0; i < field_count && i < QUERY_MAX_SELECT; i++) {
-            s_ords[i] = field_ords[i]; s_types[i] = field_types[i]; s_names[i] = field_names[i];
+        s_count = primary->field_count;
+        for (uint8_t i = 0; i < s_count && i < QUERY_MAX_SELECT; i++) {
+            s_ords[i] = primary->field_ords[i];
+            s_types[i] = primary->field_types[i];
+            s_names[i] = primary->field_names[i];
+            s_pack_idx[i] = -1;
         }
     } else {
         for (uint8_t si = 0; si < s_count; si++) {
-            s_ords[si] = 0xFF; s_names[si] = q->select_fields[si].field;
-            for (uint8_t fi = 0; fi < field_count; fi++) {
-                if (strcmp(q->select_fields[si].field, field_names[fi]) == 0) {
-                    s_ords[si] = field_ords[fi]; s_types[si] = field_types[fi]; break;
+            const char *spname = q->select_fields[si].pack;
+            const char *sfield = q->select_fields[si].field;
+            s_ords[si] = 0xFF;
+            s_pack_idx[si] = -1;
+            s_names[si] = sfield;
+
+            // Determine which pack
+            pack_schema_t *target = primary;
+            if (spname[0] != '\0') {
+                for (uint8_t pi = 0; pi < q->from_count; pi++) {
+                    if (strcasecmp_local(spname, q->from_decks[pi]) == 0 ||
+                        strcmp(spname, packs[pi].name) == 0) {
+                        target = &packs[pi];
+                        s_pack_idx[si] = (int8_t)pi;
+                        break;
+                    }
                 }
             }
+            int8_t fi = find_field(target, sfield);
+            if (fi >= 0) { s_ords[si] = target->field_ords[fi]; s_types[si] = target->field_types[fi]; }
         }
     }
 
-    // Scan and filter
+    // Scan primary pack, filter, project
     uint32_t card_keys[256];
-    uint32_t card_count = kv_range(((uint32_t)pack_ord << 22), 0xFFC00000u, card_keys, NULL, 256);
-
+    uint32_t card_count = kv_range(((uint32_t)primary->ord << 22), 0xFFC00000u, card_keys, NULL, 256);
     int n = 0;
     int result_count = 0;
 
@@ -396,26 +537,44 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         uint8_t card[2048]; uint16_t clen = sizeof(card);
         if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
 
-        // WHERE filter (AND)
+        // WHERE filter
         bool pass = true;
-        for (uint8_t wi = 0; wi < q->where_count && pass; wi++) {
-            if (w_ords[wi] == 0xFF) { pass = false; break; }
+        for (uint8_t wi = 0; wi < w_count && pass; wi++) {
             char actual[64] = "";
             extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
             if (is_numeric_type(w_types[wi]))
-                pass = compare_int(actual, q->where[wi].op, q->where[wi].value);
+                pass = compare_int(actual, w_ops[wi], w_values[wi]);
             else
-                pass = compare_str(actual, q->where[wi].op, q->where[wi].value);
+                pass = compare_str(actual, w_ops[wi], w_values[wi]);
         }
         if (!pass) continue;
 
-        // Output row: field1|field2|...\r\n
+        // Project fields
         for (uint8_t si = 0; si < s_count && n < buf_size - 100; si++) {
             if (si > 0 && n < buf_size - 1) buf[n++] = '|';
-            if (s_ords[si] != 0xFF) {
+            if (s_ords[si] == 0xFF) continue;
+
+            if (s_pack_idx[si] <= 0) {
+                // Field from primary card
                 char val[64] = "";
                 extract_field_str(card, clen, s_ords[si], s_types[si], val, sizeof(val));
                 n += escape_field(buf + n, buf_size - n, val);
+            } else {
+                // Field from joined pack — need to follow lookup
+                int8_t lf = find_lookup_to(primary, &packs[s_pack_idx[si]]);
+                if (lf >= 0) {
+                    char ref_id_str[16] = "";
+                    extract_field_str(card, clen, primary->field_ords[lf],
+                                     primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
+                    uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
+                    uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
+                    uint8_t ref_card[2048]; uint16_t rclen = sizeof(ref_card);
+                    if (kv_get_copy(ref_key, ref_card, &rclen, NULL)) {
+                        char val[64] = "";
+                        extract_field_str(ref_card, rclen, s_ords[si], s_types[si], val, sizeof(val));
+                        n += escape_field(buf + n, buf_size - n, val);
+                    }
+                }
             }
         }
         if (n < buf_size - 2) { buf[n++] = '\r'; buf[n++] = '\n'; }
