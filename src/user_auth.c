@@ -202,11 +202,12 @@ typedef struct {
     const char *name;
 } schema_field_t;
 
-static uint16_t build_schema_card_ex(uint8_t *buf, uint16_t buf_size,
+static uint16_t build_schema_card_full(uint8_t *buf, uint16_t buf_size,
                                       const char *pack_name,
                                       const schema_field_t *fields,
                                       uint8_t field_count,
-                                      uint8_t flags) {
+                                      uint8_t flags,
+                                      const char *module) {
     uint16_t off = 0;
 
     // Header: magic + version
@@ -248,6 +249,18 @@ static uint16_t build_schema_card_ex(uint8_t *buf, uint16_t buf_size,
     buf[off++] = 1;
     buf[off++] = flags;
 
+    // Ord 4: module name (ascii, length-prefixed) — groups packs in nav
+    if (module && module[0]) {
+        uint8_t mlen = (uint8_t)strlen(module);
+        if (off + 2 + 1 + mlen <= buf_size) {
+            buf[off++] = 4;
+            buf[off++] = 1 + mlen;
+            buf[off++] = mlen;
+            memcpy(buf + off, module, mlen);
+            off += mlen;
+        }
+    }
+
     // Ord 5: field names — null-separated ASCII
     uint16_t names_total = 0;
     for (uint8_t i = 0; i < field_count; i++) {
@@ -264,6 +277,14 @@ static uint16_t build_schema_card_ex(uint8_t *buf, uint16_t buf_size,
     }
 
     return off;
+}
+
+static uint16_t build_schema_card_ex(uint8_t *buf, uint16_t buf_size,
+                                      const char *pack_name,
+                                      const schema_field_t *fields,
+                                      uint8_t field_count,
+                                      uint8_t flags) {
+    return build_schema_card_full(buf, buf_size, pack_name, fields, field_count, flags, NULL);
 }
 
 static uint16_t build_schema_card(uint8_t *buf, uint16_t buf_size,
@@ -288,9 +309,9 @@ static bool seed_schema(uint16_t pack_ord, const char *pack_name,
 static bool seed_schema_public(uint16_t pack_ord, const char *pack_name,
                                 const schema_field_t *fields, uint8_t field_count) {
     uint8_t card[256];
-    uint16_t clen = build_schema_card_ex(card, sizeof(card),
+    uint16_t clen = build_schema_card_full(card, sizeof(card),
                                           pack_name, fields, field_count,
-                                          SCHEMA_FLAG_PUBLIC_READ);
+                                          SCHEMA_FLAG_PUBLIC_READ, "Reference");
     if (clen == 0) return false;
     return kv_put(SCHEMA_KEY(pack_ord), card, clen);
 }
@@ -302,6 +323,18 @@ bool user_auth_seed_schema(uint16_t pack_ord, const char *pack_name,
     // user_auth_schema_field_t and schema_field_t have identical layout
     return seed_schema(pack_ord, pack_name,
                        (const schema_field_t *)fields, field_count);
+}
+
+bool user_auth_seed_schema_module(uint16_t pack_ord, const char *pack_name,
+                                   const user_auth_schema_field_t *fields,
+                                   uint8_t field_count, const char *module) {
+    uint8_t card[256];
+    uint16_t clen = build_schema_card_full(card, sizeof(card),
+                                           pack_name,
+                                           (const schema_field_t *)fields,
+                                           field_count, 0, module);
+    if (clen == 0) return false;
+    return kv_put(SCHEMA_KEY(pack_ord), card, clen);
 }
 
 // Parse a field from a card at the given offset.

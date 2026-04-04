@@ -139,7 +139,7 @@ static const char APP_JS[] =
 "if(r.ok)location.reload();else alert('Error: '+t)})});}"
 /* New pack form */
 ";var pf=$('packForm');if(pf)pf.onsubmit=function(e){e.preventDefault();"
-"api('POST','/admin/meta/new',JSON.stringify({ordinal:parseInt($('po').value),name:$('pn').value.trim()})).then(function(r){return r.text().then(function(t){"
+"api('POST','/admin/meta/new',JSON.stringify({ordinal:parseInt($('po').value),name:$('pn').value.trim(),module:($('pm')?$('pm').value.trim():'')})).then(function(r){return r.text().then(function(t){"
 "if(r.ok)location.reload();else alert('Error: '+t)})});}"
 /* Change password */
 ";var cp=$('passForm');if(cp)cp.onsubmit=function(e){e.preventDefault();"
@@ -157,13 +157,14 @@ static const char APP_JS[] =
 
 // Parse a schema card from Pack 0 into field definitions.
 // Returns field count. Fills names[], types[], maxlens[], ords[].
-static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
+static uint8_t parse_schema_ex(const uint8_t *card, uint16_t card_len,
                             char names[][32], uint8_t *types, uint8_t *maxlens, uint8_t *ords,
-                            char *pack_name, uint8_t max_fields) {
+                            char *pack_name, uint8_t max_fields, char *module) {
     if (card_len < 4 || card[0] != 0x7D || card[1] != 0xCA) return 0;
     uint16_t off = 4;
     uint8_t field_count = 0;
     char name_buf[256]; uint16_t name_buf_len = 0;
+    if (module) module[0] = '\0';
 
     while (off + 1 < card_len) {
         uint8_t ord = card[off] & 0x1F;
@@ -184,6 +185,12 @@ static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
                 types[i] = card[off + i * 3 + 1];
                 maxlens[i] = card[off + i * 3 + 2];
             }
+        }
+        if (ord == 4 && flen >= 1 && module) {
+            uint8_t n = card[off]; if (n > flen - 1) n = flen - 1;
+            if (n > 31) n = 31;
+            memcpy(module, card + off + 1, n);
+            module[n] = '\0';
         }
         if (ord == 5 && flen > 0) {
             memcpy(name_buf, card + off, flen);
@@ -207,6 +214,12 @@ static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
     return field_count < max_fields ? field_count : max_fields;
 }
 
+static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
+                            char names[][32], uint8_t *types, uint8_t *maxlens, uint8_t *ords,
+                            char *pack_name, uint8_t max_fields) {
+    return parse_schema_ex(card, card_len, names, types, maxlens, ords, pack_name, max_fields, NULL);
+}
+
 static const char *type_name(uint8_t code) {
     // Authoritative PicoWAL type codes
     switch (code) {
@@ -226,6 +239,27 @@ static const char *type_name(uint8_t code) {
         case 0x11: return "blob";
         case 0x12: return "lookup";
         default:   return "?";
+    }
+}
+
+static const char *type_friendly(uint8_t code) {
+    switch (code) {
+        case 0x01: return "Small number (0-255)";
+        case 0x02: return "Number (0-65k)";
+        case 0x03: return "Large number";
+        case 0x04: return "Small number (+/-)";
+        case 0x05: return "Number (+/-)";
+        case 0x06: return "Large number (+/-)";
+        case 0x07: return "Yes / No";
+        case 0x08: return "Text";
+        case 0x09: return "Text";
+        case 0x0A: return "Date";
+        case 0x0B: return "Time";
+        case 0x0C: return "Date & Time";
+        case 0x10: return "Number list";
+        case 0x11: return "Binary data";
+        case 0x12: return "Link";
+        default:   return "";
     }
 }
 
@@ -432,45 +466,48 @@ static const char PAGE_HEAD[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>PicoWAL</title><style>"
-    "body{font:14px/1.5 monospace;background:#1a1a2e;color:#e0e0e0;padding:0;margin:0}"
-    ".page{max-width:960px;margin:0 auto;padding:16px}"
-    "h1{color:#e94560;margin:0}h2{color:#0ff;border-bottom:1px solid #0f3460;padding-bottom:4px;margin-bottom:12px}"
-    "a{color:#0ff}a:hover{color:#e94560}"
-    "input,select,button,textarea{font:inherit;padding:8px 12px;margin:4px 0;background:#0f3460;color:#e0e0e0;border:1px solid #1a1a4e;border-radius:6px;box-sizing:border-box}"
-    "input:focus,select:focus,textarea:focus{border-color:#0ff;outline:none;box-shadow:0 0 0 2px rgba(0,255,255,.15)}"
-    "button{background:#e94560;color:#fff;border:none;cursor:pointer;font-weight:bold;padding:10px 20px;border-radius:6px;transition:background .15s}button:hover{background:#c73652}"
-    ".btn-sm{padding:5px 12px;font-size:12px}.btn-del{background:#c0392b}.btn-ok{background:#27ae60}.btn-ok:hover{background:#219a52}"
-    ".btn-ghost{background:transparent;border:1px solid #0f3460;color:#0ff;padding:6px 14px}.btn-ghost:hover{background:#0f3460}"
-    "table{width:100%;border-collapse:collapse;margin:8px 0}th,td{padding:8px 10px;border:1px solid #0f3460;text-align:left}"
-    "th{background:#0f3460;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8899aa}"
-    "tr:hover td{background:#16213e}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:120px}"
-    ".card{background:#16213e;border:1px solid #0f3460;border-radius:10px;padding:20px;margin:12px 0}"
-    ".badge{background:#27ae60;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;letter-spacing:.3px}"
-    ".badge-admin{background:#e94560}.badge-type{background:#0f3460;color:#0ff}"
-    "label{display:block;font-size:12px;color:#8899aa;margin-top:0}"
-    ".fg{margin-bottom:16px}.fg label{margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}"
+    "*{box-sizing:border-box}"
+    "body{font:15px/1.6 -apple-system,system-ui,sans-serif;background:#1c1e26;color:#d5d8e0;padding:0;margin:0}"
+    ".page{max-width:900px;margin:0 auto;padding:20px 24px}"
+    "h1{color:#e06070;margin:0}h2{color:#a8c8ff;border-bottom:1px solid #2a3040;padding-bottom:8px;margin-bottom:16px;font-weight:600}"
+    "a{color:#7eb8f0;text-decoration:none}a:hover{color:#c0d8ff}"
+    "input,select,button,textarea{font:inherit;padding:10px 14px;margin:4px 0;background:#252830;color:#d5d8e0;border:1px solid #3a3f50;border-radius:8px;box-sizing:border-box}"
+    "input:focus,select:focus,textarea:focus{border-color:#7eb8f0;outline:none;box-shadow:0 0 0 3px rgba(126,184,240,.12)}"
+    "button{background:#5080c0;color:#fff;border:none;cursor:pointer;font-weight:600;padding:10px 22px;border-radius:8px;transition:background .15s}button:hover{background:#4070b0}"
+    ".btn-sm{padding:6px 14px;font-size:13px}.btn-del{background:#b04050}.btn-del:hover{background:#903040}"
+    ".btn-ok{background:#40906a}.btn-ok:hover{background:#308058}"
+    ".btn-ghost{background:transparent;border:1px solid #3a3f50;color:#7eb8f0;padding:8px 16px}.btn-ghost:hover{background:#2a3040}"
+    "table{width:100%;border-collapse:collapse;margin:10px 0}th,td{padding:10px 12px;border-bottom:1px solid #2a3040;text-align:left}"
+    "th{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:#6a7080;font-weight:600;border-bottom:2px solid #3a3f50}"
+    "td{font:14px/1.4 monospace}tr:hover td{background:#22252e}"
+    ".row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1;min-width:120px}"
+    ".card{background:#22252e;border:1px solid #2a3040;border-radius:12px;padding:24px;margin:14px 0}"
+    ".badge{background:#40906a;color:#fff;padding:2px 10px;border-radius:12px;font-size:10px;font-weight:600}"
+    ".badge-admin{background:#b04050}"
+    "label{display:block;font-size:13px;color:#8090a0;margin-bottom:4px;font-weight:500}"
+    ".fg{margin-bottom:20px}.fg label{margin-bottom:6px}"
     ".fg input,.fg select,.fg textarea{width:100%}"
-    "pre{background:#222;padding:10px;border-radius:6px;white-space:pre-wrap;max-height:400px;overflow-y:auto}"
-    ".tabs{display:flex;gap:0;margin-bottom:0}.tab{padding:10px 20px;cursor:pointer;background:#0f3460;border:1px solid #1a1a4e;border-bottom:none;border-radius:8px 8px 0 0;color:#888}"
-    ".tab.active{background:#16213e;color:#0ff;border-color:#0f3460}.tab-body{display:none}.tab-body.active{display:block}"
-    "#loginBox{max-width:300px;margin:80px auto}"
-    "#status{padding:8px;background:#222;border-radius:4px;white-space:pre-wrap;margin-top:8px}"
-    "nav{background:#0f3460;padding:10px 20px;display:flex;justify-content:space-between;align-items:center}"
-    "nav a{color:#e0e0e0;text-decoration:none;margin:0 10px}nav a:hover{color:#0ff}"
-    ".nav-brand{color:#e94560!important;font-weight:700;letter-spacing:1px;font-size:16px}"
+    "pre{font:13px/1.5 monospace;background:#1a1c22;padding:14px;border-radius:8px;white-space:pre-wrap;max-height:400px;overflow-y:auto;border:1px solid #2a3040}"
+    ".tabs{display:flex;gap:0;margin-bottom:0}.tab{padding:10px 20px;cursor:pointer;background:#252830;border:1px solid #2a3040;border-bottom:none;border-radius:8px 8px 0 0;color:#6a7080}"
+    ".tab.active{background:#22252e;color:#a8c8ff;border-color:#3a3f50}.tab-body{display:none}.tab-body.active{display:block}"
+    "#loginBox{max-width:320px;margin:80px auto}"
+    "#status{padding:10px;background:#1a1c22;border-radius:8px;white-space:pre-wrap;margin-top:8px;border:1px solid #2a3040}"
+    "nav{background:#22252e;padding:12px 24px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #2a3040}"
+    "nav a{color:#b0b8c8;text-decoration:none;margin:0 12px;font-size:14px}nav a:hover{color:#a8c8ff}"
+    ".nav-brand{color:#e06070!important;font-weight:700;letter-spacing:1px;font-size:16px}"
     ".dropdown{position:relative;display:inline-block}"
-    ".dropdown>span{color:#e0e0e0;cursor:pointer;margin:0 10px}.dropdown>span:hover{color:#0ff}"
-    ".dropdown-menu{display:none;position:absolute;top:100%;left:0;background:#0f3460;border:1px solid #1a1a4e;border-radius:4px;min-width:140px;z-index:10;padding:4px 0}"
+    ".dropdown>span{color:#b0b8c8;cursor:pointer;margin:0 12px;font-size:14px}.dropdown>span:hover{color:#a8c8ff}"
+    ".dropdown-menu{display:none;position:absolute;top:100%;left:0;background:#22252e;border:1px solid #3a3f50;border-radius:8px;min-width:150px;z-index:10;padding:6px 0;box-shadow:0 4px 12px rgba(0,0,0,.3)}"
     ".dropdown:hover .dropdown-menu{display:block}"
-    ".dropdown-menu a{display:block;padding:6px 16px;margin:0;white-space:nowrap}.dropdown-menu a:hover{background:#1a1a4e}"
-    ".pager{display:flex;justify-content:space-between;align-items:center;margin:12px 0;font-size:12px;color:#888}"
-    ".pager a{padding:6px 14px;background:#0f3460;border-radius:6px;text-decoration:none;font-size:12px}"
-    ".search-box{display:flex;gap:8px;margin-bottom:12px}"
-    ".search-box input{flex:1}.search-box button{white-space:nowrap}"
-    ".card-nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}"
-    ".card-nav a{font-size:12px;padding:4px 10px;background:#0f3460;border-radius:6px;text-decoration:none}"
-    ".crumb{font-size:12px;color:#888;margin-bottom:4px}.crumb a{font-size:12px}"
-    ".actions{display:flex;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid #0f3460}"
+    ".dropdown-menu a{display:block;padding:8px 18px;margin:0;white-space:nowrap;font-size:14px}.dropdown-menu a:hover{background:#2a3040}"
+    ".pager{display:flex;justify-content:space-between;align-items:center;margin:16px 0;font-size:13px;color:#6a7080}"
+    ".pager a{padding:8px 16px;background:#252830;border:1px solid #3a3f50;border-radius:8px;text-decoration:none;font-size:13px}"
+    ".search-box{display:flex;gap:8px;margin-bottom:14px}"
+    ".search-box input{flex:1;font:13px monospace}.search-box button{white-space:nowrap}"
+    ".card-nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}"
+    ".card-nav a{font-size:13px;padding:6px 14px;background:#252830;border:1px solid #3a3f50;border-radius:8px}"
+    ".crumb{font-size:13px;color:#6a7080;margin-bottom:8px}.crumb a{font-size:13px}"
+    ".actions{display:flex;gap:10px;margin-top:20px;padding-top:20px;border-top:1px solid #2a3040}"
     "</style></head><body>"
     "<nav><span class=nav-brand>&#x1F5C3; PicoWAL</span>"
     "<div><a href=/>Home</a><a href=/status>Status</a><a href=/query>Query</a>";
@@ -481,48 +518,22 @@ static const char PAGE_NAV_TAIL[] =
 static const char PAGE_TAIL[] = "</div></body></html>";
 
 // Build dynamic nav links for the user's accessible packs
+// Packs with a module (ord 4) are grouped into dropdown menus.
+// Packs without a module appear as flat links.
 static uint16_t build_nav(char *buf, uint16_t bufsize, const char *req) {
     int n = 0;
     uint8_t token[SESSION_TOKEN_LEN];
     user_session_t session;
     if (user_auth_parse_cookie(req, token) && user_auth_check(token, &session)) {
-        uint32_t keys[16];
-        uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 16);
+        uint32_t keys[32];
+        uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 32);
 
-        // First pass: user packs (non-public, non-system)
-        for (uint32_t i = 0; i < count && n < (int)bufsize - 100; i++) {
-            uint32_t pack_ord = keys[i] & 0x3FFFFF;
-            if (pack_ord == 0 || pack_ord == 1) continue; // skip metadata + users
-            if (!user_auth_can_read(&session, (uint16_t)pack_ord)) continue;
+        // Collect pack info in one pass
+        typedef struct { uint32_t ord; char name[16]; char module[16]; } nav_pack_t;
+        nav_pack_t packs[24];
+        uint8_t np = 0;
 
-            // Check if public-read (system pack)
-            uint8_t sbuf[128]; uint16_t slen = sizeof(sbuf);
-            if (!kv_get_copy(keys[i], sbuf, &slen, NULL)) continue;
-            if (slen < 6 || sbuf[0] != 0x7D || sbuf[1] != 0xCA) continue;
-
-            // Parse flags (ord 3) and name (ord 0)
-            char pname[16] = "?"; uint8_t pflags = 0;
-            uint16_t off = 4;
-            while (off + 1 < slen) {
-                uint8_t ord = sbuf[off] & 0x1F, flen = sbuf[off + 1]; off += 2;
-                if (off + flen > slen) break;
-                if (ord == 0 && flen >= 1) {
-                    uint8_t nl = sbuf[off]; if (nl > flen - 1) nl = flen - 1; if (nl > 15) nl = 15;
-                    memcpy(pname, sbuf + off + 1, nl); pname[nl] = '\0';
-                    if (pname[0] >= 'a' && pname[0] <= 'z') pname[0] -= 32;
-                }
-                if (ord == 3 && flen >= 1) pflags = sbuf[off];
-                off += flen;
-            }
-
-            if (pflags & 0x01) continue; // skip public packs — they go in System dropdown
-            n += snprintf(buf + n, bufsize - n,
-                "<a href='/pack/%lu'>%s</a>", (unsigned long)pack_ord, pname);
-        }
-
-        // System dropdown: public-read packs
-        char sys[512]; int sn = 0;
-        for (uint32_t i = 0; i < count && sn < (int)sizeof(sys) - 100; i++) {
+        for (uint32_t i = 0; i < count && np < 24; i++) {
             uint32_t pack_ord = keys[i] & 0x3FFFFF;
             if (pack_ord == 0 || pack_ord == 1) continue;
             if (!user_auth_can_read(&session, (uint16_t)pack_ord)) continue;
@@ -531,32 +542,75 @@ static uint16_t build_nav(char *buf, uint16_t bufsize, const char *req) {
             if (!kv_get_copy(keys[i], sbuf, &slen, NULL)) continue;
             if (slen < 6 || sbuf[0] != 0x7D || sbuf[1] != 0xCA) continue;
 
-            char pname[16] = "?"; uint8_t pflags = 0;
+            nav_pack_t *p = &packs[np];
+            p->ord = pack_ord;
+            p->name[0] = '?'; p->name[1] = '\0';
+            p->module[0] = '\0';
+
             uint16_t off = 4;
             while (off + 1 < slen) {
                 uint8_t ord = sbuf[off] & 0x1F, flen = sbuf[off + 1]; off += 2;
                 if (off + flen > slen) break;
                 if (ord == 0 && flen >= 1) {
                     uint8_t nl = sbuf[off]; if (nl > flen - 1) nl = flen - 1; if (nl > 15) nl = 15;
-                    memcpy(pname, sbuf + off + 1, nl); pname[nl] = '\0';
-                    if (pname[0] >= 'a' && pname[0] <= 'z') pname[0] -= 32;
+                    memcpy(p->name, sbuf + off + 1, nl); p->name[nl] = '\0';
+                    if (p->name[0] >= 'a' && p->name[0] <= 'z') p->name[0] -= 32;
                 }
-                if (ord == 3 && flen >= 1) pflags = sbuf[off];
+                if (ord == 4 && flen >= 1) {
+                    uint8_t ml = sbuf[off]; if (ml > flen - 1) ml = flen - 1; if (ml > 15) ml = 15;
+                    memcpy(p->module, sbuf + off + 1, ml); p->module[ml] = '\0';
+                    if (p->module[0] >= 'a' && p->module[0] <= 'z') p->module[0] -= 32;
+                }
                 off += flen;
             }
-
-            if (!(pflags & 0x01)) continue; // only public packs
-            sn += snprintf(sys + sn, sizeof(sys) - sn,
-                "<a href='/pack/%lu'>%s</a>", (unsigned long)pack_ord, pname);
+            np++;
         }
 
-        if (sn > 0) {
+        // Flat links: packs with no module
+        for (uint8_t i = 0; i < np && n < (int)bufsize - 100; i++) {
+            if (packs[i].module[0]) continue;
             n += snprintf(buf + n, bufsize - n,
-                "<div class=dropdown><span>System &#x25BE;</span><div class=dropdown-menu>%s</div></div>", sys);
+                "<a href='/pack/%lu'>%s</a>", (unsigned long)packs[i].ord, packs[i].name);
+        }
+
+        // Grouped dropdowns: collect unique modules, render a dropdown each
+        char seen[8][16]; uint8_t nseen = 0;
+        for (uint8_t i = 0; i < np && nseen < 8; i++) {
+            if (!packs[i].module[0]) continue;
+            // Check if already seen
+            bool dup = false;
+            for (uint8_t s = 0; s < nseen; s++) {
+                if (strcmp(seen[s], packs[i].module) == 0) { dup = true; break; }
+            }
+            if (dup) continue;
+            strncpy(seen[nseen], packs[i].module, 15); seen[nseen][15] = '\0';
+            nseen++;
+
+            // Build dropdown items for this module
+            char items[384]; int sn = 0;
+            for (uint8_t j = 0; j < np && sn < (int)sizeof(items) - 80; j++) {
+                if (strcmp(packs[j].module, packs[i].module) != 0) continue;
+                sn += snprintf(items + sn, sizeof(items) - sn,
+                    "<a href='/pack/%lu'>%s</a>", (unsigned long)packs[j].ord, packs[j].name);
+            }
+            if (sn > 0 && n < (int)bufsize - 200) {
+                n += snprintf(buf + n, bufsize - n,
+                    "<div class=dropdown><span>%s &#x25BE;</span>"
+                    "<div class=dropdown-menu>%s</div></div>",
+                    packs[i].module, items);
+            }
         }
 
         if (user_auth_is_admin(&session))
-            n += snprintf(buf + n, bufsize - n, "<a href=/admin>Admin</a><a href='/admin/meta'>Schema</a><a href='/admin/log'>Log</a><a href='/admin/flash'>Flash</a><a href='/admin/ram'>RAM</a><a href=/update>OTA</a>");
+            n += snprintf(buf + n, bufsize - n,
+                "<div class=dropdown><span>Admin &#x25BE;</span><div class=dropdown-menu>"
+                "<a href=/admin>Users</a>"
+                "<a href='/admin/meta'>Schema</a>"
+                "<a href='/admin/log'>Log</a>"
+                "<a href='/admin/flash'>Flash</a>"
+                "<a href='/admin/ram'>RAM</a>"
+                "<a href=/update>OTA Update</a>"
+                "</div></div>");
         n += snprintf(buf + n, bufsize - n, "<a href=/logout>Logout</a>");
     }
     return (uint16_t)n;
@@ -567,7 +621,7 @@ static void http_page_req(struct tcp_pcb *pcb, const char *req,
     uint16_t head_len = sizeof(PAGE_HEAD) - 1;
     uint16_t nav_tail_len = sizeof(PAGE_NAV_TAIL) - 1;
     uint16_t tail_len = sizeof(PAGE_TAIL) - 1;
-    char nav[512];
+    char nav[768];
     uint16_t nav_len = build_nav(nav, sizeof(nav), req);
     uint32_t total = (uint32_t)head_len + nav_len + nav_tail_len + content_len + tail_len;
     char hdr[256];
@@ -1405,10 +1459,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 if (pack_ord == 1 && (ords[i] == 1 || ords[i] == 2)) continue;
 
                 n += snprintf(pg + n, sizeof(pg) - n,
-                    "<div class=fg>"
-                    "<label><span>%s</span>"
-                    "<span class='badge badge-type'>%s</span></label>",
-                    names[i], tn);
+                    "<div class=fg><label>%s <span style='font-weight:400;color:#505868;font-size:11px'>%s</span></label>",
+                    names[i], type_friendly(ftypes[i]));
 
                 uint8_t tc = ftypes[i];
                 if (tc == 0x07) {
@@ -1416,8 +1468,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     bool checked = vals[ords[i]][0] == 't' || vals[ords[i]][0] == '1';
                     n += snprintf(pg + n, sizeof(pg) - n,
                         "<select data-ord='%u' data-ftype='bool'>"
-                        "<option value='false'%s>false</option>"
-                        "<option value='true'%s>true</option></select>",
+                        "<option value='false'%s>No</option>"
+                        "<option value='true'%s>Yes</option></select>",
                         (unsigned)ords[i], checked ? "" : " selected", checked ? " selected" : "");
                 } else if (tc == 18) {
                     // lookup — dropdown showing resolved names
@@ -1427,7 +1479,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
                     n += snprintf(pg + n, sizeof(pg) - n,
                         "<select data-ord='%u' data-ftype='lookup'>"
-                        "<option value='0'>— none —</option>",
+                        "<option value='0'>— select —</option>",
                         (unsigned)ords[i]);
 
                     uint32_t lkeys[16];
@@ -1487,9 +1539,9 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 } else if (tc == 0x08 || tc == 0x09) {
                     n += snprintf(pg + n, sizeof(pg) - n,
                         "<input data-ord='%u' data-ftype='%s' value='%s' maxlength='%u'"
-                        " placeholder='%s (max %u chars)'>",
+                        " placeholder='Up to %u characters'>",
                         (unsigned)ords[i], tn, vals[ords[i]], (unsigned)maxlens[i],
-                        tn, (unsigned)maxlens[i]);
+                        (unsigned)maxlens[i]);
                 } else if (tc == 0x10) {
                     n += snprintf(pg + n, sizeof(pg) - n,
                         "<input data-ord='%u' data-ftype='array_u16' value='%s' "
@@ -1767,6 +1819,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "<form id=packForm><div class=row>"
             "<div><label>Ordinal</label><input id=po type=number min=0 max=1023></div>"
             "<div><label>Name</label><input id=pn placeholder='e.g. devices'></div>"
+            "<div><label>Module</label><input id=pm placeholder='e.g. Sales'></div>"
             "<div style='align-self:end'><button>Create</button></div>"
             "</div></form></div>"
             "<script src=/app.js></script>");
@@ -1786,18 +1839,22 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         sscanf(path, "/admin/meta/%u", &pack_ord);
 
         uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
-        char pname[32] = "?";
+        char pname[32] = "?"; char pmodule[32] = "";
         uint8_t ords[32], ftypes[32], maxlens[32]; char names[32][32];
         memset(names, 0, sizeof(names));
         uint8_t fc = 0;
         if (kv_get_copy(((uint32_t)0 << 22) | pack_ord, sbuf, &slen, NULL))
-            fc = parse_schema(sbuf, slen, names, ftypes, maxlens, ords, pname, 32);
+            fc = parse_schema_ex(sbuf, slen, names, ftypes, maxlens, ords, pname, 32, pmodule);
 
         char pg[4096]; int n = 0;
         n += snprintf(pg + n, sizeof(pg) - n,
-            "<h2><a href='/admin/meta' style='color:#0ff'>&laquo; Schema</a> / Pack %u: %s</h2>"
-            "<table><thead><tr><th>#</th><th>Field</th><th>Type</th><th>Max</th></tr></thead><tbody>",
+            "<h2><a href='/admin/meta' style='color:#7eb8f0'>&laquo; Schema</a> / Pack %u: %s",
             pack_ord, pname);
+        if (pmodule[0])
+            n += snprintf(pg + n, sizeof(pg) - n,
+                " <span style='font-size:13px;color:#6a7080'>(%s)</span>", pmodule);
+        n += snprintf(pg + n, sizeof(pg) - n, "</h2>"
+            "<table><thead><tr><th>#</th><th>Field</th><th>Type</th><th>Max</th></tr></thead><tbody>");
 
         for (uint8_t i = 0; i < fc && n < (int)sizeof(pg) - 200; i++) {
             const char *tn = type_name(ftypes[i]);
@@ -1882,25 +1939,32 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             http_json(pcb, "403 Forbidden", "{\"error\":\"admin required\"}");
             return;
         }
-        // Parse JSON body: {"ordinal":N,"name":"..."}
+        // Parse JSON body: {"ordinal":N,"name":"...","module":"..."}
         char jbuf[256];
         uint16_t jlen = body_len < sizeof(jbuf) - 1 ? body_len : sizeof(jbuf) - 1;
         memcpy(jbuf, body, jlen); jbuf[jlen] = '\0';
 
-        unsigned int ord = 0; char name[32] = "";
+        unsigned int ord = 0; char name[32] = ""; char module[32] = "";
         char *p = strstr(jbuf, "\"ordinal\":");
         if (p) ord = (unsigned int)atoi(p + 10);
         p = strstr(jbuf, "\"name\":\"");
         if (p) { p += 8; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(name, p, end - p); name[end - p] = '\0'; } }
+        p = strstr(jbuf, "\"module\":\"");
+        if (p) { p += 10; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(module, p, end - p); module[end - p] = '\0'; } }
 
         if (name[0] == '\0') {
             http_json(pcb, "400 Bad Request", "{\"error\":\"name required\"}");
             return;
         }
 
-        // Build minimal schema card (no fields yet)
+        // Build minimal schema card (no fields yet), with optional module
         user_auth_schema_field_t empty[1];
-        if (user_auth_seed_schema((uint16_t)ord, name, empty, 0)) {
+        bool ok;
+        if (module[0])
+            ok = user_auth_seed_schema_module((uint16_t)ord, name, empty, 0, module);
+        else
+            ok = user_auth_seed_schema((uint16_t)ord, name, empty, 0);
+        if (ok) {
             http_json(pcb, "200 OK", "{\"ok\":true}");
         } else {
             http_json(pcb, "500 Internal Server Error", "{\"error\":\"schema write failed\"}");

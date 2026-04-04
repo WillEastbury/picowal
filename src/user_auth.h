@@ -104,6 +104,9 @@ typedef struct {
 bool user_auth_seed_schema(uint16_t pack_ord, const char *pack_name,
                            const user_auth_schema_field_t *fields,
                            uint8_t field_count);
+bool user_auth_seed_schema_module(uint16_t pack_ord, const char *pack_name,
+                                   const user_auth_schema_field_t *fields,
+                                   uint8_t field_count, const char *module);
 
 // Field type codes matching picowal.js T.* constants
 #define UA_FT_UINT8      0x01
