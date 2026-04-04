@@ -1943,16 +1943,19 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         char jbuf[256];
         uint16_t jlen = body_len < sizeof(jbuf) - 1 ? body_len : sizeof(jbuf) - 1;
         memcpy(jbuf, body, jlen); jbuf[jlen] = '\0';
+        web_log("[meta/new] body_len=%u jbuf='%.60s'", (unsigned)body_len, jbuf);
 
         unsigned int ord = 0; char name[32] = ""; char module[32] = "";
+        // Parse JSON values — handle optional whitespace after colons
         char *p = strstr(jbuf, "\"ordinal\":");
-        if (p) ord = (unsigned int)atoi(p + 10);
-        p = strstr(jbuf, "\"name\":\"");
-        if (p) { p += 8; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(name, p, end - p); name[end - p] = '\0'; } }
-        p = strstr(jbuf, "\"module\":\"");
-        if (p) { p += 10; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(module, p, end - p); module[end - p] = '\0'; } }
+        if (p) { p += 10; while (*p == ' ') p++; ord = (unsigned int)atoi(p); }
+        p = strstr(jbuf, "\"name\":");
+        if (p) { p += 7; while (*p == ' ') p++; if (*p == '"') { p++; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(name, p, end - p); name[end - p] = '\0'; } } }
+        p = strstr(jbuf, "\"module\":");
+        if (p) { p += 9; while (*p == ' ') p++; if (*p == '"') { p++; char *end = strchr(p, '"'); if (end && end - p < 32) { memcpy(module, p, end - p); module[end - p] = '\0'; } } }
 
         if (name[0] == '\0') {
+            web_log("[meta/new] name empty, ord=%u module='%s'", ord, module);
             http_json(pcb, "400 Bad Request", "{\"error\":\"name required\"}");
             return;
         }
