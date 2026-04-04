@@ -2,7 +2,6 @@
 #include "wal_defs.h"
 #include "wal_fence.h"
 #include "wal_dma.h"
-#include "key_store.h"
 #include "kv_flash.h"
 #include "ili9488.h"
 #include "xpt2046.h"
@@ -15,6 +14,8 @@
 #include "pico/rand.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "lwip/dns.h"
+#include "lwip/dhcp.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -177,27 +178,23 @@ static void auth_send_challenge(net_ctx_t *ctx) {
     printf("[auth] Challenge sent (%d byte nonce)\n", AUTH_NONCE_LEN);
 }
 
-// Runtime PSK — loaded from flash at startup
-static uint8_t g_psk[PSK_LEN];
+// TCP WAL auth uses the hardcoded PSK from net_core.h
+static uint8_t g_psk[32] = AUTH_PSK;
 static bool g_show_psk = false;
 static bool g_touch_was_pressed = false;
 
-void net_core_set_psk(const uint8_t psk[PSK_LEN]) {
-    memcpy(g_psk, psk, PSK_LEN);
-}
-
-static void format_psk_hex(char out[PSK_LEN * 2 + 1]) {
+static void format_psk_hex(char out[32 * 2 + 1]) {
     static const char hex[] = "0123456789ABCDEF";
-    for (uint32_t i = 0; i < PSK_LEN; i++) {
+    for (uint32_t i = 0; i < 32; i++) {
         out[i * 2] = hex[g_psk[i] >> 4];
         out[i * 2 + 1] = hex[g_psk[i] & 0x0F];
     }
-    out[PSK_LEN * 2] = '\0';
+    out[32 * 2] = '\0';
 }
 
 static bool auth_verify_response(net_ctx_t *ctx, const uint8_t *response) {
     uint8_t expected[AUTH_RESPONSE_LEN];
-    auth_compute_hmac(ctx->nonce, AUTH_NONCE_LEN, g_psk, PSK_LEN, expected);
+    auth_compute_hmac(ctx->nonce, AUTH_NONCE_LEN, g_psk, 32, expected);
 
     // Constant-time compare
     uint8_t diff = 0;
@@ -660,8 +657,21 @@ void net_core_run(wal_state_t *wal) {
     printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
     cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
 
-    // Start HTTP admin server on port 80 (shares the PSK)
-    web_server_set_psk(g_psk);
+    // Static IP: 192.168.222.223/16, gw+dns 192.168.0.1
+    {
+        ip4_addr_t ip, mask, gw;
+        IP4_ADDR(&ip,   192, 168, 222, 223);
+        IP4_ADDR(&mask,  255, 255,   0,   0);
+        IP4_ADDR(&gw,   192, 168,   0,   1);
+        dhcp_stop(netif_list);
+        netif_set_addr(netif_list, &ip, &mask, &gw);
+        ip_addr_t dns;
+        ip_addr_set_ip4_u32(&dns, ip4_addr_get_u32(&gw));
+        dns_setserver(0, &dns);
+        printf("[net] Static IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    }
+
+    // Start HTTP server on port 80
     web_server_init(g_ctx.wal);
 
     // Main poll loop

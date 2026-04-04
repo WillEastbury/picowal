@@ -28,7 +28,7 @@
 #define KV_SECTOR_SIZE     4096
 #define KV_PAGE_SIZE       256
 
-#define KV_REGION_START    (1024 * 1024)   // after 1MB firmware
+#define KV_REGION_START    (1024 * 1024)   // after 1MB firmware region
 #define KV_DEADLOG_SECTORS 4
 #define KV_REGION_END      (KV_FLASH_TOTAL - KV_SECTOR_SIZE - (KV_DEADLOG_SECTORS * KV_SECTOR_SIZE))
 #define KV_DEADLOG_START   (KV_REGION_END)

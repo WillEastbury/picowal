@@ -1,0 +1,62 @@
+; PIO SPI Master — Mode 0 (CPOL=0, CPHA=0)
+; Side-set: CLK pin (1 pin)
+; OUT: MOSI pin (1 pin)
+; IN:  MISO pin (1 pin)
+;
+; Clocks data out on falling edge, samples on rising edge.
+; Autopush/autopull at 8 bits for byte-level transfers.
+
+.program sd_spi
+.side_set 1
+
+.wrap_target
+    out pins, 1  side 0  [1]  ; CLK low, set MOSI bit, hold 1 cycle
+    in  pins, 1  side 1  [1]  ; CLK high, sample MISO bit, hold 1 cycle
+.wrap
+
+% c-sdk {
+#include "hardware/gpio.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
+
+static inline void sd_spi_program_init(PIO pio, uint sm, uint offset,
+                                        uint clk_pin, uint mosi_pin, uint miso_pin,
+                                        float clk_div) {
+    pio_sm_config c = sd_spi_program_get_default_config(offset);
+
+    // Side-set: CLK
+    sm_config_set_sideset_pins(&c, clk_pin);
+
+    // OUT: MOSI (1 pin)
+    sm_config_set_out_pins(&c, mosi_pin, 1);
+
+    // IN: MISO (1 pin)  
+    sm_config_set_in_pins(&c, miso_pin);
+
+    // Shift: MSB first, autopull at 8 bits, autopush at 8 bits
+    sm_config_set_out_shift(&c, false, true, 8);   // MSB first, autopull @ 8
+    sm_config_set_in_shift(&c, false, true, 8);     // MSB first, autopush @ 8
+
+    sm_config_set_clkdiv(&c, clk_div);
+
+    // GPIO init
+    pio_gpio_init(pio, clk_pin);
+    pio_gpio_init(pio, mosi_pin);
+    pio_gpio_init(pio, miso_pin);
+
+    // Pin directions: CLK and MOSI are outputs, MISO is input
+    pio_sm_set_pindirs_with_mask(pio, sm,
+        (1u << clk_pin) | (1u << mosi_pin),   // outputs
+        (1u << clk_pin) | (1u << mosi_pin) | (1u << miso_pin));  // mask
+
+    // Pull MISO high (SD cards use pull-up)
+    gpio_pull_up(miso_pin);
+
+    // Start with CLK low
+    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << clk_pin));
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+%}

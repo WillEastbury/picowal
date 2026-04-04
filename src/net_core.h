@@ -60,7 +60,4 @@
 // Core 0 entry: WiFi + TCP server + auth + WAL dispatch (never returns)
 void net_core_run(wal_state_t *wal);
 
-// Set the runtime PSK (call before net_core_run)
-void net_core_set_psk(const uint8_t psk[32]);
-
 #endif

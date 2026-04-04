@@ -27,6 +27,9 @@ typedef enum {
     META_FT_ISODATETIME,
     META_FT_UTF8,
     META_FT_LATIN1,
+    META_FT_ARRAY_U16,  // array of uint16 values (length-prefixed)
+    META_FT_BLOB,       // raw binary blob (length-prefixed)
+    META_FT_LOOKUP,     // reference to a card in another pack (max_len = target pack ordinal)
 } metadata_field_type_t;
 
 typedef struct {

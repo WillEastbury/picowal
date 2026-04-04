@@ -18,15 +18,25 @@ add_executable(${PROJECT_NAME}
     src/net_core.c
     src/wal_engine.c
     src/wal_dma.c
-    src/key_store.c
     src/kv_flash.c
     src/metadata_dict.c
     src/httpd/web_server.c
+    src/user_auth.c
+    src/kv_sd.c
+    src/storage.c
+    src/field_index.c
+    src/query.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/lib/heatshrink
+)
+
+target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/lib/heatshrink/heatshrink_encoder.c
+    ${CMAKE_CURRENT_LIST_DIR}/lib/heatshrink/heatshrink_decoder.c
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -38,9 +48,12 @@ target_link_libraries(${PROJECT_NAME}
     hardware_gpio
     hardware_dma
     hardware_flash
+    hardware_pio
     pico_rand
+    pico_mbedtls
     lcd_driver
     touch_driver
+    sd_driver
 )
 
 pico_enable_stdio_usb(${PROJECT_NAME} 1)

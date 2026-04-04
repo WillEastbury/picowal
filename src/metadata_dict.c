@@ -52,6 +52,9 @@ static const char *const g_field_type_names[] = {
     "isodatetime",
     "utf8",
     "latin1",
+    "array_u16",
+    "blob",
+    "lookup",
 };
 
 static bool load_type_from_store(uint16_t ordinal, metadata_type_def_t *out) {
