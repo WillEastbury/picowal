@@ -82,7 +82,10 @@ query_t query_parse(const char *text) {
 
         if (line[0] == 'S' && line[1] == ':') {
             char *f = line + 2;
-            while (*f && q.select_count < QUERY_MAX_SELECT) {
+            while (*f == ' ') f++;
+            // S:* means select all fields (leave select_count = 0)
+            if (*f == '*') { q.select_count = 0; }
+            else while (*f && q.select_count < QUERY_MAX_SELECT) {
                 while (*f == ' ' || *f == ',') f++;
                 if (!*f) break;
                 char *end = f;
