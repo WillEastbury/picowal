@@ -432,20 +432,25 @@ static const char PAGE_HEAD[] =
     "<!DOCTYPE html><html><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
     "<title>PicoWAL</title><style>"
-    "body{font:14px monospace;background:#1a1a2e;color:#e0e0e0;padding:0;margin:0}"
+    "body{font:14px/1.5 monospace;background:#1a1a2e;color:#e0e0e0;padding:0;margin:0}"
     ".page{max-width:960px;margin:0 auto;padding:16px}"
-    "h1{color:#e94560;margin:0}h2{color:#0ff;border-bottom:1px solid #0f3460;padding-bottom:4px}"
+    "h1{color:#e94560;margin:0}h2{color:#0ff;border-bottom:1px solid #0f3460;padding-bottom:4px;margin-bottom:12px}"
     "a{color:#0ff}a:hover{color:#e94560}"
-    "input,select,button,textarea{font:inherit;padding:6px 10px;margin:4px 0;background:#0f3460;color:#e0e0e0;border:1px solid #1a1a4e;border-radius:4px}"
-    "button{background:#e94560;color:#fff;border:none;cursor:pointer;font-weight:bold}button:hover{background:#c73652}"
-    ".btn-sm{padding:3px 8px;font-size:12px}.btn-del{background:#c0392b}.btn-ok{background:#27ae60}"
-    "table{width:100%;border-collapse:collapse;margin:8px 0}th,td{padding:6px 8px;border:1px solid #0f3460;text-align:left}"
-    "th{background:#0f3460}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:120px}"
-    ".card{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px;margin:12px 0}"
-    ".badge{background:#27ae60;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px}"
-    ".badge-admin{background:#e94560}"
-    "label{display:block;font-size:12px;color:#888;margin-top:6px}"
-    "pre{background:#222;padding:10px;border-radius:4px;white-space:pre-wrap;max-height:400px;overflow-y:auto}"
+    "input,select,button,textarea{font:inherit;padding:8px 12px;margin:4px 0;background:#0f3460;color:#e0e0e0;border:1px solid #1a1a4e;border-radius:6px;box-sizing:border-box}"
+    "input:focus,select:focus,textarea:focus{border-color:#0ff;outline:none;box-shadow:0 0 0 2px rgba(0,255,255,.15)}"
+    "button{background:#e94560;color:#fff;border:none;cursor:pointer;font-weight:bold;padding:10px 20px;border-radius:6px;transition:background .15s}button:hover{background:#c73652}"
+    ".btn-sm{padding:5px 12px;font-size:12px}.btn-del{background:#c0392b}.btn-ok{background:#27ae60}.btn-ok:hover{background:#219a52}"
+    ".btn-ghost{background:transparent;border:1px solid #0f3460;color:#0ff;padding:6px 14px}.btn-ghost:hover{background:#0f3460}"
+    "table{width:100%;border-collapse:collapse;margin:8px 0}th,td{padding:8px 10px;border:1px solid #0f3460;text-align:left}"
+    "th{background:#0f3460;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#8899aa}"
+    "tr:hover td{background:#16213e}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:120px}"
+    ".card{background:#16213e;border:1px solid #0f3460;border-radius:10px;padding:20px;margin:12px 0}"
+    ".badge{background:#27ae60;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;letter-spacing:.3px}"
+    ".badge-admin{background:#e94560}.badge-type{background:#0f3460;color:#0ff}"
+    "label{display:block;font-size:12px;color:#8899aa;margin-top:0}"
+    ".fg{margin-bottom:16px}.fg label{margin-bottom:4px;display:flex;justify-content:space-between;align-items:center}"
+    ".fg input,.fg select,.fg textarea{width:100%}"
+    "pre{background:#222;padding:10px;border-radius:6px;white-space:pre-wrap;max-height:400px;overflow-y:auto}"
     ".tabs{display:flex;gap:0;margin-bottom:0}.tab{padding:10px 20px;cursor:pointer;background:#0f3460;border:1px solid #1a1a4e;border-bottom:none;border-radius:8px 8px 0 0;color:#888}"
     ".tab.active{background:#16213e;color:#0ff;border-color:#0f3460}.tab-body{display:none}.tab-body.active{display:block}"
     "#loginBox{max-width:300px;margin:80px auto}"
@@ -458,6 +463,14 @@ static const char PAGE_HEAD[] =
     ".dropdown-menu{display:none;position:absolute;top:100%;left:0;background:#0f3460;border:1px solid #1a1a4e;border-radius:4px;min-width:140px;z-index:10;padding:4px 0}"
     ".dropdown:hover .dropdown-menu{display:block}"
     ".dropdown-menu a{display:block;padding:6px 16px;margin:0;white-space:nowrap}.dropdown-menu a:hover{background:#1a1a4e}"
+    ".pager{display:flex;justify-content:space-between;align-items:center;margin:12px 0;font-size:12px;color:#888}"
+    ".pager a{padding:6px 14px;background:#0f3460;border-radius:6px;text-decoration:none;font-size:12px}"
+    ".search-box{display:flex;gap:8px;margin-bottom:12px}"
+    ".search-box input{flex:1}.search-box button{white-space:nowrap}"
+    ".card-nav{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}"
+    ".card-nav a{font-size:12px;padding:4px 10px;background:#0f3460;border-radius:6px;text-decoration:none}"
+    ".crumb{font-size:12px;color:#888;margin-bottom:4px}.crumb a{font-size:12px}"
+    ".actions{display:flex;gap:8px;margin-top:16px;padding-top:16px;border-top:1px solid #0f3460}"
     "</style></head><body>"
     "<nav><span class=nav-brand>&#x1F5C3; PicoWAL</span>"
     "<div><a href=/>Home</a><a href=/status>Status</a><a href=/query>Query</a>";
@@ -1314,7 +1327,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         int parts = sscanf(path, "/pack/%u/%u", &pack_ord, &card_ord);
 
         if (parts == 2) {
-            // SSR card form
+            // SSR card form — redesigned
             if (!user_auth_can_read(&session, (uint16_t)pack_ord)) {
                 http_json(pcb, "403 Forbidden", "{\"error\":\"no access\"}");
                 return;
@@ -1334,19 +1347,56 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             uint8_t dbuf[KV_MAX_VALUE]; uint16_t dlen = KV_MAX_VALUE;
             bool exists = kv_get_copy(key, dbuf, &dlen, NULL);
 
+            // Find prev/next card IDs for navigation
+            uint32_t nav_keys[64];
+            uint32_t nav_count = kv_range(((uint32_t)(pack_ord & 0x3FFu) << 22),
+                                          0xFFC00000u, nav_keys, NULL, 64);
+            int32_t prev_card = -1, next_card = -1;
+            for (uint32_t ni = 0; ni < nav_count; ni++) {
+                uint32_t nid = nav_keys[ni] & 0x3FFFFF;
+                if (nid == card_ord) {
+                    if (ni > 0) prev_card = (int32_t)(nav_keys[ni-1] & 0x3FFFFF);
+                    if (ni + 1 < nav_count) next_card = (int32_t)(nav_keys[ni+1] & 0x3FFFFF);
+                    break;
+                }
+            }
+
             // Parse data values by ordinal
             char vals[32][64]; memset(vals, 0, sizeof(vals));
-            // Map: ftypes_by_ord[ord] = type_code for decode
             uint8_t ftypes_by_ord[32]; memset(ftypes_by_ord, 0, sizeof(ftypes_by_ord));
             for (uint8_t i = 0; i < fc; i++) ftypes_by_ord[ords[i]] = ftypes[i];
             if (exists) parse_card_values(dbuf, dlen, vals, ftypes_by_ord, 32);
 
             char pg[4096]; int n = 0;
+
+            // Breadcrumb
             n += snprintf(pg + n, sizeof(pg) - n,
-                "<h2><a href='/pack/%u' style='color:#0ff'>%s</a> / Card %u%s</h2>"
-                "<form id=cardForm data-pack='%u' data-card='%u'>",
-                pack_ord, pname, card_ord,
-                exists ? "" : " <span class=badge>NEW</span>",
+                "<div class=crumb><a href='/'>Home</a> &rsaquo; "
+                "<a href='/pack/%u'>%s</a> &rsaquo; Card %u</div>",
+                pack_ord, pname, card_ord);
+
+            // Card navigation
+            n += snprintf(pg + n, sizeof(pg) - n, "<div class=card-nav>");
+            if (prev_card >= 0)
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<a href='/pack/%u/%ld'>&larr; Card %ld</a>",
+                    pack_ord, (long)prev_card, (long)prev_card);
+            else
+                n += snprintf(pg + n, sizeof(pg) - n, "<span></span>");
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<span style='color:#0ff;font-weight:bold'>Card %u%s</span>",
+                card_ord, exists ? "" : " <span class=badge>NEW</span>");
+            if (next_card >= 0)
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<a href='/pack/%u/%ld'>Card %ld &rarr;</a>",
+                    pack_ord, (long)next_card, (long)next_card);
+            else
+                n += snprintf(pg + n, sizeof(pg) - n, "<span></span>");
+            n += snprintf(pg + n, sizeof(pg) - n, "</div>");
+
+            // Card form inside styled container
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<div class=card><form id=cardForm data-pack='%u' data-card='%u'>",
                 pack_ord, card_ord);
 
             for (uint8_t i = 0; i < fc && n < (int)sizeof(pg) - 500; i++) {
@@ -1355,39 +1405,36 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 if (pack_ord == 1 && (ords[i] == 1 || ords[i] == 2)) continue;
 
                 n += snprintf(pg + n, sizeof(pg) - n,
-                    "<div style='margin-bottom:8px'>"
-                    "<label style='display:flex;justify-content:space-between'>"
-                    "<span>%s</span>"
-                    "<span class=badge style='font-size:10px'>%s</span></label>",
+                    "<div class=fg>"
+                    "<label><span>%s</span>"
+                    "<span class='badge badge-type'>%s</span></label>",
                     names[i], tn);
 
                 uint8_t tc = ftypes[i];
                 if (tc == 0x07) {
-                    // bool — checkbox
+                    // bool — dropdown
                     bool checked = vals[ords[i]][0] == 't' || vals[ords[i]][0] == '1';
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<select data-ord='%u' data-ftype='bool' style='width:100%%'>"
+                        "<select data-ord='%u' data-ftype='bool'>"
                         "<option value='false'%s>false</option>"
                         "<option value='true'%s>true</option></select>",
                         (unsigned)ords[i], checked ? "" : " selected", checked ? " selected" : "");
                 } else if (tc == 18) {
-                    // lookup — dropdown from target pack
+                    // lookup — dropdown showing resolved names
                     uint8_t target_pack = maxlens[i];
                     uint32_t cur_val = 0;
                     if (vals[ords[i]][0]) cur_val = (uint32_t)strtoul(vals[ords[i]], NULL, 10);
 
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<select data-ord='%u' data-ftype='lookup' style='width:100%%'>"
-                        "<option value='0'>-- none --</option>",
+                        "<select data-ord='%u' data-ftype='lookup'>"
+                        "<option value='0'>— none —</option>",
                         (unsigned)ords[i]);
 
-                    // Scan target pack for cards
-                    uint32_t lkeys[32];
+                    uint32_t lkeys[16];
                     uint32_t lcount = kv_range(((uint32_t)(target_pack & 0x3FFu) << 22),
-                                               0xFFC00000u, lkeys, NULL, 32);
-                    for (uint32_t li = 0; li < lcount && n < (int)sizeof(pg) - 200; li++) {
+                                               0xFFC00000u, lkeys, NULL, 16);
+                    for (uint32_t li = 0; li < lcount && n < (int)sizeof(pg) - 300; li++) {
                         uint32_t lid = lkeys[li] & 0x3FFFFF;
-                        // Read field 0 for display name
                         char lname[32] = "";
                         uint8_t lbuf[256]; uint16_t llen = sizeof(lbuf);
                         if (kv_get_copy(lkeys[li], lbuf, &llen, NULL) && llen >= 4 &&
@@ -1406,57 +1453,51 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                             }
                         }
                         n += snprintf(pg + n, sizeof(pg) - n,
-                            "<option value='%lu'%s>%lu: %s</option>",
+                            "<option value='%lu'%s>%s</option>",
                             (unsigned long)lid, lid == cur_val ? " selected" : "",
-                            (unsigned long)lid, lname[0] ? lname : "?");
+                            lname[0] ? lname : "?");
                     }
                     n += snprintf(pg + n, sizeof(pg) - n, "</select>");
                 } else if (tc == 0x11) {
-                    // blob — read-only
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input data-ord='%u' data-ftype='blob' value='%s' style='width:100%%' readonly "
-                        "title='Blob fields are read-only'>",
+                        "<input data-ord='%u' data-ftype='blob' value='%s' readonly "
+                        "title='Blob fields are read-only' style='opacity:.6'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0A) {
-                    // isodate — date picker
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input type=date data-ord='%u' data-ftype='isodate' value='%s' style='width:100%%'>",
+                        "<input type=date data-ord='%u' data-ftype='isodate' value='%s'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0B) {
-                    // isotime — time picker
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input type=time data-ord='%u' data-ftype='isotime' value='%s' style='width:100%%' step=1>",
+                        "<input type=time data-ord='%u' data-ftype='isotime' value='%s' step=1>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0C) {
-                    // isodatetime — datetime-local picker
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input type=datetime-local data-ord='%u' data-ftype='isodatetime' value='%s' style='width:100%%' step=1>",
+                        "<input type=datetime-local data-ord='%u' data-ftype='isodatetime' value='%s' step=1>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x01 || tc == 0x02 || tc == 0x03 || tc == 0x04 || tc == 0x05 || tc == 0x06) {
-                    // numeric types — number input with min/max
                     const char *minmax = "";
-                    if (tc == 0x01) minmax = " min=0 max=255";         // uint8
-                    else if (tc == 0x04) minmax = " min=-128 max=127"; // int8
-                    else if (tc == 0x02) minmax = " min=0 max=65535";  // uint16
-                    else if (tc == 0x05) minmax = " min=-32768 max=32767"; // int16
+                    if (tc == 0x01) minmax = " min=0 max=255";
+                    else if (tc == 0x04) minmax = " min=-128 max=127";
+                    else if (tc == 0x02) minmax = " min=0 max=65535";
+                    else if (tc == 0x05) minmax = " min=-32768 max=32767";
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input type=number data-ord='%u' data-ftype='%s' value='%s' style='width:100%%'%s>",
+                        "<input type=number data-ord='%u' data-ftype='%s' value='%s'%s>",
                         (unsigned)ords[i], tn, vals[ords[i]], minmax);
                 } else if (tc == 0x08 || tc == 0x09) {
-                    // ascii, utf8 — text input with maxlength
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input data-ord='%u' data-ftype='%s' value='%s' style='width:100%%' maxlength='%u'>",
-                        (unsigned)ords[i], tn, vals[ords[i]], (unsigned)maxlens[i]);
+                        "<input data-ord='%u' data-ftype='%s' value='%s' maxlength='%u'"
+                        " placeholder='%s (max %u chars)'>",
+                        (unsigned)ords[i], tn, vals[ords[i]], (unsigned)maxlens[i],
+                        tn, (unsigned)maxlens[i]);
                 } else if (tc == 0x10) {
-                    // array_u16 — comma-separated
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input data-ord='%u' data-ftype='array_u16' value='%s' style='width:100%%' "
+                        "<input data-ord='%u' data-ftype='array_u16' value='%s' "
                         "placeholder='comma-separated numbers'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else {
-                    // fallback text input
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<input data-ord='%u' data-ftype='%s' value='%s' style='width:100%%'>",
+                        "<input data-ord='%u' data-ftype='%s' value='%s'>",
                         (unsigned)ords[i], tn, vals[ords[i]]);
                 }
 
@@ -1464,26 +1505,37 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             }
 
             n += snprintf(pg + n, sizeof(pg) - n,
-                "<div style='display:flex;gap:8px;margin-top:12px'>"
+                "<div class=actions>"
                 "<button type=submit class=btn-ok>&#x1F4BE; Save</button>"
-                "%s</div>"
+                "%s"
+                "<a href='/pack/%u' class=btn-ghost style='text-decoration:none'>Cancel</a>"
+                "</div>"
                 "<div id=saveMsg style='margin-top:8px'></div>"
-                "</form><script src=/app.js></script>",
+                "</form></div><script src=/app.js></script>",
                 user_auth_can_delete(&session, (uint16_t)pack_ord)
-                    ? "<button type=button id=delBtn class=btn-del>Delete</button>" : "");
+                    ? "<button type=button id=delBtn class=btn-del>&#x1F5D1; Delete</button>" : "",
+                pack_ord);
 
             http_page_req(pcb, req, pg, (uint16_t)n);
             return;
         }
 
         if (parts >= 1) {
-            // SSR card list for pack
+            // SSR card list for pack — paginated, multi-column
             if (!user_auth_can_read(&session, (uint16_t)pack_ord)) {
                 http_json(pcb, "403 Forbidden", "{\"error\":\"no access\"}");
                 return;
             }
 
-            // Load schema for pack name + field 0 name
+            // Parse page from query string ?p=N
+            unsigned int page = 0;
+            if (query) {
+                const char *pp = strstr(query, "p=");
+                if (pp) page = (unsigned int)strtoul(pp + 2, NULL, 10);
+            }
+            const unsigned int per_page = 10;
+
+            // Load schema
             uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
             char pname[32] = "?";
             uint8_t ords[32], ftypes[32], maxlens[32]; char names[32][32];
@@ -1492,45 +1544,121 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             if (kv_get_copy(((uint32_t)0 << 22) | pack_ord, sbuf, &slen, NULL))
                 fc = parse_schema(sbuf, slen, names, ftypes, maxlens, ords, pname, 32);
 
-            char pg[4096]; int n = 0;
-            n += snprintf(pg + n, sizeof(pg) - n,
-                "<h2>%s <span style='color:#888'>(Pack %u)</span></h2>"
-                "<table><thead><tr><th>Card</th><th>%s</th><th></th></tr></thead><tbody>",
-                pname, pack_ord, fc > 0 ? names[0] : "Value");
+            // Show up to 4 columns
+            uint8_t ncols = fc > 4 ? 4 : fc;
+            if (ncols == 0) ncols = 1;
 
-            uint32_t keys[64];
-            uint32_t count = kv_range(((uint32_t)(pack_ord & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 64);
-            for (uint32_t i = 0; i < count && n < (int)sizeof(pg) - 300; i++) {
+            // Get total card count
+            uint32_t keys[128];
+            uint32_t total = kv_range(((uint32_t)(pack_ord & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 128);
+            uint32_t total_pages = (total + per_page - 1) / per_page;
+            if (total_pages == 0) total_pages = 1;
+            if (page >= total_pages) page = total_pages - 1;
+            uint32_t start = page * per_page;
+            uint32_t end = start + per_page;
+            if (end > total) end = total;
+
+            char pg[4096]; int n = 0;
+
+            // Header with count
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<h2>%s <span style='color:#556;font-size:14px'>Pack %u &middot; %lu cards</span></h2>",
+                pname, pack_ord, (unsigned long)total);
+
+            // Search bar
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<div class=search-box>"
+                "<input id=qSearch placeholder='S:* F:%s W:%s|==|...' value=''>"
+                "<button onclick=\"location.href='/query?q='+encodeURIComponent(document.getElementById('qSearch').value)\" class=btn-ghost>"
+                "&#x1F50D; Query</button></div>",
+                pname, fc > 0 ? names[0] : "field");
+
+            // Table header with multiple columns
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<table><thead><tr><th style='width:50px'>#</th>");
+            for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 200; c++)
+                n += snprintf(pg + n, sizeof(pg) - n, "<th>%s</th>", names[c]);
+            n += snprintf(pg + n, sizeof(pg) - n, "</tr></thead><tbody>");
+
+            // Render rows for this page
+            for (uint32_t i = start; i < end && n < (int)sizeof(pg) - 400; i++) {
                 uint32_t cid = keys[i] & 0x3FFFFF;
-                // Read field 0 value for display
-                char display[48] = "";
-                uint8_t cbuf[512]; uint16_t clen = sizeof(cbuf);
+                // Decode all visible fields
+                char fvals[4][48];
+                memset(fvals, 0, sizeof(fvals));
+                uint8_t cbuf[256]; uint16_t clen = sizeof(cbuf);
                 if (kv_get_copy(keys[i], cbuf, &clen, NULL) && clen >= 4 &&
                     cbuf[0] == 0x7D && cbuf[1] == 0xCA) {
+                    // Walk card binary, decode only the columns we need
                     uint16_t coff = 4;
-                    if (coff + 1 < clen) {
+                    while (coff + 1 < clen) {
                         uint8_t cord = cbuf[coff] & 0x1F;
                         uint8_t cflen = cbuf[coff + 1];
-                        if (cord == ords[0] && coff + 2 + cflen <= clen && fc > 0) {
-                            decode_field_str(display, sizeof(display), ftypes[0],
-                                           cbuf + coff + 2, cflen);
+                        coff += 2;
+                        if (coff + cflen > clen) break;
+                        for (uint8_t c = 0; c < ncols && c < fc; c++) {
+                            if (ords[c] == cord)
+                                decode_field_str(fvals[c], sizeof(fvals[c]), ftypes[c], cbuf + coff, cflen);
+                        }
+                        coff += cflen;
+                    }
+                    for (uint8_t c = 0; c < ncols && c < fc; c++) {
+                        // Resolve lookup display name
+                        if (ftypes[c] == 0x12 && fvals[c][0]) {
+                            uint32_t lid = (uint32_t)strtoul(fvals[c], NULL, 10);
+                            uint8_t tp = maxlens[c];
+                            uint32_t lk = ((uint32_t)(tp & 0x3FFu) << 22) | (lid & 0x3FFFFF);
+                            uint8_t lb[128]; uint16_t ll = sizeof(lb);
+                            if (kv_get_copy(lk, lb, &ll, NULL) && ll >= 6 &&
+                                lb[0]==0x7D && lb[1]==0xCA) {
+                                uint8_t lo = lb[4] & 0x1F, lfl = lb[5];
+                                if (lo == 0 && 6 + lfl <= ll && lfl >= 1) {
+                                    uint8_t sl = lb[6]; if (sl > lfl-1) sl=lfl-1; if (sl>46) sl=46;
+                                    memcpy(fvals[c], lb+7, sl); fvals[c][sl]='\0';
+                                }
+                            }
                         }
                     }
                 }
-                n += snprintf(pg + n, sizeof(pg) - n,
-                    "<tr><td>%lu</td><td><a href='/pack/%u/%lu'>%s</a></td>"
-                    "<td style='width:40px;text-align:center'><a href='/pack/%u/%lu'>&#x270E;</a></td></tr>",
-                    (unsigned long)cid, pack_ord, (unsigned long)cid,
-                    display[0] ? display : "(empty)",
-                    pack_ord, (unsigned long)cid);
-            }
 
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<tr><td><a href='/pack/%u/%lu'>%lu</a></td>",
+                    pack_ord, (unsigned long)cid, (unsigned long)cid);
+                for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 100; c++) {
+                    if (c == 0)
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td><a href='/pack/%u/%lu' style='color:#e0e0e0'>%s</a></td>",
+                            pack_ord, (unsigned long)cid, fvals[c][0] ? fvals[c] : "-");
+                    else
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td>%s</td>", fvals[c][0] ? fvals[c] : "-");
+                }
+                n += snprintf(pg + n, sizeof(pg) - n, "</tr>");
+            }
+            n += snprintf(pg + n, sizeof(pg) - n, "</tbody></table>");
+
+            // Pagination bar
+            n += snprintf(pg + n, sizeof(pg) - n, "<div class=pager>");
+            if (page > 0)
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<a href='/pack/%u?p=%u'>&larr; Prev</a>", pack_ord, page - 1);
+            else
+                n += snprintf(pg + n, sizeof(pg) - n, "<span></span>");
             n += snprintf(pg + n, sizeof(pg) - n,
-                "</tbody></table>"
-                "<div style='margin-top:12px'>"
-                "<a href='/pack/%u/%lu' class=btn-sm style='text-decoration:none;padding:6px 16px;background:#e94560;color:#fff;border-radius:4px'>"
-                "+ New Card</a></div>",
-                pack_ord, (unsigned long)(count > 0 ? (keys[count-1] & 0x3FFFFF) + 1 : 0));
+                "<span>Page %u of %lu</span>", page + 1, (unsigned long)total_pages);
+            if (page + 1 < total_pages)
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<a href='/pack/%u?p=%u'>Next &rarr;</a>", pack_ord, page + 1);
+            else
+                n += snprintf(pg + n, sizeof(pg) - n, "<span></span>");
+            n += snprintf(pg + n, sizeof(pg) - n, "</div>");
+
+            // New card button
+            n += snprintf(pg + n, sizeof(pg) - n,
+                "<div style='margin-top:8px'>"
+                "<a href='/pack/%u/%lu' style='text-decoration:none'>"
+                "<button type=button>+ New Card</button></a></div>",
+                pack_ord, (unsigned long)(total > 0 ? (keys[total-1] & 0x3FFFFF) + 1 : 0));
 
             http_page_req(pcb, req, pg, (uint16_t)n);
             return;
