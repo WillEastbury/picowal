@@ -155,7 +155,7 @@ static const char APP_JS[] =
 "var cards=[];"
 "rows.forEach(function(tr){"
 "var cid=parseInt(tr.dataset.cid)||0;"
-"var inputs=tr.querySelectorAll('input[data-ord]');"
+"var inputs=tr.querySelectorAll('[data-ord]');"
 "var hasVal=false;inputs.forEach(function(el){if(el.value)hasVal=true});"
 "if(!hasVal)return;"
 "var parts=[0x7D,0xCA,1,0];"
@@ -581,8 +581,8 @@ static const char PAGE_HEAD[] =
     ".card-nav a{font-size:13px;padding:6px 14px;background:#252830;border:1px solid #3a3f50;border-radius:8px}"
     ".crumb{font-size:13px;color:#6a7080;margin-bottom:8px}.crumb a{font-size:13px}"
     ".actions{display:flex;gap:10px;margin-top:20px;padding-top:20px;border-top:1px solid #2a3040}"
-    ".grid td{padding:2px 4px;border-bottom:1px solid #22252e}.grid input{font:13px/1.3 monospace;color:#d5d8e0;padding:4px 6px;margin:0;border:1px solid transparent;background:transparent;width:100%}"
-    ".grid input:focus{border-color:#7eb8f0;background:#252830}"
+    ".grid td{padding:2px 4px;border-bottom:1px solid #22252e}.grid input,.grid select{font:13px/1.3 monospace;color:#d5d8e0;padding:4px 6px;margin:0;border:1px solid transparent;background:transparent;width:100%}"
+    ".grid input:focus,.grid select:focus{border-color:#7eb8f0;background:#252830}"
     ".grid tr:hover td{background:#1c1e26}.grid .new-row input{border:1px solid #3a3f50}"
     "</style></head><body>"
     "<nav><span class=nav-brand>&#x1F5C3; PicoWAL</span>"
@@ -1677,6 +1677,37 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     dcols[ndc++] = fi;
                 }
 
+                // Pre-load lookup options for each column that's a lookup
+                // lk_keys[col][0..lk_count-1] = card keys, lk_names[col][i] = field 0 name
+                typedef struct { uint32_t id; char name[24]; } lk_opt_t;
+                lk_opt_t lk_opts[6][16];
+                uint8_t lk_counts[6]; bool lk_is_search[6];
+                memset(lk_counts, 0, sizeof(lk_counts));
+                memset(lk_is_search, 0, sizeof(lk_is_search));
+                for (uint8_t d = 0; d < ndc; d++) {
+                    if (ctypes[dcols[d]] != 0x12) continue;
+                    uint8_t tp = cmaxl[dcols[d]];
+                    uint32_t tkeys[17];
+                    uint32_t tcount = kv_range(((uint32_t)(tp & 0x3FFu) << 22),
+                                               0xFFC00000u, tkeys, NULL, 17);
+                    if (tcount > 16) { lk_is_search[d] = true; continue; }
+                    for (uint32_t ti = 0; ti < tcount && ti < 16; ti++) {
+                        lk_opts[d][ti].id = tkeys[ti] & 0x3FFFFF;
+                        lk_opts[d][ti].name[0] = '?'; lk_opts[d][ti].name[1] = '\0';
+                        uint8_t tb[128]; uint16_t tl = sizeof(tb);
+                        if (kv_get_copy(tkeys[ti], tb, &tl, NULL) && tl >= 6 &&
+                            tb[0]==0x7D && tb[1]==0xCA) {
+                            uint8_t to = tb[4] & 0x1F, tfl = tb[5];
+                            if (to == 0 && 6 + tfl <= tl && tfl >= 1) {
+                                uint8_t sl = tb[6]; if (sl>tfl-1) sl=tfl-1; if (sl>23) sl=23;
+                                memcpy(lk_opts[d][ti].name, tb+7, sl);
+                                lk_opts[d][ti].name[sl] = '\0';
+                            }
+                        }
+                        lk_counts[d] = (uint8_t)(ti + 1);
+                    }
+                }
+
                 char plabel[32]; pretty_name(plabel, sizeof(plabel), cpname);
                 n += snprintf(pg + n, sizeof(pg) - n,
                     "<div class=card style='margin-top:8px'>"
@@ -1736,13 +1767,50 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                         }
                         uint8_t dtc = ctypes[dcols[d]];
                         const char *dtn = type_name(dtc);
-                        n += snprintf(pg + n, sizeof(pg) - n,
-                            "<td><input data-ord='%u' data-ftype='%s' value='%s'",
-                            (unsigned)cords[dcols[d]], dtn, fv);
-                        if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
-                        else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
-                        else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
-                        n += snprintf(pg + n, sizeof(pg) - n, "></td>");
+                        if (dtc == 0x12 && !lk_is_search[d]) {
+                            // Lookup with <=16 options: select dropdown
+                            uint32_t cur = fv[0] ? (uint32_t)strtoul(fv, NULL, 10) : 0;
+                            n += snprintf(pg + n, sizeof(pg) - n,
+                                "<td><select data-ord='%u' data-ftype='lookup'>"
+                                "<option value='0'>—</option>",
+                                (unsigned)cords[dcols[d]]);
+                            for (uint8_t li = 0; li < lk_counts[d] && n < (int)sizeof(pg) - 80; li++) {
+                                n += snprintf(pg + n, sizeof(pg) - n,
+                                    "<option value='%lu'%s>%s</option>",
+                                    (unsigned long)lk_opts[d][li].id,
+                                    lk_opts[d][li].id == cur ? " selected" : "",
+                                    lk_opts[d][li].name);
+                            }
+                            n += snprintf(pg + n, sizeof(pg) - n, "</select></td>");
+                        } else if (dtc == 0x12 && lk_is_search[d]) {
+                            // Lookup with >16 options: search input
+                            char resolved[24] = "";
+                            if (fv[0]) {
+                                uint32_t lid = (uint32_t)strtoul(fv, NULL, 10);
+                                uint8_t tp2 = cmaxl[dcols[d]];
+                                uint32_t lk2 = ((uint32_t)(tp2&0x3FFu)<<22)|(lid&0x3FFFFF);
+                                uint8_t lb2[64]; uint16_t ll2 = sizeof(lb2);
+                                if (kv_get_copy(lk2, lb2, &ll2, NULL) && ll2>=6 && lb2[0]==0x7D && lb2[1]==0xCA) {
+                                    uint8_t lo2=lb2[4]&0x1F, lfl2=lb2[5];
+                                    if (lo2==0 && 6+lfl2<=ll2 && lfl2>=1) {
+                                        uint8_t sl2=lb2[6]; if(sl2>lfl2-1) sl2=lfl2-1; if(sl2>23) sl2=23;
+                                        memcpy(resolved,lb2+7,sl2); resolved[sl2]='\0';
+                                    }
+                                }
+                            }
+                            n += snprintf(pg + n, sizeof(pg) - n,
+                                "<td><input data-ord='%u' data-ftype='lookup' value='%s'"
+                                " data-lid='%s' placeholder='Search...' list='lk%u_%u'></td>",
+                                (unsigned)cords[dcols[d]], fv, resolved, (unsigned)cp, (unsigned)cords[dcols[d]]);
+                        } else {
+                            n += snprintf(pg + n, sizeof(pg) - n,
+                                "<td><input data-ord='%u' data-ftype='%s' value='%s'",
+                                (unsigned)cords[dcols[d]], dtn, fv);
+                            if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
+                            else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
+                            else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
+                            n += snprintf(pg + n, sizeof(pg) - n, "></td>");
+                        }
                     }
                     n += snprintf(pg + n, sizeof(pg) - n,
                         "<td><a href='#' onclick='this.closest(\"tr\").remove();return false' "
@@ -1759,13 +1827,31 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     uint8_t dtc = ctypes[dcols[d]];
                     const char *dtn = type_name(dtc);
                     char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
-                    n += snprintf(pg + n, sizeof(pg) - n,
-                        "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'",
-                        (unsigned)cords[dcols[d]], dtn, ph);
-                    if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
-                    else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
-                    else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
-                    n += snprintf(pg + n, sizeof(pg) - n, "></td>");
+                    if (dtc == 0x12 && !lk_is_search[d]) {
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td><select data-ord='%u' data-ftype='lookup'>"
+                            "<option value='0'>—</option>",
+                            (unsigned)cords[dcols[d]]);
+                        for (uint8_t li = 0; li < lk_counts[d] && n < (int)sizeof(pg) - 80; li++) {
+                            n += snprintf(pg + n, sizeof(pg) - n,
+                                "<option value='%lu'>%s</option>",
+                                (unsigned long)lk_opts[d][li].id, lk_opts[d][li].name);
+                        }
+                        n += snprintf(pg + n, sizeof(pg) - n, "</select></td>");
+                    } else if (dtc == 0x12 && lk_is_search[d]) {
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td><input data-ord='%u' data-ftype='lookup' value='' "
+                            "placeholder='Search %s...' list='lk%u_%u'></td>",
+                            (unsigned)cords[dcols[d]], ph, (unsigned)cp, (unsigned)cords[dcols[d]]);
+                    } else {
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'",
+                            (unsigned)cords[dcols[d]], dtn, ph);
+                        if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
+                        else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
+                        else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
+                        n += snprintf(pg + n, sizeof(pg) - n, "></td>");
+                    }
                 }
                 n += snprintf(pg + n, sizeof(pg) - n, "<td></td></tr>");
 
