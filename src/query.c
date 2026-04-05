@@ -10,6 +10,52 @@
 #include <ctype.h>
 
 // ============================================================
+// Fanout stats cache — tracks avg children per lookup value
+// Used by the cost estimator to reorder WHERE predicates
+// ============================================================
+#define FANOUT_CACHE_MAX 16
+static struct {
+    uint16_t child_pack;    // pack being scanned
+    uint8_t  link_ord;      // lookup field ordinal
+    uint16_t parent_pack;   // target of lookup
+    uint16_t total_children;
+    uint16_t distinct_parents;
+    bool     valid;
+} s_fanout[FANOUT_CACHE_MAX];
+static uint8_t s_fanout_count = 0;
+
+// Update fanout stats for a lookup relationship (called during scans)
+static void fanout_update(uint16_t child_pack, uint8_t link_ord,
+                          uint16_t parent_pack, uint16_t total, uint16_t distinct) {
+    for (uint8_t i = 0; i < s_fanout_count; i++) {
+        if (s_fanout[i].valid && s_fanout[i].child_pack == child_pack &&
+            s_fanout[i].link_ord == link_ord) {
+            s_fanout[i].total_children = total;
+            s_fanout[i].distinct_parents = distinct;
+            return;
+        }
+    }
+    uint8_t idx = s_fanout_count < FANOUT_CACHE_MAX ? s_fanout_count++ : 0;
+    s_fanout[idx].child_pack = child_pack;
+    s_fanout[idx].link_ord = link_ord;
+    s_fanout[idx].parent_pack = parent_pack;
+    s_fanout[idx].total_children = total;
+    s_fanout[idx].distinct_parents = distinct;
+    s_fanout[idx].valid = true;
+}
+
+// Estimate average fanout for a lookup (0 = unknown)
+static uint16_t fanout_estimate(uint16_t child_pack, uint8_t link_ord) {
+    for (uint8_t i = 0; i < s_fanout_count; i++) {
+        if (s_fanout[i].valid && s_fanout[i].child_pack == child_pack &&
+            s_fanout[i].link_ord == link_ord && s_fanout[i].distinct_parents > 0) {
+            return s_fanout[i].total_children / s_fanout[i].distinct_parents;
+        }
+    }
+    return 0;
+}
+
+// ============================================================
 // Query Parser
 // ============================================================
 
@@ -399,11 +445,13 @@ static int8_t find_lookup_to(const pack_schema_t *from, const pack_schema_t *to)
 }
 
 // Search a pack for cards matching field == value, return card IDs
+// Also updates cardinality cache for the pack
 static uint32_t search_pack_field(const pack_schema_t *ps, uint8_t field_idx,
                                    const char *value, query_op_t op,
                                    uint32_t *out_ids, uint32_t max) {
     uint32_t keys[256];
     uint32_t count = kv_range(((uint32_t)ps->ord << 22), 0xFFC00000u, keys, NULL, 256);
+    set_cardinality((uint16_t)ps->ord, count);
     uint32_t found = 0;
     for (uint32_t i = 0; i < count && found < max; i++) {
         uint8_t card[2048]; uint16_t clen = sizeof(card);
@@ -560,9 +608,84 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                 si, q->select_fields[si].agg, s_names[si], s_ords[si], s_types[si]);
     }
 
+    // ---- Cost-based predicate reordering ----
+    // Estimate selectivity of each WHERE predicate, sort most selective first.
+    // This ensures the scan short-circuits early on selective filters.
+    if (w_count > 1) {
+        uint32_t w_cost[QUERY_MAX_WHERE];
+        uint8_t primary_bucket = get_cardinality((uint16_t)primary->ord);
+        // Rough row count from bucket: 10^bucket
+        uint32_t est_rows = 1;
+        for (uint8_t b = 0; b < primary_bucket; b++) est_rows *= 10;
+
+        for (uint8_t wi = 0; wi < w_count; wi++) {
+            if (w_types[wi] == 0x12) {
+                // Lookup field — cost = avg fanout (fewer = more selective)
+                uint16_t fo = fanout_estimate((uint16_t)primary->ord, w_ords[wi]);
+                if (w_ops[wi] == QOP_EQ) w_cost[wi] = fo > 0 ? fo : est_rows / 4;
+                else if (w_ops[wi] == QOP_IN) {
+                    // IN with N values: cost ~ fanout * N
+                    uint8_t nvals = 1;
+                    for (const char *p = w_values[wi]; *p; p++) if (*p == ',') nvals++;
+                    w_cost[wi] = (fo > 0 ? fo : est_rows / 4) * nvals;
+                } else w_cost[wi] = est_rows / 2;
+            } else if (w_ops[wi] == QOP_EQ) {
+                // Equality on non-lookup: assume ~1/10th of rows match
+                w_cost[wi] = est_rows / 10 + 1;
+            } else if (w_ops[wi] == QOP_IN || w_ops[wi] == QOP_NI) {
+                uint8_t nvals = 1;
+                for (const char *p = w_values[wi]; *p; p++) if (*p == ',') nvals++;
+                w_cost[wi] = (est_rows * nvals) / 10 + 1;
+            } else if (w_ops[wi] == QOP_NE) {
+                // NE is least selective — most rows pass
+                w_cost[wi] = est_rows;
+            } else {
+                // Range ops (>, <, >=, <=): ~half
+                w_cost[wi] = est_rows / 2 + 1;
+            }
+        }
+
+        // Bubble sort predicates by cost (ascending = most selective first)
+        for (uint8_t i = 0; i < w_count - 1; i++) {
+            for (uint8_t j = i + 1; j < w_count; j++) {
+                if (w_cost[j] < w_cost[i]) {
+                    // Swap all parallel arrays
+                    uint8_t to; query_op_t top; char tv[64]; uint32_t tc;
+                    to = w_ords[i]; w_ords[i] = w_ords[j]; w_ords[j] = to;
+                    to = w_types[i]; w_types[i] = w_types[j]; w_types[j] = to;
+                    top = w_ops[i]; w_ops[i] = w_ops[j]; w_ops[j] = top;
+                    memcpy(tv, w_values[i], 64); memcpy(w_values[i], w_values[j], 64); memcpy(w_values[j], tv, 64);
+                    tc = w_cost[i]; w_cost[i] = w_cost[j]; w_cost[j] = tc;
+                }
+            }
+        }
+    }
+
     // Scan primary pack, filter
     uint32_t card_keys[256];
     uint32_t card_count = kv_range(((uint32_t)primary->ord << 22), 0xFFC00000u, card_keys, NULL, 256);
+    set_cardinality((uint16_t)primary->ord, card_count);
+
+    // Collect fanout stats for lookup WHERE predicates
+    for (uint8_t wi = 0; wi < w_count; wi++) {
+        if (w_types[wi] == 0x12) {
+            // Count distinct values for this lookup field across all cards
+            uint32_t distinct_set[64]; uint16_t ndistinct = 0;
+            uint16_t sample = card_count > 64 ? 64 : (uint16_t)card_count;
+            for (uint16_t si = 0; si < sample; si++) {
+                uint8_t sc[256]; uint16_t sl = sizeof(sc);
+                if (!kv_get_copy(card_keys[si], sc, &sl, NULL)) continue;
+                char sv[16] = "";
+                extract_field_str(sc, sl, w_ords[wi], w_types[wi], sv, sizeof(sv));
+                uint32_t vid = (uint32_t)strtoul(sv, NULL, 10);
+                bool dup = false;
+                for (uint16_t d = 0; d < ndistinct; d++) { if (distinct_set[d] == vid) { dup = true; break; } }
+                if (!dup && ndistinct < 64) distinct_set[ndistinct++] = vid;
+            }
+            if (ndistinct > 0)
+                fanout_update((uint16_t)primary->ord, w_ords[wi], 0, (uint16_t)card_count, ndistinct);
+        }
+    }
 
     if (!has_agg) {
         // No aggregates — direct output per row

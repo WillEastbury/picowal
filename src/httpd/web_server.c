@@ -336,6 +336,121 @@ static void pretty_name(char *out, int max, const char *raw) {
     out[o] = '\0';
 }
 
+// Cardinality bucket: 3-bit log10 estimate stored in schema flags bits 1-3
+// 0=<10, 1=10-99, 2=100-999, 3=1K-9K, 4=10K-99K, 5=100K-999K, 6=1M-9M, 7=10M+
+#define SCHEMA_FLAG_PUBLIC_READ  0x01
+#define SCHEMA_CARD_BUCKET(flags) (((flags) >> 1) & 0x07)
+#define SCHEMA_CARD_BUCKET_SET(flags, b) (((flags) & 0xF1) | (((b) & 0x07) << 1))
+
+static uint8_t card_count_bucket(uint32_t count) {
+    if (count < 10) return 0;
+    if (count < 100) return 1;
+    if (count < 1000) return 2;
+    if (count < 10000) return 3;
+    if (count < 100000) return 4;
+    if (count < 1000000) return 5;
+    if (count < 10000000) return 6;
+    return 7;
+}
+
+// SRAM cardinality cache — avoids kv_range just to check pack size
+// Lazy: populated on first access, updated when card list is viewed
+// Flushed to schema flags on idle (poll loop)
+#define CARD_CACHE_MAX 32
+static struct {
+    uint16_t pack;
+    uint8_t  bucket;   // 0-7
+    bool     dirty;    // needs flush to schema flags
+    bool     valid;
+} s_card_cache[CARD_CACHE_MAX];
+static uint8_t s_card_cache_count = 0;
+
+static int card_cache_find(uint16_t pack) {
+    for (uint8_t i = 0; i < s_card_cache_count; i++)
+        if (s_card_cache[i].valid && s_card_cache[i].pack == pack) return i;
+    return -1;
+}
+
+// Get cardinality bucket for a pack (from SRAM cache, or scan + cache)
+uint8_t get_cardinality(uint16_t pack) {
+    int idx = card_cache_find(pack);
+    if (idx >= 0) return s_card_cache[idx].bucket;
+
+    // Cache miss — count cards and cache
+    uint32_t keys[1];
+    uint32_t count = kv_range(((uint32_t)(pack & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 0);
+    // kv_range with limit 0 may not work — use a reasonable scan
+    // Actually kv_range returns up to limit, so use a large limit for count
+    uint32_t keys2[128];
+    count = kv_range(((uint32_t)(pack & 0x3FFu) << 22), 0xFFC00000u, keys2, NULL, 128);
+    uint8_t bucket = card_count_bucket(count);
+
+    if (s_card_cache_count < CARD_CACHE_MAX) {
+        idx = s_card_cache_count++;
+    } else {
+        idx = 0; // evict oldest
+    }
+    s_card_cache[idx].pack = pack;
+    s_card_cache[idx].bucket = bucket;
+    s_card_cache[idx].dirty = true;
+    s_card_cache[idx].valid = true;
+    return bucket;
+}
+
+// Update cardinality from a known count (called when card list already has the count)
+void set_cardinality(uint16_t pack, uint32_t count) {
+    uint8_t bucket = card_count_bucket(count);
+    int idx = card_cache_find(pack);
+    if (idx >= 0) {
+        if (s_card_cache[idx].bucket != bucket) {
+            s_card_cache[idx].bucket = bucket;
+            s_card_cache[idx].dirty = true;
+        }
+        return;
+    }
+    if (s_card_cache_count < CARD_CACHE_MAX) {
+        idx = s_card_cache_count++;
+    } else {
+        idx = 0;
+    }
+    s_card_cache[idx].pack = pack;
+    s_card_cache[idx].bucket = bucket;
+    s_card_cache[idx].dirty = true;
+    s_card_cache[idx].valid = true;
+}
+
+// Flush one dirty entry to schema flags. Call from idle/poll loop.
+// Returns true if work was done.
+bool flush_cardinality_one(void) {
+    for (uint8_t i = 0; i < s_card_cache_count; i++) {
+        if (!s_card_cache[i].valid || !s_card_cache[i].dirty) continue;
+        uint32_t skey = ((uint32_t)0 << 22) | s_card_cache[i].pack;
+        uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
+        if (!kv_get_copy(skey, sbuf, &slen, NULL) || slen < 4) {
+            s_card_cache[i].dirty = false;
+            continue;
+        }
+        if (sbuf[0] != 0x7D || sbuf[1] != 0xCA) { s_card_cache[i].dirty = false; continue; }
+        uint16_t off = 4;
+        while (off + 1 < slen) {
+            uint8_t ord = sbuf[off] & 0x1F, flen = sbuf[off + 1];
+            if (off + 2 + flen > slen) break;
+            if (ord == 3 && flen >= 1) {
+                uint8_t old = SCHEMA_CARD_BUCKET(sbuf[off + 2]);
+                if (old != s_card_cache[i].bucket) {
+                    sbuf[off + 2] = SCHEMA_CARD_BUCKET_SET(sbuf[off + 2], s_card_cache[i].bucket);
+                    kv_put(skey, sbuf, slen);
+                }
+                break;
+            }
+            off += 2 + flen;
+        }
+        s_card_cache[i].dirty = false;
+        return true;
+    }
+    return false;
+}
+
 // Decode a field value from a card into a display string
 // Type codes match picowal.js / user_auth.c FT_* constants
 static int decode_field_str(char *out, int max, uint8_t type_code,
@@ -1696,10 +1811,12 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 for (uint8_t d = 0; d < ndc; d++) {
                     if (ctypes[dcols[d]] != 0x12) continue;
                     uint8_t tp = cmaxl[dcols[d]];
+                    uint8_t bucket = get_cardinality(tp);
+                    if (bucket >= 2) { lk_is_search[d] = true; continue; } // >=100 cards
                     uint32_t tkeys[17];
                     uint32_t tcount = kv_range(((uint32_t)(tp & 0x3FFu) << 22),
                                                0xFFC00000u, tkeys, NULL, 17);
-                    if (tcount > 16) { lk_is_search[d] = true; continue; }
+                    if (tcount > 16) { lk_is_search[d] = true; set_cardinality(tp, tcount); continue; }
                     for (uint32_t ti = 0; ti < tcount && ti < 16; ti++) {
                         lk_opts[d][ti].id = tkeys[ti] & 0x3FFFFF;
                         lk_opts[d][ti].name[0] = '?'; lk_opts[d][ti].name[1] = '\0';
@@ -1907,6 +2024,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             // Get total card count
             uint32_t keys[128];
             uint32_t total = kv_range(((uint32_t)(pack_ord & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 128);
+            set_cardinality((uint16_t)pack_ord, total);
             uint32_t total_pages = (total + per_page - 1) / per_page;
             if (total_pages == 0) total_pages = 1;
             if (page >= total_pages) page = total_pages - 1;

@@ -683,6 +683,7 @@ void net_core_run(wal_state_t *wal) {
         }
         if (!web_server_recent_activity(HTTP_UI_QUIET_MS)) {
             lcd_refresh_dashboard(wal);
+            flush_cardinality_one();
         }
         sleep_ms(1);
     }
