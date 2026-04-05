@@ -581,7 +581,8 @@ static const char PAGE_HEAD[] =
     ".card-nav a{font-size:13px;padding:6px 14px;background:#252830;border:1px solid #3a3f50;border-radius:8px}"
     ".crumb{font-size:13px;color:#6a7080;margin-bottom:8px}.crumb a{font-size:13px}"
     ".actions{display:flex;gap:10px;margin-top:20px;padding-top:20px;border-top:1px solid #2a3040}"
-    ".grid td{padding:2px 4px;border-bottom:1px solid #22252e}.grid input{font:13px/1.3 monospace;color:#d5d8e0}"
+    ".grid td{padding:2px 4px;border-bottom:1px solid #22252e}.grid input{font:13px/1.3 monospace;color:#d5d8e0;padding:4px 6px;margin:0;border:1px solid transparent;background:transparent;width:100%}"
+    ".grid input:focus{border-color:#7eb8f0;background:#252830}"
     ".grid tr:hover td{background:#1c1e26}.grid .new-row input{border:1px solid #3a3f50}"
     "</style></head><body>"
     "<nav><span class=nav-brand>&#x1F5C3; PicoWAL</span>"
@@ -1498,7 +1499,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             for (uint8_t i = 0; i < fc; i++) ftypes_by_ord[ords[i]] = ftypes[i];
             if (exists) parse_card_values(dbuf, dlen, vals, ftypes_by_ord, 32);
 
-            char pg[6144]; int n = 0;
+            char pg[8192]; int n = 0;
 
             // Breadcrumb
             n += snprintf(pg + n, sizeof(pg) - n,
@@ -1736,10 +1737,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                         uint8_t dtc = ctypes[dcols[d]];
                         const char *dtn = type_name(dtc);
                         n += snprintf(pg + n, sizeof(pg) - n,
-                            "<td><input data-ord='%u' data-ftype='%s' value='%s'"
-                            " style='padding:4px 6px;margin:0;border:1px solid transparent;background:transparent;width:100%%'"
-                            " onfocus='this.style.borderColor=\"#7eb8f0\";this.style.background=\"#252830\"'"
-                            " onblur='this.style.borderColor=\"transparent\";this.style.background=\"transparent\"'",
+                            "<td><input data-ord='%u' data-ftype='%s' value='%s'",
                             (unsigned)cords[dcols[d]], dtn, fv);
                         if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
                         else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
@@ -1762,9 +1760,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     const char *dtn = type_name(dtc);
                     char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'"
-                        " style='padding:4px 6px;margin:0;width:100%%'"
-                        " onfocus='this.closest(\"tr\").style.opacity=1'",
+                        "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'",
                         (unsigned)cords[dcols[d]], dtn, ph);
                     if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
                     else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
