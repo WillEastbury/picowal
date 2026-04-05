@@ -157,14 +157,18 @@ static const char APP_JS[] =
 
 // Parse a schema card from Pack 0 into field definitions.
 // Returns field count. Fills names[], types[], maxlens[], ords[].
-static uint8_t parse_schema_ex(const uint8_t *card, uint16_t card_len,
+
+// Full schema parser including child packs (ord 6)
+static uint8_t parse_schema_full(const uint8_t *card, uint16_t card_len,
                             char names[][32], uint8_t *types, uint8_t *maxlens, uint8_t *ords,
-                            char *pack_name, uint8_t max_fields, char *module) {
+                            char *pack_name, uint8_t max_fields, char *module,
+                            uint8_t *children, uint8_t *child_count) {
     if (card_len < 4 || card[0] != 0x7D || card[1] != 0xCA) return 0;
     uint16_t off = 4;
     uint8_t field_count = 0;
     char name_buf[256]; uint16_t name_buf_len = 0;
     if (module) module[0] = '\0';
+    if (child_count) *child_count = 0;
 
     while (off + 1 < card_len) {
         uint8_t ord = card[off] & 0x1F;
@@ -196,10 +200,14 @@ static uint8_t parse_schema_ex(const uint8_t *card, uint16_t card_len,
             memcpy(name_buf, card + off, flen);
             name_buf_len = flen;
         }
+        if (ord == 6 && children && child_count) {
+            uint8_t nc = flen > 8 ? 8 : flen;
+            for (uint8_t i = 0; i < nc; i++) children[i] = card[off + i];
+            *child_count = nc;
+        }
         off += flen;
     }
 
-    // Parse null-separated names
     if (name_buf_len > 0) {
         uint8_t ni = 0; uint16_t si = 0;
         for (uint16_t i = 0; i < name_buf_len && ni < field_count && ni < max_fields; i++) {
@@ -212,6 +220,13 @@ static uint8_t parse_schema_ex(const uint8_t *card, uint16_t card_len,
         }
     }
     return field_count < max_fields ? field_count : max_fields;
+}
+
+static uint8_t parse_schema_ex(const uint8_t *card, uint16_t card_len,
+                            char names[][32], uint8_t *types, uint8_t *maxlens, uint8_t *ords,
+                            char *pack_name, uint8_t max_fields, char *module) {
+    return parse_schema_full(card, card_len, names, types, maxlens, ords,
+                             pack_name, max_fields, module, NULL, NULL);
 }
 
 static uint8_t parse_schema(const uint8_t *card, uint16_t card_len,
@@ -1406,14 +1421,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 return;
             }
 
-            // Load schema
+            // Load schema including children list
             uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
             char pname[32] = "?";
             uint8_t ords[32], ftypes[32], maxlens[32]; char names[32][32];
             memset(names, 0, sizeof(names));
             uint8_t fc = 0;
+            uint8_t child_packs[8]; uint8_t child_count = 0;
             if (kv_get_copy(((uint32_t)0 << 22) | pack_ord, sbuf, &slen, NULL))
-                fc = parse_schema(sbuf, slen, names, ftypes, maxlens, ords, pname, 32);
+                fc = parse_schema_full(sbuf, slen, names, ftypes, maxlens, ords,
+                                       pname, 32, NULL, child_packs, &child_count);
 
             // Load data card
             uint32_t key = ((uint32_t)(pack_ord & 0x3FF) << 22) | (card_ord & 0x3FFFFF);
@@ -1440,7 +1457,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             for (uint8_t i = 0; i < fc; i++) ftypes_by_ord[ords[i]] = ftypes[i];
             if (exists) parse_card_values(dbuf, dlen, vals, ftypes_by_ord, 32);
 
-            char pg[4096]; int n = 0;
+            char pg[6144]; int n = 0;
 
             // Breadcrumb
             n += snprintf(pg + n, sizeof(pg) - n,
@@ -1584,10 +1601,128 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 "<a href='/pack/%u' class=btn-ghost style='text-decoration:none'>Cancel</a>"
                 "</div>"
                 "<div id=saveMsg style='margin-top:8px'></div>"
-                "</form></div><script src=/app.js></script>",
+                "</form></div>",
                 user_auth_can_delete(&session, (uint16_t)pack_ord)
                     ? "<button type=button id=delBtn class=btn-del>&#x1F5D1; Delete</button>" : "",
                 pack_ord);
+
+            // ---- Master-Child: render detail tables for child packs ----
+            for (uint8_t ci = 0; ci < child_count && exists && n < (int)sizeof(pg) - 400; ci++) {
+                uint8_t cp = child_packs[ci];
+                // Load child pack schema
+                uint8_t csb[256]; uint16_t csl = sizeof(csb);
+                char cpname[32] = "?";
+                uint8_t cords[32], ctypes[32], cmaxl[32]; char cnames[32][32];
+                memset(cnames, 0, sizeof(cnames));
+                uint8_t cfc = 0;
+                if (kv_get_copy(((uint32_t)0 << 22) | cp, csb, &csl, NULL))
+                    cfc = parse_schema(csb, csl, cnames, ctypes, cmaxl, cords, cpname, 32);
+                if (cfc == 0) continue;
+
+                // Find the lookup field in child that points to master pack
+                int8_t link_fi = -1;
+                for (uint8_t fi = 0; fi < cfc; fi++) {
+                    if (ctypes[fi] == 0x12 && cmaxl[fi] == pack_ord) {
+                        link_fi = (int8_t)fi;
+                        break;
+                    }
+                }
+                if (link_fi < 0) continue;
+                uint8_t link_ord = cords[link_fi];
+
+                // Show up to 4 display columns (skip the lookup-to-parent field)
+                uint8_t dcols[4]; uint8_t ndc = 0;
+                for (uint8_t fi = 0; fi < cfc && ndc < 4; fi++) {
+                    if (fi == (uint8_t)link_fi) continue;
+                    dcols[ndc++] = fi;
+                }
+
+                char plabel[32]; pretty_name(plabel, sizeof(plabel), cpname);
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<div class=card style='margin-top:8px'>"
+                    "<h2 style='margin-top:0;font-size:16px'>%s</h2>"
+                    "<table><thead><tr>",
+                    plabel);
+                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 100; d++) {
+                    char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
+                    n += snprintf(pg + n, sizeof(pg) - n, "<th>%s</th>", ph);
+                }
+                n += snprintf(pg + n, sizeof(pg) - n, "<th></th></tr></thead><tbody>");
+
+                // Scan child pack for cards where lookup == card_ord
+                uint32_t ckeys[64];
+                uint32_t ccount = kv_range(((uint32_t)(cp & 0x3FFu) << 22),
+                                           0xFFC00000u, ckeys, NULL, 64);
+                uint16_t shown = 0;
+                for (uint32_t ri = 0; ri < ccount && shown < 20 && n < (int)sizeof(pg) - 300; ri++) {
+                    uint8_t rb[256]; uint16_t rl = sizeof(rb);
+                    if (!kv_get_copy(ckeys[ri], rb, &rl, NULL) || rl < 4) continue;
+                    if (rb[0] != 0x7D || rb[1] != 0xCA) continue;
+
+                    // Check if this card's link_ord field == card_ord
+                    uint16_t ro = 4; bool match = false;
+                    while (ro + 1 < rl) {
+                        uint8_t ford = rb[ro] & 0x1F, flen = rb[ro+1]; ro += 2;
+                        if (ro + flen > rl) break;
+                        if (ford == link_ord && flen >= 4) {
+                            uint32_t lv = rb[ro] | ((uint32_t)rb[ro+1]<<8) |
+                                          ((uint32_t)rb[ro+2]<<16) | ((uint32_t)rb[ro+3]<<24);
+                            if (lv == card_ord) match = true;
+                        }
+                        ro += flen;
+                    }
+                    if (!match) continue;
+
+                    // Decode display fields
+                    uint32_t child_cid = ckeys[ri] & 0x3FFFFF;
+                    n += snprintf(pg + n, sizeof(pg) - n, "<tr>");
+                    for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 100; d++) {
+                        char fv[48] = "";
+                        uint16_t fo = 4;
+                        while (fo + 1 < rl) {
+                            uint8_t ford = rb[fo] & 0x1F, flen = rb[fo+1]; fo += 2;
+                            if (fo + flen > rl) break;
+                            if (ford == cords[dcols[d]])
+                                decode_field_str(fv, sizeof(fv), ctypes[dcols[d]], rb + fo, flen);
+                            fo += flen;
+                        }
+                        // Resolve lookups to display names
+                        if (ctypes[dcols[d]] == 0x12 && fv[0]) {
+                            uint32_t lid = (uint32_t)strtoul(fv, NULL, 10);
+                            uint8_t tp = cmaxl[dcols[d]];
+                            uint32_t lk = ((uint32_t)(tp & 0x3FFu) << 22) | (lid & 0x3FFFFF);
+                            uint8_t lb[128]; uint16_t ll = sizeof(lb);
+                            if (kv_get_copy(lk, lb, &ll, NULL) && ll >= 6 &&
+                                lb[0]==0x7D && lb[1]==0xCA) {
+                                uint8_t lo = lb[4] & 0x1F, lfl = lb[5];
+                                if (lo == 0 && 6 + lfl <= ll && lfl >= 1) {
+                                    uint8_t sl = lb[6]; if (sl>lfl-1) sl=lfl-1; if (sl>46) sl=46;
+                                    memcpy(fv, lb+7, sl); fv[sl]='\0';
+                                }
+                            }
+                        }
+                        n += snprintf(pg + n, sizeof(pg) - n, "<td>%s</td>", fv[0] ? fv : "-");
+                    }
+                    n += snprintf(pg + n, sizeof(pg) - n,
+                        "<td><a href='/pack/%u/%lu' style='font-size:12px'>Edit</a></td></tr>",
+                        (unsigned)cp, (unsigned long)child_cid);
+                    shown++;
+                }
+
+                if (shown == 0)
+                    n += snprintf(pg + n, sizeof(pg) - n,
+                        "<tr><td colspan='%u' style='color:#6a7080'>No records</td></tr>", ndc + 1);
+
+                // "Add" link — pre-create child card with parent link
+                uint32_t next_id = ccount > 0 ? (ckeys[ccount-1] & 0x3FFFFF) + 1 : 0;
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "</tbody></table>"
+                    "<div style='margin-top:8px'><a href='/pack/%u/%lu' style='font-size:13px'>"
+                    "+ Add %s</a></div></div>",
+                    (unsigned)cp, (unsigned long)next_id, plabel);
+            }
+
+            n += snprintf(pg + n, sizeof(pg) - n, "<script src=/app.js></script>");
 
             http_page_req(pcb, req, pg, (uint16_t)n);
             return;
@@ -1866,8 +2001,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         uint8_t ords[32], ftypes[32], maxlens[32]; char names[32][32];
         memset(names, 0, sizeof(names));
         uint8_t fc = 0;
+        uint8_t child_packs[8]; uint8_t child_count = 0;
         if (kv_get_copy(((uint32_t)0 << 22) | pack_ord, sbuf, &slen, NULL))
-            fc = parse_schema_ex(sbuf, slen, names, ftypes, maxlens, ords, pname, 32, pmodule);
+            fc = parse_schema_full(sbuf, slen, names, ftypes, maxlens, ords,
+                                   pname, 32, pmodule, child_packs, &child_count);
 
         char pg[4096]; int n = 0;
         n += snprintf(pg + n, sizeof(pg) - n,
@@ -1917,8 +2054,53 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "<div><label>Max Length</label><input id=fm type=number value=32 min=1 max=255></div>"
             "<div style='align-self:end'><button>Save Field</button></div>"
             "</div></form></div>"
-            "<div class=card style='border-color:#c0392b'>"
-            "<h2 style='color:#e94560'>Danger Zone</h2>"
+            "<div class=card><h2>Detail Packs (1:Many)</h2>"
+            "<p style='font-size:13px;color:#6a7080'>Child packs shown as detail tables when editing a card in this pack.</p>"
+            "<div style='margin-bottom:8px'>Current: ",
+            pack_ord, (unsigned int)fc);
+
+        if (child_count > 0) {
+            for (uint8_t ci = 0; ci < child_count; ci++) {
+                // Resolve child pack name
+                char cpn[16] = "?";
+                uint8_t csb[64]; uint16_t csl = sizeof(csb);
+                if (kv_get_copy(((uint32_t)0 << 22) | child_packs[ci], csb, &csl, NULL) && csl > 4) {
+                    uint8_t co = 4;
+                    if (co + 1 < csl && (csb[co] & 0x1F) == 0) {
+                        uint8_t fl = csb[co+1]; if (co+2+fl <= csl && fl >= 1) {
+                            uint8_t nl = csb[co+2]; if (nl > fl-1) nl=fl-1; if (nl>15) nl=15;
+                            memcpy(cpn, csb+co+3, nl); cpn[nl]='\0';
+                        }
+                    }
+                }
+                if (ci > 0) n += snprintf(pg + n, sizeof(pg) - n, ", ");
+                n += snprintf(pg + n, sizeof(pg) - n, "<b>%s</b> (%u)", cpn, (unsigned)child_packs[ci]);
+            }
+        } else {
+            n += snprintf(pg + n, sizeof(pg) - n, "<i style='color:#6a7080'>None</i>");
+        }
+        n += snprintf(pg + n, sizeof(pg) - n,
+            "</div>"
+            "<div class=row>"
+            "<div><label>Child Pack IDs</label>"
+            "<input id=cpInput placeholder='e.g. 6,8' value='");
+        // Pre-fill current children
+        for (uint8_t ci = 0; ci < child_count; ci++) {
+            if (ci > 0) n += snprintf(pg + n, sizeof(pg) - n, ",");
+            n += snprintf(pg + n, sizeof(pg) - n, "%u", (unsigned)child_packs[ci]);
+        }
+        n += snprintf(pg + n, sizeof(pg) - n,
+            "'></div>"
+            "<div style='align-self:end'>"
+            "<button onclick=\"fetch('/admin/children/%u',{method:'POST',credentials:'same-origin',"
+            "body:document.getElementById('cpInput').value}).then(function(r){"
+            "if(r.ok)location.reload();else alert('Failed')})\">Set Children</button>"
+            "</div></div></div>"
+            "<div class=card style='border-color:#b04050'>"
+            "<h2 style='color:#e06070'>Danger Zone</h2>",
+            pack_ord);
+
+        n += snprintf(pg + n, sizeof(pg) - n,
             "<p>Delete this pack and all its cards.</p>"
             "<button onclick=\"if(confirm('Delete pack %u and ALL its cards?'))fetch('/admin/meta/%u',{method:'DELETE',credentials:'same-origin'}).then(function(r){if(r.ok)location.href='/admin/meta';else alert('Failed')})\" "
             "style='background:#c0392b'>Delete Pack %u</button></div>"
@@ -2184,6 +2366,134 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             http_json(pcb, "200 OK", resp);
         } else {
             http_json(pcb, "409 Conflict", "{\"error\":\"username taken or create failed\"}");
+        }
+        return;
+    }
+
+    // ---- Route: POST /batch — atomic multi-card write ----
+    // Binary: 0xBA 0x7C count(u16) then [pack(u16) card(u32) len(u16) data[len]]...
+    if (verb == VERB_POST && strcmp(path, "/batch") == 0) {
+        user_session_t session;
+        if (!check_auth_session(req, &session)) {
+            http_json(pcb, "401 Unauthorized", "{\"error\":\"login required\"}");
+            return;
+        }
+        if (body_len < 4 || body[0] != 0xBA || body[1] != 0x7C) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"bad batch magic\"}");
+            return;
+        }
+        uint16_t count = body[2] | ((uint16_t)body[3] << 8);
+        if (count == 0 || count > 32) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"batch count 1-32\"}");
+            return;
+        }
+
+        // First pass: validate all entries and check RBAC
+        uint16_t off = 4;
+        for (uint16_t i = 0; i < count; i++) {
+            if (off + 8 > body_len) {
+                http_json(pcb, "400 Bad Request", "{\"error\":\"truncated batch\"}");
+                return;
+            }
+            uint16_t bpack = body[off] | ((uint16_t)body[off+1] << 8);
+            // skip card_id (4 bytes)
+            uint16_t blen = body[off+6] | ((uint16_t)body[off+7] << 8);
+            off += 8;
+            if (off + blen > body_len || blen > KV_MAX_VALUE) {
+                http_json(pcb, "400 Bad Request", "{\"error\":\"bad entry size\"}");
+                return;
+            }
+            if (!user_auth_can_write(&session, bpack)) {
+                http_json(pcb, "403 Forbidden", "{\"error\":\"no write access\"}");
+                return;
+            }
+            // Validate card magic
+            if (blen >= 2 && (body[off] != 0x7D || body[off+1] != 0xCA)) {
+                http_json(pcb, "400 Bad Request", "{\"error\":\"bad card magic\"}");
+                return;
+            }
+            off += blen;
+        }
+
+        // Second pass: write all cards
+        off = 4;
+        uint16_t ok_count = 0;
+        for (uint16_t i = 0; i < count; i++) {
+            uint16_t bpack = body[off] | ((uint16_t)body[off+1] << 8);
+            uint32_t bcard = body[off+2] | ((uint32_t)body[off+3]<<8) |
+                             ((uint32_t)body[off+4]<<16) | ((uint32_t)body[off+5]<<24);
+            uint16_t blen = body[off+6] | ((uint16_t)body[off+7] << 8);
+            off += 8;
+            uint32_t key = ((uint32_t)(bpack & 0x3FF) << 22) | (bcard & 0x3FFFFF);
+            if (kv_put(key, body + off, blen)) ok_count++;
+            off += blen;
+        }
+
+        char resp[64];
+        snprintf(resp, sizeof(resp), "{\"ok\":true,\"count\":%u}", (unsigned)ok_count);
+        http_json(pcb, ok_count == count ? "200 OK" : "207 Multi-Status", resp);
+        return;
+    }
+
+    // ---- Route: POST /admin/children/{n} — set child packs for master pack ----
+    // Body: comma-separated pack ordinals, e.g. "6,8,9"
+    if (verb == VERB_POST && strncmp(path, "/admin/children/", 16) == 0) {
+        user_session_t session;
+        if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
+            http_json(pcb, "403 Forbidden", "{\"error\":\"admin required\"}");
+            return;
+        }
+        unsigned int pack_ord = 0;
+        sscanf(path, "/admin/children/%u", &pack_ord);
+
+        // Parse comma-separated child pack ordinals
+        char cbuf[64];
+        uint16_t clen = body_len < sizeof(cbuf) - 1 ? body_len : sizeof(cbuf) - 1;
+        memcpy(cbuf, body, clen); cbuf[clen] = '\0';
+        uint8_t cpacks[8]; uint8_t nc = 0;
+        char *tok = cbuf;
+        while (*tok && nc < 8) {
+            while (*tok == ' ' || *tok == ',') tok++;
+            if (*tok == '\0') break;
+            cpacks[nc++] = (uint8_t)atoi(tok);
+            while (*tok && *tok != ',') tok++;
+        }
+
+        // Read existing schema card, rebuild with ord 6 appended/updated
+        uint32_t skey = ((uint32_t)0 << 22) | pack_ord;
+        uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
+        if (!kv_get_copy(skey, sbuf, &slen, NULL) || slen < 4) {
+            http_json(pcb, "404 Not Found", "{\"error\":\"pack schema not found\"}");
+            return;
+        }
+
+        // Copy existing schema, stripping any existing ord 6
+        uint8_t nbuf[256]; uint16_t noff = 0;
+        if (slen >= 4) { memcpy(nbuf, sbuf, 4); noff = 4; } // magic+version
+        uint16_t roff = 4;
+        while (roff + 1 < slen) {
+            uint8_t ord = sbuf[roff] & 0x1F;
+            uint8_t flen = sbuf[roff + 1];
+            if (roff + 2 + flen > slen) break;
+            if (ord != 6 && noff + 2 + flen <= sizeof(nbuf)) {
+                memcpy(nbuf + noff, sbuf + roff, 2 + flen);
+                noff += 2 + flen;
+            }
+            roff += 2 + flen;
+        }
+
+        // Append new ord 6 if we have children
+        if (nc > 0 && noff + 2 + nc <= sizeof(nbuf)) {
+            nbuf[noff++] = 6;
+            nbuf[noff++] = nc;
+            memcpy(nbuf + noff, cpacks, nc);
+            noff += nc;
+        }
+
+        if (kv_put(skey, nbuf, noff)) {
+            http_json(pcb, "200 OK", "{\"ok\":true}");
+        } else {
+            http_json(pcb, "500 Internal Server Error", "{\"error\":\"write failed\"}");
         }
         return;
     }
