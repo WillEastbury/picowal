@@ -649,7 +649,6 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         for (uint8_t i = 0; i < w_count - 1; i++) {
             for (uint8_t j = i + 1; j < w_count; j++) {
                 if (w_cost[j] < w_cost[i]) {
-                    // Swap all parallel arrays
                     uint8_t to; query_op_t top; char tv[64]; uint32_t tc;
                     to = w_ords[i]; w_ords[i] = w_ords[j]; w_ords[j] = to;
                     to = w_types[i]; w_types[i] = w_types[j]; w_types[j] = to;
@@ -658,6 +657,11 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                     tc = w_cost[i]; w_cost[i] = w_cost[j]; w_cost[j] = tc;
                 }
             }
+        }
+        // Log optimizer results
+        for (uint8_t wi = 0; wi < w_count; wi++) {
+            web_log("[qopt] W[%d] ord=%d cost=%lu val='%.16s'\n",
+                    wi, w_ords[wi], (unsigned long)w_cost[wi], w_values[wi]);
         }
     }
 
@@ -682,8 +686,12 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                 for (uint16_t d = 0; d < ndistinct; d++) { if (distinct_set[d] == vid) { dup = true; break; } }
                 if (!dup && ndistinct < 64) distinct_set[ndistinct++] = vid;
             }
-            if (ndistinct > 0)
+            if (ndistinct > 0) {
                 fanout_update((uint16_t)primary->ord, w_ords[wi], 0, (uint16_t)card_count, ndistinct);
+                web_log("[qopt] fanout pack=%d ord=%d total=%lu distinct=%u avg=%u\n",
+                        primary->ord, w_ords[wi], (unsigned long)card_count, ndistinct,
+                        ndistinct > 0 ? (unsigned)(card_count / ndistinct) : 0);
+            }
         }
     }
 
