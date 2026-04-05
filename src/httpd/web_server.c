@@ -1352,8 +1352,17 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
     }
 
     if (verb == VERB_GET && strcmp(path, "/app.js") == 0) {
-        (void)http_respond(pcb, "200 OK", "application/javascript",
+        (void)http_respond_with_headers(pcb, "200 OK", "application/javascript",
+                          "Cache-Control: public, max-age=86400\r\n",
                           (const uint8_t *)APP_JS, sizeof(APP_JS) - 1);
+        return;
+    }
+
+    // Favicon — return 204 with long cache to stop browser re-requesting
+    if (verb == VERB_GET && (strcmp(path, "/favicon.ico") == 0 || strcmp(path, "/favicon.png") == 0)) {
+        (void)http_respond_with_headers(pcb, "204 No Content", "image/x-icon",
+                          "Cache-Control: public, max-age=604800\r\n",
+                          NULL, 0);
         return;
     }
 
