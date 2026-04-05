@@ -149,6 +149,45 @@ static const char APP_JS[] =
 "b[32]=n.length;for(var i=0;i<n.length&&i<31;i++)b[33+i]=n.charCodeAt(i);"
 "api('POST','/0/1/'+document.body.dataset.uc+'/_passwd',b.buffer).then(function(r){"
 "$('cpMsg').textContent=r.ok?'Password changed':'Failed ('+r.status+')';$('cpMsg').style.color=r.ok?'#27ae60':'#e94560'});}"
+/* Grid save: collect all rows, build batch binary, POST /batch */
+";window.saveGrid=function(cp,linkOrd,parentId){"
+"var rows=document.querySelectorAll('table[data-cp=\"'+cp+'\"] tbody tr');"
+"var cards=[];"
+"rows.forEach(function(tr){"
+"var cid=parseInt(tr.dataset.cid)||0;"
+"var inputs=tr.querySelectorAll('input[data-ord]');"
+"var hasVal=false;inputs.forEach(function(el){if(el.value)hasVal=true});"
+"if(!hasVal)return;"
+"var parts=[0x7D,0xCA,1,0];"
+/* Write the parent link field (lookup ord) */
+"parts.push(linkOrd&0x1F,4,parentId&255,(parentId>>8)&255,(parentId>>16)&255,(parentId>>24)&255);"
+"inputs.forEach(function(el){"
+"var ord=parseInt(el.dataset.ord),type=el.dataset.ftype,val=el.value;"
+"var data=[];"
+"switch(type){"
+"case 'bool':data=[parseInt(val)?1:0];break;"
+"case 'uint8':data=[(parseInt(val)||0)&255];break;"
+"case 'uint16':{var v=parseInt(val)||0;data=[v&255,(v>>8)&255];break}"
+"case 'uint32':case 'lookup':{var v=parseInt(val)||0;data=[v&255,(v>>8)&255,(v>>16)&255,(v>>24)&255];break}"
+"case 'int16':{var ab=new ArrayBuffer(2);new DataView(ab).setInt16(0,parseInt(val)||0,true);data=Array.from(new Uint8Array(ab));break}"
+"case 'int32':{var ab=new ArrayBuffer(4);new DataView(ab).setInt32(0,parseInt(val)||0,true);data=Array.from(new Uint8Array(ab));break}"
+"default:{var s=String(val||'');data=[s.length];for(var i=0;i<s.length;i++)data.push(s.charCodeAt(i)&255)}}"
+"parts.push(ord&0x1F,data.length);data.forEach(function(b){parts.push(b)})});"
+"cards.push({pack:cp,cid:cid,data:new Uint8Array(parts)})});"
+"if(cards.length==0)return;"
+/* Build batch binary: 0xBA7C + count(u16) + [pack(u16) card(u32) len(u16) data]... */
+"var total=4;cards.forEach(function(c){total+=8+c.data.length});"
+"var buf=new Uint8Array(total);var o=0;"
+"buf[o++]=0xBA;buf[o++]=0x7C;buf[o++]=cards.length&255;buf[o++]=(cards.length>>8)&255;"
+"cards.forEach(function(c){"
+"buf[o++]=c.pack&255;buf[o++]=(c.pack>>8)&255;"
+"buf[o++]=c.cid&255;buf[o++]=(c.cid>>8)&255;buf[o++]=(c.cid>>16)&255;buf[o++]=(c.cid>>24)&255;"
+"buf[o++]=c.data.length&255;buf[o++]=(c.data.length>>8)&255;"
+"buf.set(c.data,o);o+=c.data.length});"
+"api('POST','/batch',buf.buffer).then(function(r){"
+"var msg=document.getElementById('gridMsg'+cp);"
+"if(msg){msg.textContent=r.ok?'Saved!':'Error '+r.status;msg.style.color=r.ok?'#40906a':'#b04050'}"
+"if(r.ok)setTimeout(function(){location.reload()},500)});}"
 "})();";
 
 // ============================================================
@@ -542,6 +581,8 @@ static const char PAGE_HEAD[] =
     ".card-nav a{font-size:13px;padding:6px 14px;background:#252830;border:1px solid #3a3f50;border-radius:8px}"
     ".crumb{font-size:13px;color:#6a7080;margin-bottom:8px}.crumb a{font-size:13px}"
     ".actions{display:flex;gap:10px;margin-top:20px;padding-top:20px;border-top:1px solid #2a3040}"
+    ".grid td{padding:2px 4px;border-bottom:1px solid #22252e}.grid input{font:13px/1.3 monospace;color:#d5d8e0}"
+    ".grid tr:hover td{background:#1c1e26}.grid .new-row input{border:1px solid #3a3f50}"
     "</style></head><body>"
     "<nav><span class=nav-brand>&#x1F5C3; PicoWAL</span>"
     "<div><a href=/>Home</a><a href=/status>Status</a><a href=/query>Query</a>";
@@ -1606,10 +1647,9 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     ? "<button type=button id=delBtn class=btn-del>&#x1F5D1; Delete</button>" : "",
                 pack_ord);
 
-            // ---- Master-Child: render detail tables for child packs ----
+            // ---- Master-Child: inline grid editor for child packs ----
             for (uint8_t ci = 0; ci < child_count && exists && n < (int)sizeof(pg) - 400; ci++) {
                 uint8_t cp = child_packs[ci];
-                // Load child pack schema
                 uint8_t csb[256]; uint16_t csl = sizeof(csb);
                 char cpname[32] = "?";
                 uint8_t cords[32], ctypes[32], cmaxl[32]; char cnames[32][32];
@@ -1619,20 +1659,19 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     cfc = parse_schema(csb, csl, cnames, ctypes, cmaxl, cords, cpname, 32);
                 if (cfc == 0) continue;
 
-                // Find the lookup field in child that points to master pack
+                // Find lookup field pointing to master pack
                 int8_t link_fi = -1;
                 for (uint8_t fi = 0; fi < cfc; fi++) {
                     if (ctypes[fi] == 0x12 && cmaxl[fi] == pack_ord) {
-                        link_fi = (int8_t)fi;
-                        break;
+                        link_fi = (int8_t)fi; break;
                     }
                 }
                 if (link_fi < 0) continue;
                 uint8_t link_ord = cords[link_fi];
 
-                // Show up to 4 display columns (skip the lookup-to-parent field)
-                uint8_t dcols[4]; uint8_t ndc = 0;
-                for (uint8_t fi = 0; fi < cfc && ndc < 4; fi++) {
+                // Editable columns (skip lookup-to-parent)
+                uint8_t dcols[6]; uint8_t ndc = 0;
+                for (uint8_t fi = 0; fi < cfc && ndc < 6; fi++) {
                     if (fi == (uint8_t)link_fi) continue;
                     dcols[ndc++] = fi;
                 }
@@ -1640,26 +1679,34 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                 char plabel[32]; pretty_name(plabel, sizeof(plabel), cpname);
                 n += snprintf(pg + n, sizeof(pg) - n,
                     "<div class=card style='margin-top:8px'>"
-                    "<h2 style='margin-top:0;font-size:16px'>%s</h2>"
-                    "<table><thead><tr>",
-                    plabel);
-                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 100; d++) {
+                    "<div style='display:flex;justify-content:space-between;align-items:center'>"
+                    "<h2 style='margin:0;font-size:16px'>%s</h2>"
+                    "<button class=btn-sm onclick='saveGrid(%u,%u,%u)' "
+                    "style='background:#40906a'>Save All</button></div>"
+                    "<table class=grid data-cp='%u' data-link='%u' data-parent='%u'>"
+                    "<thead><tr>",
+                    plabel, (unsigned)cp, (unsigned)link_ord, card_ord,
+                    (unsigned)cp, (unsigned)link_ord, card_ord);
+
+                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 80; d++) {
                     char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
                     n += snprintf(pg + n, sizeof(pg) - n, "<th>%s</th>", ph);
                 }
-                n += snprintf(pg + n, sizeof(pg) - n, "<th></th></tr></thead><tbody>");
+                n += snprintf(pg + n, sizeof(pg) - n, "<th style='width:30px'></th></tr></thead><tbody>");
 
-                // Scan child pack for cards where lookup == card_ord
+                // Scan matching child cards
                 uint32_t ckeys[64];
-                uint32_t ccount = kv_range(((uint32_t)(cp & 0x3FFu) << 22),
-                                           0xFFC00000u, ckeys, NULL, 64);
+                uint32_t ccount = kv_range(((uint32_t)(cp & 0x3FFu) << 22), 0xFFC00000u, ckeys, NULL, 64);
                 uint16_t shown = 0;
-                for (uint32_t ri = 0; ri < ccount && shown < 20 && n < (int)sizeof(pg) - 300; ri++) {
+                uint32_t max_cid = 0;
+                for (uint32_t ri = 0; ri < ccount && shown < 15 && n < (int)sizeof(pg) - 400; ri++) {
+                    uint32_t child_cid = ckeys[ri] & 0x3FFFFF;
+                    if (child_cid > max_cid) max_cid = child_cid;
                     uint8_t rb[256]; uint16_t rl = sizeof(rb);
                     if (!kv_get_copy(ckeys[ri], rb, &rl, NULL) || rl < 4) continue;
                     if (rb[0] != 0x7D || rb[1] != 0xCA) continue;
 
-                    // Check if this card's link_ord field == card_ord
+                    // Check link field matches
                     uint16_t ro = 4; bool match = false;
                     while (ro + 1 < rl) {
                         uint8_t ford = rb[ro] & 0x1F, flen = rb[ro+1]; ro += 2;
@@ -1673,10 +1720,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                     }
                     if (!match) continue;
 
-                    // Decode display fields
-                    uint32_t child_cid = ckeys[ri] & 0x3FFFFF;
-                    n += snprintf(pg + n, sizeof(pg) - n, "<tr>");
-                    for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 100; d++) {
+                    // Render editable row
+                    n += snprintf(pg + n, sizeof(pg) - n,
+                        "<tr data-cid='%lu'>", (unsigned long)child_cid);
+                    for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 200; d++) {
                         char fv[48] = "";
                         uint16_t fo = 4;
                         while (fo + 1 < rl) {
@@ -1686,40 +1733,50 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
                                 decode_field_str(fv, sizeof(fv), ctypes[dcols[d]], rb + fo, flen);
                             fo += flen;
                         }
-                        // Resolve lookups to display names
-                        if (ctypes[dcols[d]] == 0x12 && fv[0]) {
-                            uint32_t lid = (uint32_t)strtoul(fv, NULL, 10);
-                            uint8_t tp = cmaxl[dcols[d]];
-                            uint32_t lk = ((uint32_t)(tp & 0x3FFu) << 22) | (lid & 0x3FFFFF);
-                            uint8_t lb[128]; uint16_t ll = sizeof(lb);
-                            if (kv_get_copy(lk, lb, &ll, NULL) && ll >= 6 &&
-                                lb[0]==0x7D && lb[1]==0xCA) {
-                                uint8_t lo = lb[4] & 0x1F, lfl = lb[5];
-                                if (lo == 0 && 6 + lfl <= ll && lfl >= 1) {
-                                    uint8_t sl = lb[6]; if (sl>lfl-1) sl=lfl-1; if (sl>46) sl=46;
-                                    memcpy(fv, lb+7, sl); fv[sl]='\0';
-                                }
-                            }
-                        }
-                        n += snprintf(pg + n, sizeof(pg) - n, "<td>%s</td>", fv[0] ? fv : "-");
+                        uint8_t dtc = ctypes[dcols[d]];
+                        const char *dtn = type_name(dtc);
+                        n += snprintf(pg + n, sizeof(pg) - n,
+                            "<td><input data-ord='%u' data-ftype='%s' value='%s'"
+                            " style='padding:4px 6px;margin:0;border:1px solid transparent;background:transparent;width:100%%'"
+                            " onfocus='this.style.borderColor=\"#7eb8f0\";this.style.background=\"#252830\"'"
+                            " onblur='this.style.borderColor=\"transparent\";this.style.background=\"transparent\"'",
+                            (unsigned)cords[dcols[d]], dtn, fv);
+                        if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
+                        else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
+                        else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
+                        n += snprintf(pg + n, sizeof(pg) - n, "></td>");
                     }
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<td><a href='/pack/%u/%lu' style='font-size:12px'>Edit</a></td></tr>",
-                        (unsigned)cp, (unsigned long)child_cid);
+                        "<td><a href='#' onclick='this.closest(\"tr\").remove();return false' "
+                        "style='color:#b04050;font-size:14px' title='Remove'>&#x2715;</a></td></tr>");
                     shown++;
                 }
 
-                if (shown == 0)
+                // Empty row for adding new child
+                uint32_t next_id = max_cid + 1;
+                n += snprintf(pg + n, sizeof(pg) - n,
+                    "<tr data-cid='%lu' class='new-row' style='opacity:.6'>",
+                    (unsigned long)next_id);
+                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 150; d++) {
+                    uint8_t dtc = ctypes[dcols[d]];
+                    const char *dtn = type_name(dtc);
+                    char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
                     n += snprintf(pg + n, sizeof(pg) - n,
-                        "<tr><td colspan='%u' style='color:#6a7080'>No records</td></tr>", ndc + 1);
+                        "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'"
+                        " style='padding:4px 6px;margin:0;width:100%%'"
+                        " onfocus='this.closest(\"tr\").style.opacity=1'",
+                        (unsigned)cords[dcols[d]], dtn, ph);
+                    if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, sizeof(pg) - n, " type=number");
+                    else if (dtc == 0x07) n += snprintf(pg + n, sizeof(pg) - n, " type=number min=0 max=1");
+                    else if (dtc == 0x0A) n += snprintf(pg + n, sizeof(pg) - n, " type=date");
+                    n += snprintf(pg + n, sizeof(pg) - n, "></td>");
+                }
+                n += snprintf(pg + n, sizeof(pg) - n, "<td></td></tr>");
 
-                // "Add" link — pre-create child card with parent link
-                uint32_t next_id = ccount > 0 ? (ckeys[ccount-1] & 0x3FFFFF) + 1 : 0;
                 n += snprintf(pg + n, sizeof(pg) - n,
                     "</tbody></table>"
-                    "<div style='margin-top:8px'><a href='/pack/%u/%lu' style='font-size:13px'>"
-                    "+ Add %s</a></div></div>",
-                    (unsigned)cp, (unsigned long)next_id, plabel);
+                    "<div id='gridMsg%u' style='margin-top:4px;font-size:13px'></div></div>",
+                    (unsigned)cp);
             }
 
             n += snprintf(pg + n, sizeof(pg) - n, "<script src=/app.js></script>");
