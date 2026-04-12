@@ -4,6 +4,8 @@ A networked micro-database running on a **Raspberry Pi Pico 2W** with a Waveshar
 
 Serves a full SSR web UI with user auth, schema management, a query language with joins and aggregates, master-child forms, batch writes, and OTA firmware updates — all from a $6 microcontroller.
 
+📊 **[Benchmark Results →](docs/BENCHMARKS.md)** | 🗺️ **[FPGA Design →](docs/FPGA_DESIGN.md)**
+
 ## What it does
 
 - **HTTP database server** on port 80 over WiFi
