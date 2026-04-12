@@ -1,492 +1,279 @@
-# Pico 2W Storage Appliance
+# PicoWAL — Micro-Database Appliance
 
-HTTP-first flash-backed record storage for a Raspberry Pi Pico 2W with a Waveshare Pico-ResTouch-LCD-3.5.
+A networked micro-database running on a **Raspberry Pi Pico 2W** with a Waveshare Pico-ResTouch-LCD-3.5 display and 16GB SD card.
 
-The current firmware exposes a small authenticated HTTP API, an on-device metadata dictionary, and a browser GUI that can read, write, decode, and seed binary records using that metadata.
+Serves a full SSR web UI with user auth, schema management, a query language with joins and aggregates, master-child forms, batch writes, and OTA firmware updates — all from a $6 microcontroller.
 
-## Current appliance behavior
+## What it does
 
-- Wi-Fi STA mode on the Pico 2W
-- HTTP service on port `80`
-- Minimal LCD status panel refreshed every `10s`
-- PSK-based authentication for record and metadata writes
-- Flash-backed KV record store with record-level compression for larger payloads
-- On-device metadata dictionaries for record types and fields
-- Browser GUI at `/gui`
-
-The old raw WAL TCP listener on port `8001` is no longer used.
-
-## HTTP endpoints
-
-### Appliance
-
-- `GET /`
-  - Returns a small HTML landing page with links to status, key, record editor, and metadata editor
-- `GET /status`
-  - Returns plain-text appliance stats
-- `GET /gui`
-  - Serves the browser GUI shell
-- `GET /gui.css`
-- `GET /gui_codec.js`
-- `GET /gui_app.js`
-- `GET /key`
-  - Returns the current PSK as hex
-  - Restricted to clients on the same subnet
-
-### Records
-
-- `GET /0/{type}/{id}`
-  - Reads a record body
-- `POST /0/{type}/{id}`
-  - Writes a record body
-- `GET /w/{type}/`
-  - Returns a plain-text list of all instance IDs for that type
-  - First line is `COUNT=<n>`, followed by one ID per line
-- `GET /Ids/{type}/`
-  - Returns a packed little-endian `uint16[]` ID list as `application/octet-stream`
-  - Fails if an ID does not fit in `uint16`
-
-These routes require:
-
-```http
-Authorization: PSK <64-hex-char-key>
-```
-
-`type` is `0..1023` and `id` is `0..4194303`.
-
-### Metadata
-
-- `GET /meta/types`
-- `GET /meta/types/{ordinal}`
-- `GET /meta/types/by-name/{name}`
-- `POST /meta/types/{ordinal}`
-  - Body: type name
-
-- `GET /meta/fields`
-- `GET /meta/fields/{ordinal}`
-- `GET /meta/fields/by-name/{name}`
-- `POST /meta/fields/{ordinal}`
-  - Body: `NAME|TYPE|MAXLEN`
-
-Metadata writes also require the PSK header.
-
-## Metadata field types
-
-Supported field types:
-
-- `bool`
-- `char`
-- `char[]`
-- `byte`
-- `byte[]`
-- `uint8`
-- `int8`
-- `int16`
-- `int32`
-- `uint16`
-- `uint32`
-- `isodate`
-- `isotime`
-- `isodatetime`
-- `utf8`
-- `latin1`
-
-Notes:
-
-- `char[]` remains supported for compatibility.
-- `utf-8` and `latin-1` are also accepted as aliases when creating field definitions.
-
-## Maintaining metadata
-
-Metadata is persisted in the appliance KV store and is maintained by ordinal.
-
-Practical rules:
-
-- treat ordinals as stable IDs
-- update names, types, and max lengths by writing the same ordinal again
-- do not casually renumber existing types or fields once data exists
-- prefer adding new ordinals over reusing old ones for different meanings
-
-### Type maintenance
-
-Create or update a type by writing its ordinal:
-
-```text
-POST /meta/types/{ordinal}
-Authorization: PSK <key>
-
-<type-name>
-```
-
-Inspect type metadata with:
-
-- `GET /meta/types`
-- `GET /meta/types/{ordinal}`
-- `GET /meta/types/by-name/{name}`
-
-Recommended process:
-
-1. choose a stable type ordinal
-2. assign a clear name
-3. keep that ordinal/name pairing stable over time
-
-### Field maintenance
-
-Create or update a field by writing its ordinal:
-
-```text
-POST /meta/fields/{ordinal}
-Authorization: PSK <key>
-
-NAME|TYPE|MAXLEN
-```
-
-Inspect field metadata with:
-
-- `GET /meta/fields`
-- `GET /meta/fields/{ordinal}`
-- `GET /meta/fields/by-name/{name}`
-
-Recommended process:
-
-1. choose a stable field ordinal
-2. assign a field name
-3. choose the field type
-4. set the maximum length for variable-width fields
-
-### Change management guidance
-
-Safe changes:
-
-- rename a type while keeping its ordinal
-- rename a field while keeping its ordinal
-- increase a field `MAXLEN`
-- add new type ordinals
-- add new field ordinals
-
-Higher-risk changes:
-
-- changing a field type for an ordinal that is already in use
-- shrinking `MAXLEN` below existing stored values
-- reusing an old ordinal for a new meaning
-
-For live systems, prefer schema evolution by adding new ordinals and migrating records intentionally.
-
-### GUI workflow
-
-Current GUI split:
-
-- `/gui` for record load/save and bulk seed
-- `/w/0/{id}` for metadata/object editing
-- `/` for quick navigation to appliance pages
-
-Current metadata workflow:
-
-1. load the PSK
-2. open `/w/0/{id}` for the object/type you want to maintain
-3. create or update type metadata there
-4. create or update field metadata there
-5. click `LOAD METADATA` in `/gui`
-6. use the returned type/field definitions to save, load, and seed records
-
-The metadata editor page uses the trailing `{id}` from:
-
-```text
-/w/0/{id}
-```
-
-as the default type ordinal in the editor.
-
-At the moment, metadata maintenance is primarily endpoint-driven and GUI-assisted.
+- **HTTP database server** on port 80 over WiFi
+- **16GB SD card** for user data (6.6 million card slots)
+- **4MB flash** for system data (users, schemas)
+- **Query engine** with `S:` / `F:` / `W:` syntax, cross-pack joins, aggregates
+- **Cost-based optimizer** with cardinality estimates and predicate reordering
+- **Server-side rendered** web UI — no client frameworks, ~2KB of JS total
+- **Master-child forms** with inline editable grid
+- **OTA firmware updates** via SD staging (no BOOTSEL needed)
+- **LCD dashboard** showing flash/SD stats, uptime, IP address
 
 ## Quick start
 
-### 1. Get the PSK
-
-From a machine on the same subnet:
-
-```text
-GET http://<pico-ip>/key
-```
-
-Copy the returned 64-character hex key.
-
-### 2. Create one type and a few fields
-
-Example:
-
-- record type ordinal `1` = `device`
-- field ordinal `1` = `enabled|bool|1`
-- field ordinal `2` = `name|utf8|32`
-- field ordinal `3` = `title_latin|latin1|32`
-- field ordinal `4` = `count|uint16|2`
-- field ordinal `5` = `when|isodatetime|20`
-
-Example HTTP requests:
-
-```text
-POST /meta/types/1
-Authorization: PSK <key>
-
-device
-```
-
-```text
-POST /meta/fields/1
-Authorization: PSK <key>
-
-enabled|bool|1
-```
-
-```text
-POST /meta/fields/2
-Authorization: PSK <key>
-
-name|utf8|32
-```
-
-```text
-POST /meta/fields/3
-Authorization: PSK <key>
-
-title_latin|latin1|32
-```
-
-```text
-POST /meta/fields/4
-Authorization: PSK <key>
-
-count|uint16|2
-```
-
-```text
-POST /meta/fields/5
-Authorization: PSK <key>
-
-when|isodatetime|20
-```
-
-### 3. Open the GUIs
-
-Open:
-
-```text
-http://<pico-ip>/gui
-```
-
-Then:
-
-- paste the PSK into the `PSK` box
-- set `TYPE` to `1`
-- set `ID` to `1`
-- click `LOAD METADATA`
-
-For metadata editing, also open:
-
-```text
-http://<pico-ip>/w/0/1
-```
-
-### 4. Save your first binary record
-
-Put this JSON into `VALUE`:
-
-```json
-{
-  "enabled": true,
-  "name": "cafe-01",
-  "title_latin": "Müller",
-  "count": 42,
-  "when": "2026-03-25T16:00:00Z"
-}
-```
-
-Then click `SAVE`.
-
-The GUI will:
-
-- resolve field names to ordinals
-- encode fixed-width values inline
-- encode variable-width values into the heap
-- write the binary record to `POST /0/1/1`
-
-### 5. Load it back
-
-Click `LOAD`.
-
-The GUI will:
-
-- fetch the raw record bytes from `GET /0/1/1`
-- decode the ordinal table and heap
-- look up field metadata by ordinal
-- repopulate the editor as JSON
-
-### 6. Seed many records
-
-After metadata is loaded, use the seed controls in `/gui`:
-
-- `RECORDS`
-- `START ID`
-- `BATCH SIZE`
-- `SEED FROM METADATA`
-
-This generates metadata-aware binary records and writes them through the same `/0/{type}/{id}` API.
-
-## Browser GUI
-
-Open `http://<pico-ip>/gui`.
-
-The GUI supports:
-
-- manual load/save of records
-- metadata loading from `/meta/types` and `/meta/fields`
-- metadata-aware binary encode/decode
-- bulk record seeding from metadata
-- split HTML/CSS/JS assets for smaller downloads on-device
-- plain `field=value` editing instead of JSON blobs
-
-### GUI save/load format
-
-The GUI stores records as a metadata-aware binary format.
-
-Layout:
-
-- record header
-  - magic
-  - field count
-  - heap length
-- field table
-  - field ordinal
-  - field type
-  - flags
-  - length
-  - inline value or heap offset
-- heap
-  - variable-length payload bytes only
-
-Design goals:
-
-- ordinal-based lookup instead of field names in stored records
-- fixed-width values stay inline in the field table
-- variable-width values use `offset + length` into the heap
-- only fields present in the editor are emitted
-
-The GUI decodes records back into `field=value` lines using the field metadata dictionary.
-
-### Value editor shape
-
-In `/gui`, the `VALUE` box is a plain text list of `field=value` pairs, one per line. Example:
-
-```text
-enabled=true
-title=Hello
-count=42
-when=2026-03-25T16:00:00Z
-```
-
-On save:
-
-- field names are resolved to field ordinals from metadata
-- values are encoded according to metadata type and max length
-
-On load:
-
-- the binary record is decoded using field ordinals and metadata
-- the value editor is repopulated with decoded `field=value` lines
-
-### Bulk seeding
-
-The GUI can generate up to `5000` records from metadata.
-
-Seeding behavior:
-
-- cycles across metadata types
-- uses ascending record IDs from the chosen start ID
-- generates sample values by field type
-- writes records through `POST /0/{type}/{id}`
-
-## Storage model
-
-- Flash-backed append-only record store
-- 4 KB pages
-- Multiple records can share a page
-- In-memory sorted key index
-- Record-level compression on larger saved values
-- Background reclaim of dead pages
-- Opportunistic prewarming of the next append page to flatten write latency
-
-Current storage stats shown on the LCD and `/` include:
-
-- record count
-- LCD: boot state, `IP:port`, record count, space state, free bytes, used pages
-- HTTP `/`: used bytes
-- free bytes
-- usage percentage
-- dead pages
-
-`USED BYTES` currently reflects allocated flash page bytes, not exact occupied payload bytes.
-
-## Hardware
-
-- Raspberry Pi Pico 2W
-- Waveshare Pico-ResTouch-LCD-3.5
-  - ILI9488 LCD
-  - XPT2046 touch
-
-## Build
-
-Requires:
-
-- Pico SDK
-- ARM GCC toolchain
-- CMake
-
-Example on Windows:
+### 1. Build & flash
 
 ```powershell
 $env:PICO_SDK_PATH = "C:\source\pico-sdk"
-cmake -B build
+cmake -B build -G Ninja
 cmake --build build
+# Hold BOOTSEL, plug USB, copy build/pico2w_lcd.uf2 to RPI-RP2 drive
 ```
 
-Output:
+### 2. Connect
 
-- `build\pico2w_lcd.uf2`
+Device boots to `192.168.222.223:80` (static IP). Log in with `admin` / `admin`.
 
-## Flash
+### 3. Create a pack
 
-1. Hold **BOOTSEL** while connecting the Pico
-2. Copy `build\pico2w_lcd.uf2` to the `RPI-RP2` drive
+Admin → Schema → New Pack → set name, module, ordinal → add fields.
 
-Or use:
+### 4. Query
+
+```
+S:name,price,currencies.code
+F:products,currencies
+W:price|>|1000
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Browser                                     │
+│  ┌─────────┐ ┌──────────┐ ┌──────────────┐  │
+│  │ SSR HTML │ │ app.js   │ │ Grid Editor  │  │
+│  │ (cached) │ │ (2KB,24h)│ │ (batch save) │  │
+│  └────┬─────┘ └────┬─────┘ └──────┬───────┘  │
+└───────┼─────────────┼──────────────┼──────────┘
+        │ HTTP/1.1    │              │
+┌───────┴─────────────┴──────────────┴──────────┐
+│  Pico 2W (RP2350 Cortex-M33, 520KB SRAM)     │
+│                                                │
+│  ┌──────────────────────────────────────────┐  │
+│  │ web_server.c — SSR pages, routes, OTA    │  │
+│  │ query.c — parser, optimizer, executor    │  │
+│  │ user_auth.c — sessions, RBAC, SHA-256    │  │
+│  └────────────────┬─────────────────────────┘  │
+│                   │                            │
+│  ┌────────────────┴─────────────────────────┐  │
+│  │ kv_store.h — unified routing layer       │  │
+│  │   Pack 0-1 → kv_flash (system data)      │  │
+│  │   Pack 2+  → kv_sd (user data on SD)     │  │
+│  └──────┬─────────────────┬─────────────────┘  │
+│         │                 │                    │
+│  ┌──────┴──────┐  ┌──────┴──────────────────┐  │
+│  │ 4MB Flash   │  │ 16GB SD Card (SPI1)     │  │
+│  │ kv_flash.c  │  │ kv_sd.c + OTA staging   │  │
+│  │ 4KB sectors │  │ 2KB cards, bitmap alloc  │  │
+│  └─────────────┘  └─────────────────────────┘  │
+│                                                │
+│  ┌──────────────────────────────────────────┐  │
+│  │ LCD Dashboard (ILI9488, SPI1 shared)     │  │
+│  │ Flash/SD stats, IP, uptime, OTA status   │  │
+│  └──────────────────────────────────────────┘  │
+└────────────────────────────────────────────────┘
+```
+
+## Data model
+
+### Packs and cards
+
+Data is organized into **packs** (like tables) containing **cards** (like rows). Each card is a binary blob with a 4-byte magic header (`0xCA7D`) followed by ordinal-tagged fields.
+
+| Pack | Purpose | Storage |
+|------|---------|---------|
+| 0 | Schema definitions | Flash |
+| 1 | Users & auth | Flash |
+| 2 | Days (reference) | SD |
+| 3 | Countries (reference) | SD |
+| 4 | Currencies (reference) | SD |
+| 5+ | User-defined | SD |
+
+### Schema card format (Pack 0)
+
+Each pack's schema is stored as a card in Pack 0:
+
+| Ordinal | Field | Description |
+|---------|-------|-------------|
+| 0 | Pack name | Length-prefixed UTF-8 |
+| 1 | Field count | uint8 |
+| 2 | Field definitions | 3 bytes each: ord, type, maxlen |
+| 3 | Flags | bit 0: public-read, bits 1-3: cardinality bucket |
+| 4 | Module | Groups packs into nav dropdowns |
+| 5 | Field names | Null-separated ASCII |
+| 6 | Children | Array of child pack ordinals (1:many) |
+
+### Field types
+
+| Code | Name | Friendly | Size |
+|------|------|----------|------|
+| 0x01 | uint8 | Small number (0-255) | 1 |
+| 0x02 | uint16 | Number (0-65k) | 2 |
+| 0x03 | uint32 | Large number | 4 |
+| 0x04 | int8 | Small number (+/-) | 1 |
+| 0x05 | int16 | Number (+/-) | 2 |
+| 0x06 | int32 | Large number (+/-) | 4 |
+| 0x07 | bool | Yes / No | 1 |
+| 0x08 | ascii | Text | len-prefixed |
+| 0x09 | utf8 | Text | len-prefixed |
+| 0x0A | date | Date | len-prefixed |
+| 0x0B | time | Time | len-prefixed |
+| 0x0C | datetime | Date & Time | len-prefixed |
+| 0x10 | array_u16 | Number list | count-prefixed |
+| 0x11 | blob | Binary data | raw bytes |
+| 0x12 | lookup | Link | uint32 card ID |
+
+### Relationships
+
+- **Many→1 (lookup)**: A field of type `0x12` stores a card ID from another pack. The `maxlen` byte specifies the target pack ordinal.
+- **1→Many (children)**: Schema ord 6 lists child pack ordinals. The child pack must have a lookup field pointing back to the parent.
+
+## Query language
+
+```
+S:field1,field2              — Select fields
+S:*                          — Select all
+S:pack.field                 — Select from joined pack
+S:SUM|field                  — Aggregate (SUM, AVG, MIN, MAX, COUNT)
+F:pack1,pack2                — From (comma-separated, first is primary)
+W:field|op|value             — Where (multiple = AND)
+W:pack.field|op|value        — Where on joined pack
+```
+
+**Operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `IN`, `NI`
+
+**Response:** Pipe-delimited rows, CRLF line endings, `X-Pack` and `X-Count` HTTP headers.
+
+### Query optimizer
+
+- **Cardinality cache**: 3-bit log10 buckets in SRAM, lazy-flushed to schema flags
+- **Fanout stats**: Tracks avg children per lookup value
+- **Predicate reordering**: Sorts WHERE clauses by estimated selectivity (most selective first)
+- **Short-circuit AND**: First failing predicate skips the row
+
+### Examples
+
+```
+S:name,sku,price,currencies.code
+F:products,currencies
+W:price|>|1000
+```
+
+```
+S:SUM|total,customers.name
+F:orders,customers
+```
+
+## Web UI
+
+### Pages
+
+| Route | Description |
+|-------|-------------|
+| `/` | Home — pack cards with counts |
+| `/pack/{n}` | Card list — multi-column, paginated, search bar |
+| `/pack/{n}/{card}` | Card editor — breadcrumbs, prev/next, master-child grid |
+| `/status` | Appliance stats |
+| `/query` | Query form + results |
+| `/admin` | User management |
+| `/admin/meta` | Schema browser |
+| `/admin/meta/{n}` | Schema editor — fields, module, children |
+| `/admin/log` | Debug log ring buffer |
+| `/update` | OTA firmware update |
+
+### Features
+
+- **Sans-serif UI** with warm dark palette
+- **Pretty field labels**: `in_stock` → "In Stock"
+- **Friendly type hints**: "Text" not "utf8", "Yes / No" not "bool"
+- **Module grouping**: Packs grouped into nav dropdowns (Reference ▾, Sales ▾, Admin ▾)
+- **Pagination**: 10 cards per page with prev/next
+- **Lookup dropdowns**: ≤16 cards → `<select>`, >16 → search input
+- **Master-child grids**: Inline editable detail tables with Save All (batch write)
+- **Cache headers**: `app.js` cached 24h, favicon 204 cached 7d
+
+## Batch API
+
+```
+POST /batch
+Content-Type: application/octet-stream
+```
+
+Binary format: `0xBA 0x7C | count(u16) | [pack(u16) card(u32) len(u16) data]...`
+
+Validates all entries + RBAC first, then writes all cards. Max 32 per batch.
+
+## OTA firmware update
+
+Firmware uploads to SD card staging area (512KB, blocks 1-1024), then flashes to slot A on commit. No XIP contention — SD reads via SPI are independent of flash.
+
+```
+POST /update/begin    → prepare SD staging
+POST /update/chunk    → write 1KB chunks to SD
+POST /update/commit   → SD → SRAM → flash, reboot
+```
+
+Or use the deploy script:
 
 ```powershell
-.\flash.bat
+python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 ```
+
+## Hardware
+
+- **Raspberry Pi Pico 2W** — RP2350 Cortex-M33, 520KB SRAM, 4MB flash
+- **Waveshare Pico-ResTouch-LCD-3.5** — ILI9488 LCD + XPT2046 touch
+- **16GB SDHC** — shared SPI1 bus (GP10=SCK, GP11=MOSI, GP12=MISO, GP22=CS)
+- **Static IP**: 192.168.222.223/16, gateway 192.168.0.1
 
 ## Project structure
 
-```text
+```
 ├── CMakeLists.txt
-├── flash.bat
+├── ota_deploy.py          — OTA deployment script
 ├── src/
-│   ├── main.c
-│   ├── net_core.c
-│   ├── kv_flash.c
-│   ├── metadata_dict.c
-│   ├── metadata_dict.h
-│   ├── wal_defs.h
-│   ├── wal_engine.c
+│   ├── main.c             — Boot sequence, core launch
+│   ├── net_core.c         — WiFi, poll loop, LCD dashboard
+│   ├── kv_flash.c/.h      — Flash-backed KV store
+│   ├── kv_sd.c/.h         — SD-backed KV store
+│   ├── kv_store.h         — Unified routing (flash vs SD)
+│   ├── storage.c/.h       — Packed compressed storage engine
+│   ├── field_index.c/.h   — O(1) hash-based field value index
+│   ├── query.c/.h         — Query parser, optimizer, executor
+│   ├── user_auth.c/.h     — Auth, RBAC, schema seeding
+│   ├── hs_config.h        — Heatshrink compression config
+│   ├── mbedtls_config.h   — Minimal mbedtls (SHA-256 only)
 │   └── httpd/
-│       ├── web_server.c
+│       ├── web_server.c   — All HTTP routes, SSR, OTA
 │       └── web_server.h
 ├── drivers/
-│   ├── lcd/
-│   │   └── ili9488.c
-│   └── touch/
-│       └── xpt2046.c
-└── README.md
+│   ├── lcd/ili9488.c      — ILI9488 LCD driver
+│   ├── touch/xpt2046.c    — XPT2046 touch driver
+│   └── sd/sd_card.c/.h    — SD card SPI driver
+├── lib/heatshrink/        — Compression library
+└── docs/
+    └── FPGA_DESIGN.md     — FPGA KV engine design doc
 ```
+
+## Build
+
+Requires: Pico SDK, ARM GCC toolchain, CMake, Ninja.
+
+```powershell
+$env:PICO_SDK_PATH = "C:\source\pico-sdk"
+cmake -B build -G Ninja
+cmake --build build
+```
+
+Output: `build/pico2w_lcd.uf2` (BOOTSEL) and `build/pico2w_lcd.bin` (OTA).
 
 ## License
 
