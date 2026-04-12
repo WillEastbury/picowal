@@ -50,7 +50,7 @@ target_link_libraries(${PROJECT_NAME}
     hardware_flash
     hardware_pio
     pico_rand
-    pico_mbedtls
+    pico_sha256
     lcd_driver
     touch_driver
     sd_driver

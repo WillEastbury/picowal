@@ -6,8 +6,8 @@
 #include <string.h>
 #include <stdio.h>
 
-// mbedtls SHA-256 from Pico SDK
-#include "mbedtls/sha256.h"
+// Pico SDK hardware SHA-256 (RP2350 accelerator)
+#include "pico/sha256.h"
 
 // ============================================================
 // Binary card format (matches picowal.js CARD_MAGIC 0xCA7D)
@@ -64,13 +64,13 @@ static uint32_t now_ms(void) {
 static void sha256_hash(const uint8_t *salt, uint8_t slen,
                         const char *pass, uint8_t plen,
                         uint8_t hash_out[USER_HASH_LEN]) {
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0);  // 0 = SHA-256 (not 224)
-    mbedtls_sha256_update(&ctx, salt, slen);
-    mbedtls_sha256_update(&ctx, (const uint8_t *)pass, plen);
-    mbedtls_sha256_finish(&ctx, hash_out);
-    mbedtls_sha256_free(&ctx);
+    pico_sha256_state_t state;
+    if (pico_sha256_try_start(&state, SHA256_BIG_ENDIAN, true) != PICO_OK) return;
+    pico_sha256_update(&state, salt, slen);
+    pico_sha256_update(&state, (const uint8_t *)pass, plen);
+    sha256_result_t result;
+    pico_sha256_finish(&state, &result);
+    memcpy(hash_out, result.bytes, 32);
 }
 
 static void gen_random(uint8_t *out, uint8_t len) {
