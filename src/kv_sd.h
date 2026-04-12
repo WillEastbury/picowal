@@ -58,6 +58,21 @@ typedef struct __attribute__((packed)) {
 // 18K entries × 8 bytes = 144KB (same footprint as 36K keys-only)
 #define KVSD_INDEX_MAX      18000
 
+// ============================================================
+// Flash index tier (tier 2) — XIP-readable sorted (key,slot) pages
+// Lives at 768KB–1MB in flash (after firmware, before KV region)
+// Each 4KB sector holds 512 entries (8 bytes each)
+// Total: 64 sectors × 512 = 32,768 entries
+// XIP-mapped: reads are zero-copy pointer dereference
+// ============================================================
+#define FIDX_SECTOR_SIZE    4096
+#define FIDX_ENTRY_SIZE     8        // [key:4][slot:4]
+#define FIDX_PER_SECTOR     (FIDX_SECTOR_SIZE / FIDX_ENTRY_SIZE)  // 512
+#define FIDX_SECTORS        64       // 256KB
+#define FIDX_MAX_ENTRIES    (FIDX_SECTORS * FIDX_PER_SECTOR)       // 32768
+#define FIDX_FLASH_OFFSET   0x0C0000  // 768KB into flash
+#define FIDX_XIP_BASE       (0x10000000 + FIDX_FLASH_OFFSET)
+
 void kvsd_init(void);
 bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len);
 const uint8_t *kvsd_get(uint32_t key, uint16_t *len);

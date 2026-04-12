@@ -1,12 +1,89 @@
 #include "kv_sd.h"
 #include "sd_card.h"
 #include "httpd/web_server.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 #include <string.h>
 #include <stdio.h>
 
 // ============================================================
 // KV Store on SD — dynamic layout, bitmap allocator
 // ============================================================
+
+// ============================================================
+// Flash Index Tier (tier 2) — XIP-mapped sorted (key,slot) pairs
+// ============================================================
+
+typedef struct __attribute__((packed)) {
+    uint32_t key;
+    uint32_t slot;
+} fidx_entry_t;
+
+static uint32_t g_fidx_count = 0;  // entries currently in flash index
+
+// Read a flash index entry via XIP (zero-copy)
+static inline const fidx_entry_t *fidx_xip(uint32_t idx) {
+    return &((const fidx_entry_t *)FIDX_XIP_BASE)[idx];
+}
+
+// Binary search the flash index via XIP — O(log n), zero I/O
+static int32_t fidx_find(uint32_t key) {
+    if (g_fidx_count == 0) return -1;
+    int32_t lo = 0, hi = (int32_t)g_fidx_count - 1;
+    while (lo <= hi) {
+        int32_t mid = (lo + hi) / 2;
+        uint32_t mk = fidx_xip((uint32_t)mid)->key;
+        if (mk == key) return mid;
+        if (mk < key) lo = mid + 1; else hi = mid - 1;
+    }
+    return -(lo + 1);
+}
+
+// Look up a key in flash index, return slot or -1
+static int32_t fidx_lookup(uint32_t key) {
+    int32_t pos = fidx_find(key);
+    if (pos >= 0) return (int32_t)fidx_xip((uint32_t)pos)->slot;
+    return -1;
+}
+
+// Count valid entries in flash index (scan on boot)
+static void fidx_count_entries(void) {
+    g_fidx_count = 0;
+    for (uint32_t i = 0; i < FIDX_MAX_ENTRIES; i++) {
+        if (fidx_xip(i)->key == 0xFFFFFFFF) break;
+        g_fidx_count++;
+    }
+}
+
+// Write entire flash index from sorted arrays (called during flush)
+static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t count) {
+    if (count > FIDX_MAX_ENTRIES) count = FIDX_MAX_ENTRIES;
+
+    uint32_t irq = save_and_disable_interrupts();
+    // Erase all flash index sectors
+    for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
+        flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
+    }
+    // Program entries in 256-byte pages (32 entries per page)
+    uint8_t page[256];
+    for (uint32_t i = 0; i < count; i += 32) {
+        memset(page, 0xFF, 256);
+        uint32_t batch = count - i;
+        if (batch > 32) batch = 32;
+        for (uint32_t j = 0; j < batch; j++) {
+            uint32_t off = j * 8;
+            uint32_t k = keys[i + j], sl = slots[i + j];
+            page[off+0]=(uint8_t)k; page[off+1]=(uint8_t)(k>>8);
+            page[off+2]=(uint8_t)(k>>16); page[off+3]=(uint8_t)(k>>24);
+            page[off+4]=(uint8_t)sl; page[off+5]=(uint8_t)(sl>>8);
+            page[off+6]=(uint8_t)(sl>>16); page[off+7]=(uint8_t)(sl>>24);
+        }
+        flash_range_program(FIDX_FLASH_OFFSET + i * 8, page, 256);
+    }
+    restore_interrupts(irq);
+
+    g_fidx_count = count;
+}
 
 static const uint8_t SD_MAGIC[8] = { 0x31,0x41,0x59,0x26, 0x50,0x69,0x63,0x6F };
 
@@ -178,6 +255,10 @@ void kvsd_init(void) {
     g_index_count = 0;
     g_ready = false;
 
+    // Scan flash index tier on boot
+    fidx_count_entries();
+    web_log("[kvsd] Flash index: %lu entries\n", (unsigned long)g_fidx_count);
+
     sd_info_t info;
     if (!sd_get_info(&info)) { web_log("[kvsd] SD not ready\n"); return; }
     web_log("[kvsd] SD: %lu MB, %lu blocks\n", (unsigned long)info.capacity_mb, (unsigned long)info.block_count);
@@ -275,10 +356,21 @@ static int32_t alloc_slot(void) {
     return -1; // full
 }
 
-// Find the slot for a given key using the SRAM index (O(log n), no SD I/O)
+// 3-tier lookup: SRAM → Flash (XIP) → not found
+// SD keylist is only used at boot to populate SRAM+flash
 static int32_t find_slot_for_key(uint32_t key) {
+    // Tier 1: SRAM (hot cache)
     int32_t pos = index_find(key);
     if (pos >= 0) return (int32_t)g_slots[pos];
+
+    // Tier 2: Flash index (XIP, zero-copy binary search)
+    int32_t fslot = fidx_lookup(key);
+    if (fslot >= 0) {
+        // Promote to SRAM cache
+        index_insert(key, (uint32_t)fslot);
+        return fslot;
+    }
+
     return -1;
 }
 
@@ -378,7 +470,7 @@ bool kvsd_delete(uint32_t key) {
 
 bool kvsd_exists(uint32_t key) {
     if (!g_ready) return false;
-    return index_find(key) >= 0;
+    return find_slot_for_key(key) >= 0;  // checks SRAM + flash index
 }
 
 // ============================================================
@@ -391,10 +483,29 @@ uint32_t kvsd_range(uint32_t prefix, uint32_t mask,
     if (!g_ready) return 0;
     uint32_t masked = prefix & mask;
     uint32_t count = 0;
+
+    // Scan SRAM index (tier 1)
     for (uint32_t i = 0; i < g_index_count && count < max; i++) {
         if ((g_index[i] & mask) == masked) out_keys[count++] = g_index[i];
         else if (g_index[i] > (masked | ~mask)) break;
     }
+
+    // Scan flash index (tier 2) for entries not in SRAM
+    for (uint32_t i = 0; i < g_fidx_count && count < max; i++) {
+        const fidx_entry_t *e = fidx_xip(i);
+        if (e->key == 0xFFFFFFFF) break;
+        if ((e->key & mask) != masked) {
+            if (e->key > (masked | ~mask)) break;
+            continue;
+        }
+        // Skip if already in SRAM results (dedup)
+        bool dup = false;
+        for (uint32_t j = 0; j < count; j++) {
+            if (out_keys[j] == e->key) { dup = true; break; }
+        }
+        if (!dup) out_keys[count++] = e->key;
+    }
+
     return count;
 }
 
@@ -433,7 +544,11 @@ bool kvsd_flush(void) {
 
     g_sb.dirty = 0;
     sb_write();
-    web_log("[kvsd] Flushed %lu key+slot pairs\n", (unsigned long)to_save);
+
+    // Also update flash index tier (tier 2) from SRAM
+    fidx_write_all(g_index, g_slots, g_index_count);
+
+    web_log("[kvsd] Flushed %lu pairs → SD + flash index\n", (unsigned long)to_save);
     return true;
 }
 
@@ -451,7 +566,7 @@ kvsd_stats_t kvsd_stats(void) {
     return st;
 }
 
-uint32_t kvsd_record_count(void) { return g_index_count; }
+uint32_t kvsd_record_count(void) { return g_sb.total_cards; }
 
 uint32_t kvsd_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t max_types) {
     uint32_t n = 0;
