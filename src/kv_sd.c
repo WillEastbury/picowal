@@ -120,7 +120,7 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.total_cards = 0;
 
     // Region sizes
-    // Block 0: superblock, blocks 1-1024: OTA staging (512KB)
+    // Block 0: superblock, blocks 1-1200: OTA staging (600KB)
     uint32_t reserved = 1 + KVSD_OTA_BLOCKS;  // superblock + OTA
     g_sb.ota_start = 1;
     g_sb.ota_blocks = KVSD_OTA_BLOCKS;
@@ -151,7 +151,7 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.dirty = 0;
 
     web_log("[kvsd] Format: %lu total blocks\n", (unsigned long)total_blocks);
-    web_log("[kvsd]   OTA:   %lu blocks @ %lu (512KB staging)\n",
+    web_log("[kvsd]   OTA:   %lu blocks @ %lu (600KB staging)\n",
             (unsigned long)g_sb.ota_blocks, (unsigned long)g_sb.ota_start);
     web_log("[kvsd]   Index: %lu blocks @ %lu (bitmap=%lu, keylist=%lu, bloom=%lu)\n",
             (unsigned long)index_total, (unsigned long)g_sb.index_start,

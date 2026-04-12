@@ -47,12 +47,12 @@ typedef struct __attribute__((packed)) {
     uint32_t next_free_hint;   // next likely free card slot
     uint32_t dirty;            // 1 = index needs flush
 
-    // OTA staging region — 512KB = 1024 blocks, right after superblock
+    // OTA staging region — 600KB = 1200 blocks, right after superblock
     uint32_t ota_start;        // block offset of OTA staging area
-    uint32_t ota_blocks;       // 1024 (512KB)
+    uint32_t ota_blocks;       // 1200 (600KB)
 } kvsd_superblock_t;
 
-#define KVSD_OTA_BLOCKS  1024   // 512KB = 1024 * 512
+#define KVSD_OTA_BLOCKS  1200   // 600KB = 1200 * 512
 
 // SRAM index
 #define KVSD_INDEX_MAX      36000

@@ -1308,13 +1308,13 @@ static void handle_metadata(struct tcp_pcb *pcb, http_verb_t verb, const char *p
 // ============================================================
 // OTA firmware update — SD-staged
 //
-// Upload chunks → SD staging area (512KB reserved blocks 1-1024)
+// Upload chunks → SD staging area (600KB reserved blocks 1-1200)
 // Commit → read from SD → SRAM → erase+write flash slot A
 // No XIP contention: SD reads via SPI, independent of flash
 // ============================================================
 
 #define OTA_SLOT_A      0x000000
-#define OTA_SLOT_SIZE   (512 * 1024)
+#define OTA_SLOT_SIZE   (600 * 1024)
 #define OTA_XIP_BASE    0x10000000
 
 static struct {
@@ -3261,7 +3261,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             return;
         }
         if (g_ota.offset + body_len > OTA_SLOT_SIZE) {
-            http_json(pcb, "413 Payload Too Large", "{\"error\":\"exceeds 512KB\"}");
+            http_json(pcb, "413 Payload Too Large", "{\"error\":\"exceeds 600KB\"}");
             g_ota.active = false;
             return;
         }
@@ -3341,7 +3341,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "<div class=card>"
             "<p>Staging via <strong>%s</strong>. Flash target: <strong>Slot A</strong> (0x000000).</p>"
             "<p>%s</p>"
-            "<p>Select a <code>.bin</code> firmware file. Max 512KB.</p>"
+            "<p>Select a <code>.bin</code> firmware file. Max 600KB.</p>"
             "<input type=file id=fw accept='.bin'>"
             "<button onclick=doOTA() style='margin-top:8px;width:100%%'%s>Upload &amp; Flash</button>"
             "<pre id=otaLog>%s</pre>"
