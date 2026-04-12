@@ -1,5 +1,7 @@
 #include "web_server.h"
 #include "kv_flash.h"
+#define KV_STORE_REDIRECT
+#include "kv_store.h"
 #include "metadata_dict.h"
 #include "user_auth.h"
 #include "wal_defs.h"

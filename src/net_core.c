@@ -3,6 +3,7 @@
 #include "wal_fence.h"
 #include "wal_dma.h"
 #include "kv_flash.h"
+#include "kv_sd.h"
 #include "ili9488.h"
 #include "xpt2046.h"
 #include "httpd/web_server.h"
@@ -684,6 +685,7 @@ void net_core_run(wal_state_t *wal) {
         if (!web_server_recent_activity(HTTP_UI_QUIET_MS)) {
             lcd_refresh_dashboard(wal);
             flush_cardinality_one();
+            if (kvsd_ready() && g_ctx.connected) kvsd_flush();
         }
         sleep_ms(1);
     }

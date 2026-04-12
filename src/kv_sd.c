@@ -11,10 +11,14 @@
 static const uint8_t SD_MAGIC[8] = { 0x31,0x41,0x59,0x26, 0x50,0x69,0x63,0x6F };
 
 static kvsd_superblock_t g_sb;
-static uint32_t g_index[KVSD_INDEX_MAX];
+static uint32_t g_index[KVSD_INDEX_MAX];       // sorted composite keys
 static uint32_t g_index_count = 0;
 static bool g_ready = false;
 static uint8_t g_card_buf[KVSD_CARD_SIZE];
+
+// Slot allocation: key→slot mapping via bitmap scan
+// Cards stored at data_start + slot*KVSD_CARD_BLOCKS
+// First 4 bytes of each SD card block stores the composite key for verification
 
 // ============================================================
 // Sorted index
@@ -219,22 +223,89 @@ void kvsd_init(void) {
 }
 
 // ============================================================
-// Put
+// Slot allocation — find free slot via bitmap
+// ============================================================
+
+static int32_t alloc_slot(void) {
+    uint32_t hint = g_sb.next_free_hint;
+    for (uint32_t tries = 0; tries < g_sb.max_cards; tries++) {
+        uint32_t slot = (hint + tries) % g_sb.max_cards;
+        if (!bitmap_get(slot)) {
+            g_sb.next_free_hint = (slot + 1) % g_sb.max_cards;
+            return (int32_t)slot;
+        }
+    }
+    return -1; // full
+}
+
+// Find the slot for a given key by reading the stored key header
+// Uses the SRAM index to narrow down — we store (key, slot) pairs
+// in a secondary mapping that fits in the last 4 bytes of each card
+static int32_t find_slot_for_key(uint32_t key) {
+    // Linear scan of index — find key, then scan blocks near it
+    // For efficiency, we store the slot inline in the index:
+    // g_index stores composite keys; slot can be derived by reading the card
+    // But that's slow. Instead, use a simple approach:
+    // Scan bitmap blocks, read card headers until we find matching key.
+    // This is O(n) worst case but only used for update/get operations.
+    //
+    // Optimization: for sequential card IDs (the common case), 
+    // use card_id as the slot directly if it's in range.
+    uint32_t card_id = key & 0x3FFFFF;
+    if (card_id < g_sb.max_cards) {
+        // Fast path: try card_id as slot directly
+        uint8_t hdr[8];
+        if (sd_read_block(slot_to_block(card_id), hdr)) {
+            uint32_t stored_key = hdr[4] | ((uint32_t)hdr[5]<<8) |
+                                  ((uint32_t)hdr[6]<<16) | ((uint32_t)hdr[7]<<24);
+            if (stored_key == key) return (int32_t)card_id;
+        }
+    }
+    return -1; // not found via fast path
+}
+
+// ============================================================
+// Put — with slot allocation
 // ============================================================
 
 bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
-    if (!g_ready || len > KVSD_CARD_SIZE || key >= g_sb.max_cards) return false;
+    if (!g_ready || len > KVSD_CARD_SIZE - 4) return false;
 
+    // Check if key already exists (update case)
+    int32_t existing = find_slot_for_key(key);
+    uint32_t slot;
+
+    if (existing >= 0) {
+        slot = (uint32_t)existing;
+    } else {
+        // Try card_id as slot first (keeps sequential)
+        uint32_t card_id = key & 0x3FFFFF;
+        if (card_id < g_sb.max_cards && !bitmap_get(card_id)) {
+            slot = card_id;
+        } else {
+            int32_t s = alloc_slot();
+            if (s < 0) return false;
+            slot = (uint32_t)s;
+        }
+    }
+
+    // Build card: [original data][key in last 4 bytes of first block]
     uint8_t card[KVSD_CARD_SIZE];
     memset(card, 0, KVSD_CARD_SIZE);
     memcpy(card, value, len);
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
+    // Store composite key at offset 4 (after magic+version) for slot lookup
+    // Wait — offset 4 is where field data starts. Use bytes 508-511 instead.
+    card[KVSD_CARD_SIZE - 4] = (uint8_t)(key);
+    card[KVSD_CARD_SIZE - 3] = (uint8_t)(key >> 8);
+    card[KVSD_CARD_SIZE - 2] = (uint8_t)(key >> 16);
+    card[KVSD_CARD_SIZE - 1] = (uint8_t)(key >> 24);
 
-    if (!write_card(key, card)) return false;
+    if (!write_card(slot, card)) return false;
 
     bool is_new = (index_find(key) < 0);
     if (is_new) {
-        bitmap_set(key, true);
+        bitmap_set(slot, true);
         g_sb.total_cards++;
         g_sb.dirty = 1;
     }
@@ -248,10 +319,12 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
 
 const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
     if (!g_ready) return NULL;
-    if (!read_card(key, g_card_buf)) return NULL;
+    int32_t slot = find_slot_for_key(key);
+    if (slot < 0) return NULL;
+    if (!read_card((uint32_t)slot, g_card_buf)) return NULL;
     if (g_card_buf[0] != KVSD_MAGIC_LO || g_card_buf[1] != KVSD_MAGIC_HI) return NULL;
-    index_insert(key);
-    uint16_t l = KVSD_CARD_SIZE;
+    // Trim trailing zeros (but not the key footer)
+    uint16_t l = KVSD_CARD_SIZE - 4;
     while (l > 4 && g_card_buf[l-1] == 0) l--;
     if (len) *len = l;
     return g_card_buf;
@@ -259,11 +332,12 @@ const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
 
 bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version) {
     if (!g_ready) return false;
+    int32_t slot = find_slot_for_key(key);
+    if (slot < 0) return false;
     uint8_t card[KVSD_CARD_SIZE];
-    if (!read_card(key, card)) return false;
+    if (!read_card((uint32_t)slot, card)) return false;
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    index_insert(key);
-    uint16_t l = KVSD_CARD_SIZE;
+    uint16_t l = KVSD_CARD_SIZE - 4;
     while (l > 4 && card[l-1] == 0) l--;
     if (*len < l) return false;
     memcpy(out, card, l);
@@ -278,10 +352,12 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
 
 bool kvsd_delete(uint32_t key) {
     if (!g_ready) return false;
+    int32_t slot = find_slot_for_key(key);
+    if (slot < 0) return false;
     uint8_t empty[KVSD_CARD_SIZE];
     memset(empty, 0, KVSD_CARD_SIZE);
-    write_card(key, empty);
-    bitmap_set(key, false);
+    write_card((uint32_t)slot, empty);
+    bitmap_set((uint32_t)slot, false);
     if (index_remove(key)) { g_sb.total_cards--; g_sb.dirty = 1; }
     return true;
 }

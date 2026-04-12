@@ -730,3 +730,10 @@ uint32_t kv_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t max_
     }
     return n;
 }
+
+// Aliases for kv_store.h — unambiguous names that won't be macro-redirected
+bool kvf_put(uint32_t key, const uint8_t *value, uint16_t len) { return kv_put(key, value, len); }
+bool kvf_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *ver) { return kv_get_copy(key, out, len, ver); }
+bool kvf_delete(uint32_t key) { return kv_delete(key); }
+uint32_t kvf_range(uint32_t p, uint32_t m, uint32_t *k, uint16_t *s, uint32_t mx) { return kv_range(p, m, k, s, mx); }
+uint32_t kvf_record_count(void) { return kv_record_count(); }

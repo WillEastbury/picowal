@@ -1,6 +1,7 @@
 #include "query.h"
 #include "kv_flash.h"
-#include "kv_sd.h"
+#define KV_STORE_REDIRECT
+#include "kv_store.h"
 #include "metadata_dict.h"
 #include "httpd/web_server.h"
 
