@@ -66,7 +66,7 @@ static void sha256_hash(const uint8_t *salt, uint8_t slen,
                         uint8_t hash_out[USER_HASH_LEN]) {
     mbedtls_sha256_context ctx;
     mbedtls_sha256_init(&ctx);
-    mbedtls_sha256_starts(&ctx, 0);
+    mbedtls_sha256_starts(&ctx, 0);  // 0 = SHA-256 (not 224)
     mbedtls_sha256_update(&ctx, salt, slen);
     mbedtls_sha256_update(&ctx, (const uint8_t *)pass, plen);
     mbedtls_sha256_finish(&ctx, hash_out);

@@ -42,11 +42,6 @@ static inline void cs_deselect(void) {
 // Send one byte, receive one byte simultaneously
 static uint8_t spi_transfer(uint8_t tx) {
     uint8_t rx;
-    // Timeout guard: if SPI1 hangs (no card, bus stuck), bail after 10ms
-    absolute_time_t deadline = make_timeout_time_ms(10);
-    while (!spi_is_writable(SD_SPI)) {
-        if (absolute_time_diff_us(get_absolute_time(), deadline) < 0) return 0xFF;
-    }
     spi_write_read_blocking(SD_SPI, &tx, &rx, 1);
     return rx;
 }
@@ -99,9 +94,6 @@ bool sd_init(void) {
     g_sd_sdhc = false;
     g_sd_blocks = 0;
 
-    // Overall timeout: if sd_init takes longer than 5 seconds, bail
-    absolute_time_t sd_deadline = make_timeout_time_ms(5000);
-
     web_log("[sd] SPI1 init: CLK=%d MOSI=%d MISO=%d CS=%d\n",
             SD_CLK_PIN, SD_MOSI_PIN, SD_MISO_PIN, SD_CS_PIN);
 
@@ -124,14 +116,63 @@ bool sd_init(void) {
     gpio_put(SD_CS_PIN, 1);
     for (int i = 0; i < 20; i++) spi_transfer(0xFF);
 
+    // Manual bit-bang test: toggle CLK manually to verify wiring
+    {
+        // Pause for manual test
+        
+        // Set pins to GPIO mode temporarily
+        gpio_set_function(SD_CLK_PIN, GPIO_FUNC_SIO);
+        gpio_set_function(SD_MOSI_PIN, GPIO_FUNC_SIO);
+        gpio_set_dir(SD_CLK_PIN, GPIO_OUT);
+        gpio_set_dir(SD_MOSI_PIN, GPIO_OUT);
+        gpio_set_dir(SD_MISO_PIN, GPIO_IN);
+        gpio_pull_up(SD_MISO_PIN);
+        
+        // Send 0xFF manually (MOSI high) with CS low, check MISO
+        gpio_put(SD_CS_PIN, 0);
+        sleep_us(10);
+        
+        uint8_t manual_rx = 0;
+        for (int bit = 7; bit >= 0; bit--) {
+            gpio_put(SD_MOSI_PIN, 1);  // MOSI high (0xFF)
+            gpio_put(SD_CLK_PIN, 0);
+            sleep_us(5);
+            gpio_put(SD_CLK_PIN, 1);
+            sleep_us(5);
+            if (gpio_get(SD_MISO_PIN)) manual_rx |= (1 << bit);
+        }
+        gpio_put(SD_CS_PIN, 1);
+        
+        web_log("[sd] Manual bit-bang: MISO reads 0x%02x\n", manual_rx);
+        web_log("[sd] CS=%d CLK=%d MOSI=%d MISO=%d\n",
+                gpio_get(SD_CS_PIN), gpio_get(SD_CLK_PIN), 
+                gpio_get(SD_MOSI_PIN), gpio_get(SD_MISO_PIN));
+        
+        // Restore SPI mode on all pins
+        gpio_set_function(SD_CLK_PIN, GPIO_FUNC_SPI);
+        gpio_set_function(SD_MOSI_PIN, GPIO_FUNC_SPI);
+        gpio_set_function(SD_MISO_PIN, GPIO_FUNC_SPI);
+    }
+
+    // Diagnostic: send 0xAA and check what comes back
+    {
+        uint8_t test_tx = 0xAA;
+        cs_select();
+        uint8_t test_rx = spi_transfer(test_tx);
+        cs_deselect();
+        web_log("[sd] Diag: sent 0xAA, got 0x%02x (expect 0xFF if no card response)\n", test_rx);
+        
+        // Try reading MISO pin directly
+        bool miso_state = gpio_get(SD_MISO_PIN);
+        web_log("[sd] MISO pin (GP%d) state: %d\n", SD_MISO_PIN, miso_state);
+        web_log("[sd] CLK pin (GP%d) func: %d\n", SD_CLK_PIN, gpio_get_function(SD_CLK_PIN));
+        web_log("[sd] MOSI pin (GP%d) func: %d\n", SD_MOSI_PIN, gpio_get_function(SD_MOSI_PIN));
+        web_log("[sd] MISO pin (GP%d) func: %d\n", SD_MISO_PIN, gpio_get_function(SD_MISO_PIN));
+    }
+
     // CMD0: GO_IDLE — must get 0x01
     uint8_t r1 = 0xFF;
     for (int i = 0; i < 10; i++) {
-        if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
-            web_log("[sd] TIMEOUT during CMD0\n");
-            spi_set_baudrate(SD_SPI, 30000000);
-            return false;
-        }
         r1 = sd_cmd_end(CMD0, 0);
         web_log("[sd] CMD0 attempt %d: r1=0x%02x\n", i, r1);
         if (r1 == 0x01 || r1 == 0x00) break;
@@ -140,7 +181,6 @@ bool sd_init(void) {
     if (r1 != 0x01 && r1 != 0x00) {
         snprintf(g_sd_debug, sizeof(g_sd_debug), "FAIL: CMD0 r1=0x%02x (need 0x01 or 0x00)", r1);
         web_log("[sd] %s\n", g_sd_debug);
-        spi_set_baudrate(SD_SPI, 30000000);
         return false;
     }
 
@@ -163,11 +203,6 @@ bool sd_init(void) {
     web_log("[sd] CMD8 v2=%d, starting ACMD41\n", v2);
     uint32_t a41 = v2 ? 0x40000000 : 0;
     for (int i = 0; i < 1000; i++) {
-        if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
-            web_log("[sd] TIMEOUT during ACMD41\n");
-            spi_set_baudrate(SD_SPI, 30000000);
-            return false;
-        }
         sd_cmd_end(CMD55, 0);
         r1 = sd_cmd_end(ACMD41, a41);
         if (r1 == 0x00) break;
@@ -176,7 +211,6 @@ bool sd_init(void) {
     if (r1 != 0x00) {
         snprintf(g_sd_debug, sizeof(g_sd_debug), "FAIL: ACMD41 r1=0x%02x", r1);
         web_log("[sd] %s\n", g_sd_debug);
-        spi_set_baudrate(SD_SPI, 30000000);
         return false;
     }
 
@@ -204,14 +238,8 @@ bool sd_init(void) {
     web_log("[sd] CMD9 r1=0x%02x, waiting for data token...\n", r1);
     bool got_token = false;
     if (r1 == 0x00) {
-        // Wait for data token with timeout
+        // Wait longer for data token
         for (int t = 0; t < 200000; t++) {
-            if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
-                web_log("[sd] TIMEOUT waiting for CSD token\n");
-                cs_deselect();
-                spi_set_baudrate(SD_SPI, 30000000);
-                return false;
-            }
             uint8_t b = spi_transfer(0xFF);
             if (b == 0xFE) { got_token = true; break; }
             if (b != 0xFF) { web_log("[sd] CSD got 0x%02x instead of token\n", b); break; }

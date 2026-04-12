@@ -47,10 +47,15 @@ int main(void) {
     lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
     lcd_draw_string(40, 70, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
-    // SD card init — deferred to after network is up.
-    // sd_init() can hang if the card is absent or SPI1 is in a bad state,
-    // so we skip it at boot and let the admin endpoint trigger it safely.
-    web_log("[boot] SD init deferred (use /admin/sd to trigger)\n");
+    // SD card + KV-SD init
+    web_log("[boot] SD init deferred — trigger via /admin/log\n");
+    // Try auto-init SD at boot
+    if (sd_init()) {
+        web_log("[boot] SD OK, initializing KV-SD\n");
+        kvsd_init();
+    } else {
+        web_log("[boot] SD not available, using flash KV only\n");
+    }
 
     // Initialize WAL state
     memset(&wal, 0, sizeof(wal));
