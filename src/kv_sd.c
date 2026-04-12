@@ -248,26 +248,17 @@ static int32_t alloc_slot(void) {
 // Uses the SRAM index to narrow down — we store (key, slot) pairs
 // in a secondary mapping that fits in the last 4 bytes of each card
 static int32_t find_slot_for_key(uint32_t key) {
-    // Linear scan of index — find key, then scan blocks near it
-    // For efficiency, we store the slot inline in the index:
-    // g_index stores composite keys; slot can be derived by reading the card
-    // But that's slow. Instead, use a simple approach:
-    // Scan bitmap blocks, read card headers until we find matching key.
-    // This is O(n) worst case but only used for update/get operations.
-    //
-    // Optimization: for sequential card IDs (the common case), 
-    // use card_id as the slot directly if it's in range.
     uint32_t card_id = key & 0x3FFFFF;
     if (card_id < g_sb.max_cards) {
-        // Fast path: try card_id as slot directly
-        uint8_t hdr[8];
-        if (sd_read_block(slot_to_block(card_id), hdr)) {
-            uint32_t stored_key = hdr[4] | ((uint32_t)hdr[5]<<8) |
-                                  ((uint32_t)hdr[6]<<16) | ((uint32_t)hdr[7]<<24);
+        // Fast path: card_id as slot, key stored at bytes 508-511 of first block
+        uint8_t blk[512];
+        if (sd_read_block(slot_to_block(card_id), blk)) {
+            uint32_t stored_key = blk[508] | ((uint32_t)blk[509]<<8) |
+                                  ((uint32_t)blk[510]<<16) | ((uint32_t)blk[511]<<24);
             if (stored_key == key) return (int32_t)card_id;
         }
     }
-    return -1; // not found via fast path
+    return -1;
 }
 
 // ============================================================
@@ -300,12 +291,11 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     memset(card, 0, KVSD_CARD_SIZE);
     memcpy(card, value, len);
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    // Store composite key at offset 4 (after magic+version) for slot lookup
-    // Wait — offset 4 is where field data starts. Use bytes 508-511 instead.
-    card[KVSD_CARD_SIZE - 4] = (uint8_t)(key);
-    card[KVSD_CARD_SIZE - 3] = (uint8_t)(key >> 8);
-    card[KVSD_CARD_SIZE - 2] = (uint8_t)(key >> 16);
-    card[KVSD_CARD_SIZE - 1] = (uint8_t)(key >> 24);
+    // Store composite key at bytes 508-511 of first block for find_slot_for_key
+    card[508] = (uint8_t)(key);
+    card[509] = (uint8_t)(key >> 8);
+    card[510] = (uint8_t)(key >> 16);
+    card[511] = (uint8_t)(key >> 24);
 
     if (!write_card(slot, card)) return false;
 
@@ -329,8 +319,8 @@ const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
     if (slot < 0) return NULL;
     if (!read_card((uint32_t)slot, g_card_buf)) return NULL;
     if (g_card_buf[0] != KVSD_MAGIC_LO || g_card_buf[1] != KVSD_MAGIC_HI) return NULL;
-    // Trim trailing zeros (but not the key footer)
-    uint16_t l = KVSD_CARD_SIZE - 4;
+    // Trim trailing zeros up to byte 508 (key footer at 508-511)
+    uint16_t l = 508;
     while (l > 4 && g_card_buf[l-1] == 0) l--;
     if (len) *len = l;
     return g_card_buf;
@@ -343,7 +333,7 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
     uint8_t card[KVSD_CARD_SIZE];
     if (!read_card((uint32_t)slot, card)) return false;
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    uint16_t l = KVSD_CARD_SIZE - 4;
+    uint16_t l = 508;
     while (l > 4 && card[l-1] == 0) l--;
     if (*len < l) return false;
     memcpy(out, card, l);
