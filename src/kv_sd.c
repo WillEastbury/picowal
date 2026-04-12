@@ -12,6 +12,7 @@ static const uint8_t SD_MAGIC[8] = { 0x31,0x41,0x59,0x26, 0x50,0x69,0x63,0x6F };
 
 static kvsd_superblock_t g_sb;
 static uint32_t g_index[KVSD_INDEX_MAX];       // sorted composite keys
+static uint32_t g_slots[KVSD_INDEX_MAX];       // parallel: SD slot for each key (COW)
 static uint32_t g_index_count = 0;
 static bool g_ready = false;
 static uint8_t g_card_buf[KVSD_CARD_SIZE];
@@ -34,13 +35,17 @@ static int32_t index_find(uint32_t key) {
     return -(lo + 1);
 }
 
-static bool index_insert(uint32_t key) {
+static bool index_insert(uint32_t key, uint32_t slot) {
     int32_t pos = index_find(key);
-    if (pos >= 0) return true;
+    if (pos >= 0) { g_slots[pos] = slot; return true; }
     if (g_index_count >= KVSD_INDEX_MAX) return false;
     uint32_t at = (uint32_t)(-(pos + 1));
-    if (at < g_index_count) memmove(&g_index[at+1], &g_index[at], (g_index_count-at)*4);
+    if (at < g_index_count) {
+        memmove(&g_index[at+1], &g_index[at], (g_index_count-at)*4);
+        memmove(&g_slots[at+1], &g_slots[at], (g_index_count-at)*4);
+    }
     g_index[at] = key;
+    g_slots[at] = slot;
     g_index_count++;
     return true;
 }
@@ -48,7 +53,10 @@ static bool index_insert(uint32_t key) {
 static bool index_remove(uint32_t key) {
     int32_t pos = index_find(key);
     if (pos < 0) return false;
-    if ((uint32_t)pos < g_index_count-1) memmove(&g_index[pos], &g_index[pos+1], (g_index_count-(uint32_t)pos-1)*4);
+    if ((uint32_t)pos < g_index_count-1) {
+        memmove(&g_index[pos], &g_index[pos+1], (g_index_count-(uint32_t)pos-1)*4);
+        memmove(&g_slots[pos], &g_slots[pos+1], (g_index_count-(uint32_t)pos-1)*4);
+    }
     g_index_count--;
     return true;
 }
@@ -179,23 +187,28 @@ void kvsd_init(void) {
                 (unsigned long)g_sb.total_cards, (unsigned long)g_sb.data_start,
                 (unsigned long)g_sb.max_cards);
 
-        // Try to load sorted key list from keylist region (fast boot)
+        // Load sorted key+slot pairs from keylist (64 pairs per block)
         uint32_t saved = g_sb.total_cards;
         if (saved > 0 && saved <= KVSD_INDEX_MAX && g_sb.keylist_blocks > 0) {
-            web_log("[kvsd] Loading %lu keys from keylist...\n", (unsigned long)saved);
+            web_log("[kvsd] Loading %lu key+slot pairs...\n", (unsigned long)saved);
             uint32_t loaded = 0;
             for (uint32_t b = 0; b < g_sb.keylist_blocks && loaded < saved; b++) {
                 uint8_t buf[512];
                 if (!sd_read_block(g_sb.keylist_start + b, buf)) break;
-                for (uint32_t k = 0; k < 128 && loaded < saved; k++) {
-                    uint32_t key = (uint32_t)buf[k*4] | ((uint32_t)buf[k*4+1]<<8) |
-                                   ((uint32_t)buf[k*4+2]<<16) | ((uint32_t)buf[k*4+3]<<24);
+                for (uint32_t k = 0; k < 64 && loaded < saved; k++) {
+                    uint32_t off = k * 8;
+                    uint32_t key = (uint32_t)buf[off] | ((uint32_t)buf[off+1]<<8) |
+                                   ((uint32_t)buf[off+2]<<16) | ((uint32_t)buf[off+3]<<24);
+                    uint32_t slot = (uint32_t)buf[off+4] | ((uint32_t)buf[off+5]<<8) |
+                                    ((uint32_t)buf[off+6]<<16) | ((uint32_t)buf[off+7]<<24);
                     if (key == 0xFFFFFFFF) break;
-                    g_index[loaded++] = key;
+                    g_index[loaded] = key;
+                    g_slots[loaded] = slot;
+                    loaded++;
                 }
             }
             g_index_count = loaded;
-            web_log("[kvsd] Loaded %lu keys\n", (unsigned long)loaded);
+            web_log("[kvsd] Loaded %lu pairs\n", (unsigned long)loaded);
         }
 
         // If keylist was empty/corrupt, fall back to bitmap scan
@@ -211,9 +224,27 @@ void kvsd_init(void) {
                 for (uint32_t by = 0; by < 512 && g_index_count < KVSD_INDEX_MAX; by++) {
                     if (!buf[by]) continue;
                     for (uint8_t bi = 0; bi < 8; bi++) {
-                        if (buf[by] & (1u<<bi)) g_index[g_index_count++] = base + by*8 + bi;
+                        if (!(buf[by] & (1u<<bi))) continue;
+                        uint32_t slot = base + by*8 + bi;
+                        uint8_t hdr[512];
+                        if (!sd_read_block(slot_to_block(slot), hdr)) continue;
+                        uint32_t key = hdr[508] | ((uint32_t)hdr[509]<<8) |
+                                       ((uint32_t)hdr[510]<<16) | ((uint32_t)hdr[511]<<24);
+                        if (key == 0 || key == 0xFFFFFFFF) continue;
+                        g_index[g_index_count] = key;
+                        g_slots[g_index_count] = slot;
+                        g_index_count++;
                     }
                 }
+            }
+            // Sort by key
+            for (uint32_t i = 1; i < g_index_count; i++) {
+                uint32_t k = g_index[i], s = g_slots[i];
+                int32_t j = (int32_t)i - 1;
+                while (j >= 0 && g_index[j] > k) {
+                    g_index[j+1] = g_index[j]; g_slots[j+1] = g_slots[j]; j--;
+                }
+                g_index[j+1] = k; g_slots[j+1] = s;
             }
             web_log("[kvsd] Bitmap scan: %lu keys\n", (unsigned long)g_index_count);
         }
@@ -244,20 +275,10 @@ static int32_t alloc_slot(void) {
     return -1; // full
 }
 
-// Find the slot for a given key by reading the stored key header
-// Uses the SRAM index to narrow down — we store (key, slot) pairs
-// in a secondary mapping that fits in the last 4 bytes of each card
+// Find the slot for a given key using the SRAM index (O(log n), no SD I/O)
 static int32_t find_slot_for_key(uint32_t key) {
-    uint32_t card_id = key & 0x3FFFFF;
-    if (card_id < g_sb.max_cards) {
-        // Fast path: card_id as slot, key stored at bytes 508-511 of first block
-        uint8_t blk[512];
-        if (sd_read_block(slot_to_block(card_id), blk)) {
-            uint32_t stored_key = blk[508] | ((uint32_t)blk[509]<<8) |
-                                  ((uint32_t)blk[510]<<16) | ((uint32_t)blk[511]<<24);
-            if (stored_key == key) return (int32_t)card_id;
-        }
-    }
+    int32_t pos = index_find(key);
+    if (pos >= 0) return (int32_t)g_slots[pos];
     return -1;
 }
 
@@ -268,44 +289,41 @@ static int32_t find_slot_for_key(uint32_t key) {
 bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     if (!g_ready || len > KVSD_CARD_SIZE - 4) return false;
 
-    // Check if key already exists (update case)
-    int32_t existing = find_slot_for_key(key);
-    uint32_t slot;
+    int32_t old_slot = find_slot_for_key(key);
 
-    if (existing >= 0) {
-        slot = (uint32_t)existing;
-    } else {
-        // Try card_id as slot first (keeps sequential)
+    // COW: always allocate a new slot — never overwrite in-place
+    uint32_t new_slot;
+    {
         uint32_t card_id = key & 0x3FFFFF;
-        if (card_id < g_sb.max_cards && !bitmap_get(card_id)) {
-            slot = card_id;
+        if (old_slot < 0 && card_id < g_sb.max_cards && !bitmap_get(card_id)) {
+            new_slot = card_id;
         } else {
             int32_t s = alloc_slot();
             if (s < 0) return false;
-            slot = (uint32_t)s;
+            new_slot = (uint32_t)s;
         }
     }
 
-    // Build card: [original data][key in last 4 bytes of first block]
     uint8_t card[KVSD_CARD_SIZE];
     memset(card, 0, KVSD_CARD_SIZE);
     memcpy(card, value, len);
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    // Store composite key at bytes 508-511 of first block for find_slot_for_key
     card[508] = (uint8_t)(key);
     card[509] = (uint8_t)(key >> 8);
     card[510] = (uint8_t)(key >> 16);
     card[511] = (uint8_t)(key >> 24);
 
-    if (!write_card(slot, card)) return false;
+    if (!write_card(new_slot, card)) return false;
 
-    bool is_new = (index_find(key) < 0);
-    if (is_new) {
-        bitmap_set(slot, true);
-        g_sb.total_cards++;
-        g_sb.dirty = 1;
+    bitmap_set(new_slot, true);
+    bool is_new = (old_slot < 0);
+    index_insert(key, new_slot);
+
+    if (!is_new && (uint32_t)old_slot != new_slot) {
+        bitmap_set((uint32_t)old_slot, false);
     }
-    index_insert(key);
+    if (is_new) g_sb.total_cards++;
+    g_sb.dirty = 1;
     return true;
 }
 
@@ -317,7 +335,7 @@ const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
     if (!g_ready) return NULL;
     int32_t slot = find_slot_for_key(key);
     if (slot < 0) return NULL;
-    if (!read_card((uint32_t)slot, g_card_buf)) return NULL;
+    if (!sd_read_blocks(slot_to_block((uint32_t)slot), g_card_buf, KVSD_CARD_BLOCKS)) return NULL;
     if (g_card_buf[0] != KVSD_MAGIC_LO || g_card_buf[1] != KVSD_MAGIC_HI) return NULL;
     // Trim trailing zeros up to byte 508 (key footer at 508-511)
     uint16_t l = 508;
@@ -331,7 +349,7 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
     int32_t slot = find_slot_for_key(key);
     if (slot < 0) return false;
     uint8_t card[KVSD_CARD_SIZE];
-    if (!read_card((uint32_t)slot, card)) return false;
+    if (!sd_read_blocks(slot_to_block((uint32_t)slot), card, KVSD_CARD_BLOCKS)) return false;
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
     uint16_t l = 508;
     while (l > 4 && card[l-1] == 0) l--;
@@ -387,24 +405,27 @@ uint32_t kvsd_range(uint32_t prefix, uint32_t mask,
 bool kvsd_flush(void) {
     if (!g_ready) return false;
 
-    // Write sorted key array to keylist region
-    uint32_t keys_to_save = g_index_count;
-    uint32_t blocks_needed = (keys_to_save * 4 + 511) / 512;
+    // Write sorted key+slot pairs (64 per block)
+    uint32_t to_save = g_index_count;
+    uint32_t blocks_needed = (to_save + 63) / 64;
     if (blocks_needed > g_sb.keylist_blocks) blocks_needed = g_sb.keylist_blocks;
 
     for (uint32_t b = 0; b < blocks_needed; b++) {
         uint8_t buf[512];
         memset(buf, 0xFF, 512);
-        uint32_t start = b * 128;
-        for (uint32_t k = 0; k < 128 && start+k < keys_to_save; k++) {
+        uint32_t start = b * 64;
+        for (uint32_t k = 0; k < 64 && start+k < to_save; k++) {
+            uint32_t off = k * 8;
             uint32_t key = g_index[start+k];
-            buf[k*4]=(uint8_t)key; buf[k*4+1]=(uint8_t)(key>>8);
-            buf[k*4+2]=(uint8_t)(key>>16); buf[k*4+3]=(uint8_t)(key>>24);
+            uint32_t slot = g_slots[start+k];
+            buf[off]=(uint8_t)key; buf[off+1]=(uint8_t)(key>>8);
+            buf[off+2]=(uint8_t)(key>>16); buf[off+3]=(uint8_t)(key>>24);
+            buf[off+4]=(uint8_t)slot; buf[off+5]=(uint8_t)(slot>>8);
+            buf[off+6]=(uint8_t)(slot>>16); buf[off+7]=(uint8_t)(slot>>24);
         }
         if (!sd_write_block(g_sb.keylist_start + b, buf)) return false;
     }
 
-    // Clear remaining keylist blocks (mark end)
     if (blocks_needed < g_sb.keylist_blocks) {
         uint8_t ff[512]; memset(ff, 0xFF, 512);
         sd_write_block(g_sb.keylist_start + blocks_needed, ff);
@@ -412,8 +433,7 @@ bool kvsd_flush(void) {
 
     g_sb.dirty = 0;
     sb_write();
-
-    web_log("[kvsd] Flushed %lu keys + superblock\n", (unsigned long)keys_to_save);
+    web_log("[kvsd] Flushed %lu key+slot pairs\n", (unsigned long)to_save);
     return true;
 }
 

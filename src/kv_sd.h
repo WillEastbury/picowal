@@ -54,8 +54,9 @@ typedef struct __attribute__((packed)) {
 
 #define KVSD_OTA_BLOCKS  1200   // 600KB = 1200 * 512
 
-// SRAM index
-#define KVSD_INDEX_MAX      36000
+// SRAM index — key + slot parallel arrays (COW support)
+// 18K entries × 8 bytes = 144KB (same footprint as 36K keys-only)
+#define KVSD_INDEX_MAX      18000
 
 void kvsd_init(void);
 bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len);
