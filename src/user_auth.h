@@ -26,7 +26,7 @@
 #define USER_SALT_LEN       16
 #define USER_HASH_LEN       32
 #define SESSION_TOKEN_LEN   16
-#define SESSION_MAX         4
+#define SESSION_MAX         8
 #define SESSION_TIMEOUT_S   3600
 
 #define USER_FLAG_ADMIN     0x01
