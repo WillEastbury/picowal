@@ -2924,6 +2924,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
         unsigned int type_val = 0;
         if (sscanf(path, "/Ids/%u/", &type_val) == 1) {
+            if (!user_auth_can_read(&session, (uint16_t)type_val)) {
+                http_json(pcb, "403 Forbidden", "{\"error\":\"no read access to this pack\"}");
+                return;
+            }
             uint32_t keys[2049];
             uint8_t id_buf[4096];
             uint32_t count = kv_range(((uint32_t)(type_val & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 2049u);
@@ -2956,6 +2960,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
         unsigned int type_val = 0;
         if (sscanf(path, "/w/%u/", &type_val) == 1) {
+            if (!user_auth_can_read(&session, (uint16_t)type_val)) {
+                http_json(pcb, "403 Forbidden", "{\"error\":\"no read access to this pack\"}");
+                return;
+            }
             uint32_t keys[257];
             uint32_t count = kv_range(((uint32_t)(type_val & 0x3FFu) << 22), 0xFFC00000u, keys, NULL, 257u);
             if (count > 256u) {
@@ -3054,6 +3062,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "<button onclick='location.reload()'>Refresh</button>"
             "<button onclick=\"fetch('/admin/reboot',{method:'POST',credentials:'same-origin'}).then(function(){document.getElementById('logpre').textContent='Rebooting...'})\" style='background:#c0392b'>Reboot</button>"
             "<button onclick=\"fetch('/admin/sd/init',{method:'POST',credentials:'same-origin'}).then(function(r){return r.text()}).then(function(t){alert(t);location.reload()})\" >Init SD</button>"
+            "<button onclick=\"if(confirm('WIPE ALL DATA? This erases flash KV + SD and reboots.')){fetch('/admin/wipe',{method:'POST',credentials:'same-origin'}).then(function(){document.getElementById('logpre').textContent='Wiping...'})}\" style='background:#800'>Wipe All</button>"
             "</div>"
             "<pre id=logpre style='max-height:600px;overflow-y:auto;font-size:12px'>%s</pre>"
             "</div>", logbuf);
@@ -3069,6 +3078,43 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             return;
         }
         http_json(pcb, "200 OK", "{\"ok\":true,\"rebooting\":true}");
+        tcp_output(pcb);
+        sleep_ms(500);
+        watchdog_reboot(0, 0, 0);
+        while (1) tight_loop_contents();
+        return;
+    }
+
+    // ---- Route: POST /admin/wipe — erase all user data (flash KV + SD) ----
+    if (verb == VERB_POST && strcmp(path, "/admin/wipe") == 0) {
+        user_session_t session;
+        if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
+            http_json(pcb, "403 Forbidden", "{\"error\":\"admin required\"}");
+            return;
+        }
+        web_log("[admin] WIPE: erasing all user data\n");
+
+        // Erase flash KV (keeps firmware, erases KV region)
+        kv_wipe();
+        web_log("[admin] Flash KV wiped\n");
+
+        // Reinitialise flash KV (empty)
+        kv_init();
+        web_log("[admin] Flash KV reinitialised\n");
+
+        // Wipe SD superblock (forces reinit on next boot)
+        if (kvsd_ready()) {
+            uint8_t zero[512];
+            memset(zero, 0, sizeof(zero));
+            sd_write_block(0, zero);
+            web_log("[admin] SD superblock wiped\n");
+        }
+
+        // Re-seed default admin + system packs
+        user_auth_init();
+        web_log("[admin] Admin user + system packs re-seeded\n");
+
+        http_json(pcb, "200 OK", "{\"ok\":true,\"wiped\":true,\"rebooting\":true}");
         tcp_output(pcb);
         sleep_ms(500);
         watchdog_reboot(0, 0, 0);
@@ -3394,6 +3440,45 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         memcpy(qbuf, body, qlen); qbuf[qlen] = '\0';
 
         query_t q = query_parse(qbuf);
+
+        // RBAC: check read access on all FROM packs before executing
+        for (uint8_t fi = 0; fi < q.from_count; fi++) {
+            // Resolve pack name to ordinal for RBAC check
+            uint32_t skeys[64];
+            uint32_t scount = kv_range(0, 0xFFC00000u, skeys, NULL, 64);
+            for (uint32_t si = 0; si < scount; si++) {
+                uint8_t sb[256]; uint16_t sl = sizeof(sb);
+                if (!kv_get_copy(skeys[si], sb, &sl, NULL)) continue;
+                if (sl < 6 || sb[0] != 0x7D || sb[1] != 0xCA) continue;
+                char pn[32] = ""; uint16_t off = 4;
+                while (off + 1 < sl) {
+                    uint8_t ord = sb[off] & 0x1F, fl = sb[off+1]; off += 2;
+                    if (off + fl > sl) break;
+                    if (ord == 0 && fl >= 1) {
+                        uint8_t nl = sb[off]; if (nl > 31) nl = 31;
+                        memcpy(pn, sb+off+1, nl); pn[nl] = '\0';
+                    }
+                    off += fl;
+                }
+                // Case-insensitive match
+                bool match = (strlen(pn) > 0 && strlen(pn) == strlen(q.from_decks[fi]));
+                for (int ci = 0; match && pn[ci]; ci++) {
+                    char a = pn[ci], b = q.from_decks[fi][ci];
+                    if (a >= 'A' && a <= 'Z') a += 32;
+                    if (b >= 'A' && b <= 'Z') b += 32;
+                    if (a != b) match = false;
+                }
+                if (match) {
+                    uint16_t pack_ord = (uint16_t)(skeys[si] & 0x3FFFFF);
+                    if (!user_auth_can_read(&session, pack_ord)) {
+                        http_json(pcb, "403 Forbidden", "{\"error\":\"no read access to queried pack\"}");
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
+
         char result[4096];
         const char *pack_name = "";
         int result_count = 0;

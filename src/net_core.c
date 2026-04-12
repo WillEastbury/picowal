@@ -686,6 +686,8 @@ void net_core_run(wal_state_t *wal) {
     web_server_init(g_ctx.wal);
 
     // Main poll loop
+    uint32_t hb_last = 0;
+    bool hb_on = false;
     while (true) {
         wal->core0_heartbeat++;
         cyw43_arch_poll();
@@ -696,6 +698,15 @@ void net_core_run(wal_state_t *wal) {
             lcd_refresh_dashboard(wal);
             flush_cardinality_one();
             if (kvsd_ready() && g_ctx.connected) kvsd_flush();
+        }
+        // Heartbeat indicator — top-left dot toggles every 1s
+        {
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            if (now - hb_last >= 1000) {
+                hb_last = now;
+                hb_on = !hb_on;
+                lcd_draw_string(0, 0, hb_on ? "*" : " ", COLOR_GREEN, COLOR_BLACK, 2);
+            }
         }
         sleep_ms(1);
     }

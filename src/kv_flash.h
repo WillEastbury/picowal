@@ -62,6 +62,9 @@ _Static_assert(sizeof(kv_header_t) == 20, "header must be 20 bytes");
 // Init: scan flash, build in-memory key→sector index.
 void kv_init(void);
 
+// Erase all KV data (flash region + deadlog). Call kv_init() after.
+void kv_wipe(void);
+
 // Write a key-value pair. Finds old sector for key (if any),
 // writes to a free sector, then invalidates the old one.
 // Returns true on success.
