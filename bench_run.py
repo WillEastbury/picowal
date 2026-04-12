@@ -109,7 +109,7 @@ def read_page(pack, start=0, limit=20):
     return r.read()
 
 def query(q):
-    r = req(f"/query?q={urllib.request.quote(q)}")
+    r = req("/query", q.encode(), "POST", "text/plain")
     return r.read()
 
 # ── main ─────────────────────────────────────────────────────
