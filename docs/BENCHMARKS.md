@@ -122,3 +122,63 @@ Query time scales linearly with card count (full scan). The cost-based optimizer
 | Max card size | 508 bytes | (512 - 4 byte key footer) |
 | Max pack count | 1,024 | 10-bit ordinal |
 | Max cards/pack | 4,194,303 | 22-bit card ID |
+
+## Latency & Jitter Analysis
+
+Detailed per-operation latency measurements with percentiles and jitter, measured over WiFi 802.11n on the same LAN.
+
+### Connection Overhead
+
+| Metric | Min | Avg | Median | P95 | P99 | Max |
+|--------|-----|-----|--------|-----|-----|-----|
+| **TCP connect (SYN→ACK)** | 6.2ms | 20.7ms | 16.0ms | 47.4ms | 49.1ms | 49.1ms |
+| **HTTP keep-alive request** | 12.3ms | 16.4ms | 15.2ms | 21.9ms | 28.0ms | 28.0ms |
+| **HTTP new connection** | 13.1ms | 26.9ms | 26.6ms | 46.6ms | 58.2ms | 58.2ms |
+| **Login (SHA-256 auth)** | 11.6ms | 16.3ms | 14.8ms | 27.6ms | — | 27.6ms |
+
+**Keep-alive saves 10.5ms avg (39% faster)** than new connections. The TCP handshake adds ~5-20ms of WiFi round-trip overhead.
+
+### Operation Latency
+
+| Operation | Min | Avg | Median | P95 | StdDev | Avg Jitter |
+|-----------|-----|-----|--------|-----|--------|------------|
+| **Batch write ×32** | 14.0ms | 18.5ms | 17.4ms | 23.4ms | 2.9ms | 3.2ms |
+| **Page render (list)** | 15.0ms | 19.4ms | 18.4ms | 25.3ms | 3.4ms | 3.6ms |
+| **Status page** | 13.9ms | 19.7ms | 17.4ms | 30.6ms | 4.7ms | 5.0ms |
+| **Query WHERE (3000 cards)** | 13.9ms | 19.2ms | 16.9ms | 28.9ms | 5.6ms | 4.5ms |
+| **Query aggregate SUM** | 14.6ms | 18.9ms | 17.0ms | 28.6ms | 4.9ms | 4.3ms |
+| **Login** | 11.6ms | 16.3ms | 14.8ms | 27.6ms | 4.2ms | 3.2ms |
+
+### Jitter Analysis
+
+| Operation | Avg Jitter | Max Jitter | Notes |
+|-----------|-----------|------------|-------|
+| Batch write ×32 | 3.2ms | 8.9ms | Very stable |
+| Page render | 3.6ms | 17.5ms | Occasional WiFi spike |
+| Status page | 5.0ms | 20.9ms | More variable (minimal processing = WiFi-dominated) |
+| Query WHERE | 4.5ms | 39.0ms | Rare outlier from WiFi retransmit |
+| Query aggregate | 4.3ms | 19.6ms | Consistent |
+| Login (SHA-256) | 3.2ms | 8.1ms | Most stable (small payload) |
+
+### Latency Breakdown
+
+Estimated breakdown of a typical 17ms keep-alive request:
+
+```
+WiFi round-trip (SYN→ACK baseline):  ~6-10ms
+HTTP parsing + routing:              ~0.5ms
+SD card read (per card):             ~0.2ms
+Schema lookup + field decode:        ~0.3ms
+HTML/response generation:            ~1-3ms
+TCP transmission (2-8KB page):       ~2-4ms
+────────────────────────────────────────────
+Total:                               ~12-18ms
+```
+
+### Warmup Effect
+
+No measurable warmup penalty — first 10 requests (avg 18.2ms) are within noise of steady state (avg 18.5ms). The SRAM-based index and stateless HTTP handler require no JIT or cache warming.
+
+### Per-Card Cost in Batch
+
+A 32-card batch completes in **18.5ms avg**, giving a per-card cost of **0.58ms** — this includes SD bitmap update, block write, and SRAM index insert for each card. The WiFi round-trip is amortised across all 32 cards.
