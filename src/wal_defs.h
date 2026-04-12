@@ -123,6 +123,9 @@ typedef struct {
     // --- Liveness counters ---
     volatile uint32_t core0_heartbeat;
     volatile uint32_t core1_heartbeat;
+
+    // --- OTA: set by Core 0 to park Core 1 during flash writes ---
+    volatile bool ota_halt_core1;
 } wal_state_t;
 
 // ============================================================

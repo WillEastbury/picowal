@@ -384,6 +384,11 @@ void wal_engine_run(wal_state_t *wal) {
            SLOT_COUNT, REQ_RING_SIZE);
 
     while (true) {
+        // OTA halt: spin here until Core 0 finishes flash writes
+        while (g_wal->ota_halt_core1) {
+            __wfe();  // wait-for-event, low power
+        }
+
         g_wal->core1_heartbeat++;
 
         // Drain all pending request signals (non-blocking check)

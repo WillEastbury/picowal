@@ -40,21 +40,22 @@ static inline void cs_deselect(void) {
 }
 
 // Send one byte, receive one byte simultaneously
-static uint8_t spi_transfer(uint8_t tx) {
+// Placed in SRAM for OTA flash-write safety
+static uint8_t __no_inline_not_in_flash_func(spi_transfer)(uint8_t tx) {
     uint8_t rx;
     spi_write_read_blocking(SD_SPI, &tx, &rx, 1);
     return rx;
 }
 
-static void spi_write(const uint8_t *data, uint32_t len) {
+static void __no_inline_not_in_flash_func(spi_write)(const uint8_t *data, uint32_t len) {
     for (uint32_t i = 0; i < len; i++) spi_transfer(data[i]);
 }
 
-static void spi_read(uint8_t *data, uint32_t len) {
+static void __no_inline_not_in_flash_func(spi_read)(uint8_t *data, uint32_t len) {
     for (uint32_t i = 0; i < len; i++) data[i] = spi_transfer(0xFF);
 }
 
-static uint8_t sd_cmd(uint8_t cmd, uint32_t arg) {
+static uint8_t __no_inline_not_in_flash_func(sd_cmd)(uint8_t cmd, uint32_t arg) {
     uint8_t frame[6] = {
         (uint8_t)(0x40 | cmd),
         (uint8_t)(arg >> 24), (uint8_t)(arg >> 16),
@@ -72,13 +73,13 @@ static uint8_t sd_cmd(uint8_t cmd, uint32_t arg) {
     return r1;
 }
 
-static uint8_t sd_cmd_end(uint8_t cmd, uint32_t arg) {
+static uint8_t __no_inline_not_in_flash_func(sd_cmd_end)(uint8_t cmd, uint32_t arg) {
     uint8_t r1 = sd_cmd(cmd, arg);
     cs_deselect();
     return r1;
 }
 
-static bool sd_wait_token(void) {
+static bool __no_inline_not_in_flash_func(sd_wait_token)(void) {
     for (int i = 0; i < 100000; i++) {
         uint8_t b = spi_transfer(0xFF);
         if (b == 0xFE) return true;
@@ -281,7 +282,7 @@ bool sd_init(void) {
     return true;
 }
 
-bool sd_read_block(uint32_t block_addr, uint8_t *buf) {
+bool __no_inline_not_in_flash_func(sd_read_block)(uint32_t block_addr, uint8_t *buf) {
     if (!g_sd_ready) return false;
     uint32_t addr = g_sd_sdhc ? block_addr : (block_addr * 512);
     if (sd_cmd(CMD17, addr) != 0x00) { cs_deselect(); return false; }
@@ -306,7 +307,7 @@ bool sd_write_block(uint32_t block_addr, const uint8_t *buf) {
     return true;
 }
 
-bool sd_read_blocks(uint32_t block_addr, uint8_t *buf, uint32_t count) {
+bool __no_inline_not_in_flash_func(sd_read_blocks)(uint32_t block_addr, uint8_t *buf, uint32_t count) {
     if (!g_sd_ready || count == 0) return false;
     if (count == 1) return sd_read_block(block_addr, buf);
     uint32_t addr = g_sd_sdhc ? block_addr : (block_addr * 512);

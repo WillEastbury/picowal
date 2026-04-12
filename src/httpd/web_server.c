@@ -1352,7 +1352,40 @@ static void __no_inline_not_in_flash_func(ota_erase_write_chunk)(
     }
 }
 
-// Write OTA chunk to SD staging area
+// OTA commit: copy from SD to flash entirely from SRAM.
+// Writes sectors 1..N first, then sector 0 last — so XIP remains
+// valid until the final moment before reboot.
+static void __no_inline_not_in_flash_func(ota_commit_from_sd)(
+    uint32_t sd_base, uint32_t size) {
+
+    // Pass 1: write all chunks EXCEPT the first sector (keeps boot2/vectors valid)
+    uint32_t first_chunk = FLASH_SECTOR_SIZE;  // skip first 4KB
+    for (uint32_t coff = first_chunk; coff < size; coff += OTA_CHUNK_SIZE) {
+        uint32_t clen = size - coff;
+        if (clen > OTA_CHUNK_SIZE) clen = OTA_CHUNK_SIZE;
+
+        uint32_t blks = (clen + 511) / 512;
+        sd_read_blocks(sd_base + (coff / 512), g_ota_chunk_buf, blks);
+
+        uint32_t irq = save_and_disable_interrupts();
+        ota_erase_write_chunk(OTA_SLOT_A + coff, g_ota_chunk_buf, clen);
+        restore_interrupts(irq);
+    }
+
+    // Pass 2: write the first sector last (overwrites boot2 + vector table)
+    {
+        uint32_t clen = first_chunk < size ? first_chunk : size;
+        uint32_t blks = (clen + 511) / 512;
+        sd_read_blocks(sd_base, g_ota_chunk_buf, blks);
+
+        // Point of no return — after this, XIP is invalid
+        uint32_t irq = save_and_disable_interrupts();
+        ota_erase_write_chunk(OTA_SLOT_A, g_ota_chunk_buf, clen);
+        // Don't restore interrupts — go straight to reboot
+        watchdog_reboot(0, 0, 0);
+        while (1) tight_loop_contents();
+    }
+}
 static void ota_write_chunk_sd(const uint8_t *data, uint16_t len) {
     uint8_t blk_buf[512];
     while (len > 0 && g_ota.offset < OTA_SLOT_SIZE) {
@@ -3346,28 +3379,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         // Flush SD index before we go
         kvsd_flush();
 
+        // Park Core 1 — set halt flag and wait for it to stop touching flash
+        g_wal->ota_halt_core1 = true;
+        __sev();  // wake Core 1 if sleeping
+        sleep_ms(50);  // let Core 1 finish any in-flight flash op
+
         hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
 
-        // Read from SD in chunks → SRAM → erase+write flash
-        uint32_t size = g_ota.total_written;
-        uint32_t sd_blk = g_ota.sd_base;
-
-        for (uint32_t coff = 0; coff < size; coff += OTA_CHUNK_SIZE) {
-            uint32_t clen = size - coff;
-            if (clen > OTA_CHUNK_SIZE) clen = OTA_CHUNK_SIZE;
-
-            // Phase 1: Read from SD into SRAM (SPI, no flash contention)
-            uint32_t blks = (clen + 511) / 512;
-            sd_read_blocks(sd_blk + (coff / 512), g_ota_chunk_buf, blks);
-
-            // Phase 2: Write to flash from SRAM (interrupts disabled)
-            uint32_t irq = save_and_disable_interrupts();
-            ota_erase_write_chunk(OTA_SLOT_A + coff, g_ota_chunk_buf, clen);
-            restore_interrupts(irq);
-        }
-
-        g_ota.active = false;
-        watchdog_reboot(0, 0, 0);
+        // Copy SD → flash from SRAM function (writes sector 0 last, then reboots)
+        ota_commit_from_sd(g_ota.sd_base, g_ota.total_written);
+        // Never reaches here — ota_commit_from_sd reboots
         while (1) tight_loop_contents();
         return;
     }
