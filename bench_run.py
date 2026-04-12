@@ -171,10 +171,13 @@ def main():
             read_times.append(dt)
         except Exception:
             pass
-    p = percentiles(read_times)
-    j_avg, j_max = jitter(read_times)
-    print(f"    Reads: {len(read_times)} ok  {fmt_stats(p)}  jitter avg={j_avg:.1f} max={j_max:.1f}")
-    results["page_read"] = {"stats": p, "jitter_avg": j_avg, "jitter_max": j_max}
+    if read_times:
+        p = percentiles(read_times)
+        j_avg, j_max = jitter(read_times)
+        print(f"    Reads: {len(read_times)} ok  {fmt_stats(p)}  jitter avg={j_avg:.1f} max={j_max:.1f}")
+        results["page_read"] = {"stats": p, "jitter_avg": j_avg, "jitter_max": j_max}
+    else:
+        print("    Reads: all 50 failed")
 
     # 5. Query — WHERE filter
     print("\n[5] Query WHERE filter (30 queries)...")

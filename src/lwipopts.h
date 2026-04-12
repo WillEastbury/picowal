@@ -9,7 +9,9 @@
 #define MEM_ALIGNMENT               4
 #define MEM_SIZE                    (16 * 1024)
 
-#define MEMP_NUM_TCP_PCB            8
+#define MEMP_NUM_TCP_PCB            20
+#define MEMP_NUM_TCP_PCB_LISTEN     4
+#define MEMP_NUM_UDP_PCB            8
 #define MEMP_NUM_TCP_SEG            80
 #define MEMP_NUM_ARP_QUEUE          10
 #define MEMP_NUM_PBUF               32
@@ -36,6 +38,10 @@
 #define LWIP_DNS                    1
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
+
+// Reduce TIME_WAIT from default 20s to 2s — on a LAN with one
+// client, stale packets aren't arriving 20 seconds late.
+#define TCP_MSL                     1000   // 1 second (2×MSL = 2s TIME_WAIT)
 
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
