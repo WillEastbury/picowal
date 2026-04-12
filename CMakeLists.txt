@@ -26,6 +26,7 @@ add_executable(${PROJECT_NAME}
     src/storage.c
     src/field_index.c
     src/query.c
+    src/udp_wal.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

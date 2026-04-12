@@ -1,0 +1,354 @@
+#include "udp_wal.h"
+#include "wal_defs.h"
+#include "kv_sd.h"
+
+#include "pico/stdlib.h"
+#include "pico/rand.h"
+#include "lwip/udp.h"
+#include "lwip/pbuf.h"
+
+#include <string.h>
+#include <stdio.h>
+
+// ============================================================
+// Session table
+// ============================================================
+
+typedef struct {
+    uint64_t session_id;
+    ip_addr_t addr;
+    uint16_t  port;
+    uint32_t  last_seq;
+    uint32_t  last_seen_ms;
+    bool      active;
+} udp_session_t;
+
+static udp_session_t g_sessions[UDP_WAL_MAX_SESSIONS];
+static struct udp_pcb *g_pcb;
+static wal_state_t *g_wal;
+static uint32_t g_epoch;
+
+// ============================================================
+// Helpers
+// ============================================================
+
+static uint32_t now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+static uint64_t gen_session_id(void) {
+    return ((uint64_t)get_rand_32() << 32) | get_rand_32();
+}
+
+static udp_session_t *find_session(uint64_t sid) {
+    for (int i = 0; i < UDP_WAL_MAX_SESSIONS; i++) {
+        if (g_sessions[i].active && g_sessions[i].session_id == sid)
+            return &g_sessions[i];
+    }
+    return NULL;
+}
+
+static udp_session_t *alloc_session(void) {
+    // Find free slot
+    for (int i = 0; i < UDP_WAL_MAX_SESSIONS; i++) {
+        if (!g_sessions[i].active) return &g_sessions[i];
+    }
+    // Evict oldest
+    uint32_t oldest = UINT32_MAX;
+    int oldest_idx = 0;
+    for (int i = 0; i < UDP_WAL_MAX_SESSIONS; i++) {
+        if (g_sessions[i].last_seen_ms < oldest) {
+            oldest = g_sessions[i].last_seen_ms;
+            oldest_idx = i;
+        }
+    }
+    g_sessions[oldest_idx].active = false;
+    return &g_sessions[oldest_idx];
+}
+
+// Read/write little-endian helpers
+static inline uint16_t rd16(const uint8_t *p) { return p[0] | ((uint16_t)p[1]<<8); }
+static inline uint32_t rd32(const uint8_t *p) { return p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24); }
+static inline uint64_t rd64(const uint8_t *p) { return (uint64_t)rd32(p) | ((uint64_t)rd32(p+4)<<32); }
+static inline void wr16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static inline void wr32(uint8_t *p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
+static inline void wr64(uint8_t *p, uint64_t v) { wr32(p,(uint32_t)v); wr32(p+4,(uint32_t)(v>>32)); }
+
+// ============================================================
+// Send response datagram
+// ============================================================
+
+static void udp_send_to(const ip_addr_t *addr, uint16_t port,
+                        uint64_t session_id, uint8_t msg_type,
+                        const uint8_t *payload, uint16_t payload_len) {
+    uint16_t total = UDP_WAL_HDR_SIZE + payload_len;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_RAM);
+    if (!p) return;
+    uint8_t *buf = (uint8_t *)p->payload;
+
+    wr64(buf, session_id);
+    wr16(buf + 8, (uint16_t)g_epoch);
+    wr32(buf + 10, 0);  // server seq (not used yet)
+    buf[14] = msg_type;
+    if (payload_len > 0) memcpy(buf + 15, payload, payload_len);
+
+    udp_sendto(g_pcb, p, addr, port);
+    pbuf_free(p);
+}
+
+// ============================================================
+// WAL FIFO helpers (same pattern as web_server.c)
+// ============================================================
+
+static int wal_alloc_req_id(void) {
+    for (int i = 0; i < REQ_RING_SIZE; i++) {
+        if (g_wal->requests[i].ready == REQ_EMPTY) return i;
+    }
+    return -1;
+}
+
+static int wal_alloc_slot(void) {
+    for (int i = 0; i < SLOT_COUNT; i++) {
+        if (g_wal->slot_free[i]) {
+            g_wal->slot_free[i] = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Direct KV write — called from UDP callback, runs on Core 0.
+// Uses kv_store unified path (flash for packs 0-1, SD for packs 2+).
+// No WAL FIFO needed — cooperative single-threaded on Core 0.
+#define KV_STORE_REDIRECT
+#include "kv_store.h"
+
+static bool direct_put(uint32_t key, const uint8_t *data, uint16_t len) {
+    return kv_store_put(key, data, len);
+}
+
+static bool direct_get(uint32_t key, uint8_t *out, uint16_t *len) {
+    return kv_store_get_copy(key, out, len, NULL);
+}
+
+// ============================================================
+// Handle HELLO — create new session
+// ============================================================
+
+static void handle_hello(const ip_addr_t *addr, uint16_t port,
+                         const uint8_t *payload, uint16_t len) {
+    if (len < 16) return;
+
+    udp_session_t *s = alloc_session();
+    s->session_id = gen_session_id();
+    s->addr = *addr;
+    s->port = port;
+    s->last_seq = 0;
+    s->last_seen_ms = now_ms();
+    s->active = true;
+
+    // Response: [session_id:8][server_random:16][epoch:4]
+    uint8_t resp[28];
+    wr64(resp, s->session_id);
+    for (int i = 0; i < 16; i++) resp[8+i] = (uint8_t)(get_rand_32() >> ((i%4)*8));
+    wr32(resp + 24, g_epoch);
+
+    udp_send_to(addr, port, s->session_id, UMSG_HELLO_OK, resp, 28);
+    printf("[udp] HELLO → session %016llx from %s:%d\n",
+           (unsigned long long)s->session_id, ipaddr_ntoa(addr), port);
+}
+
+// ============================================================
+// Handle RESUME — reconnect existing session
+// ============================================================
+
+static void handle_resume(const ip_addr_t *addr, uint16_t port,
+                          uint64_t session_id) {
+    udp_session_t *s = find_session(session_id);
+    if (!s) {
+        udp_send_to(addr, port, session_id, UMSG_RESUME_FAIL, NULL, 0);
+        return;
+    }
+    s->addr = *addr;
+    s->port = port;
+    s->last_seen_ms = now_ms();
+
+    uint8_t resp[4];
+    wr32(resp, g_epoch);
+    udp_send_to(addr, port, session_id, UMSG_RESUME_OK, resp, 4);
+}
+
+// ============================================================
+// Handle BATCH_WRITE
+// ============================================================
+
+static void handle_batch_write(udp_session_t *s,
+                               const uint8_t *payload, uint16_t len) {
+    if (len < 4) return;
+    uint16_t batch_seq = rd16(payload);
+    uint8_t count = payload[2];
+    uint8_t durability = payload[3];
+    if (count == 0 || count > UDP_WAL_MAX_BATCH) return;
+
+    // Parse cards and write directly (synchronous, Core 0)
+    uint32_t bitmap = 0;
+    uint16_t off = 4;
+
+    for (uint8_t i = 0; i < count && off + 8 <= len; i++) {
+        uint16_t pack = rd16(payload + off);
+        uint32_t card = rd32(payload + off + 2);
+        uint16_t clen = rd16(payload + off + 6);
+        off += 8;
+        if (off + clen > len) break;
+
+        uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
+        if (direct_put(key, payload + off, clen)) {
+            bitmap |= (1u << i);
+        }
+        off += clen;
+    }
+
+    // Send ACK based on durability
+    // Since writes are synchronous, QUEUED and COMMITTED are the same
+    if (durability >= UDUR_ACK_QUEUED) {
+        uint8_t ack[9];
+        wr16(ack, batch_seq);
+        ack[2] = count;
+        wr32(ack + 3, bitmap);
+        uint16_t est_ms = 0;  // already done
+        wr16(ack + 7, est_ms);
+
+        uint8_t msg_type = (durability >= UDUR_ACK_DURABLE) ?
+            UMSG_BATCH_COMMITTED : UMSG_BATCH_QUEUED;
+        udp_send_to(&s->addr, s->port, s->session_id, msg_type, ack, 9);
+    }
+}
+
+// ============================================================
+// Handle READ
+// ============================================================
+
+static void handle_read(udp_session_t *s,
+                        const uint8_t *payload, uint16_t len) {
+    if (len < 6) return;
+    uint16_t pack = rd16(payload);
+    uint32_t card = rd32(payload + 2);
+    uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
+
+    uint8_t buf[512];
+    uint16_t blen = sizeof(buf);
+    bool ok = direct_get(key, buf, &blen);
+
+    if (ok) {
+        uint8_t resp[8 + 512];
+        wr16(resp, pack);
+        wr32(resp + 2, card);
+        wr16(resp + 6, blen);
+        memcpy(resp + 8, buf, blen);
+        udp_send_to(&s->addr, s->port, s->session_id, UMSG_DATA, resp, 8 + blen);
+    } else {
+        uint8_t resp[6];
+        wr16(resp, pack);
+        wr32(resp + 2, card);
+        udp_send_to(&s->addr, s->port, s->session_id, UMSG_NOT_FOUND, resp, 6);
+    }
+}
+
+// ============================================================
+// Main recv callback
+// ============================================================
+
+static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+                        const ip_addr_t *addr, u16_t port) {
+    (void)arg; (void)pcb;
+    if (!p || p->tot_len < UDP_WAL_HDR_SIZE) { if (p) pbuf_free(p); return; }
+
+    uint8_t hdr[UDP_WAL_HDR_SIZE];
+    pbuf_copy_partial(p, hdr, UDP_WAL_HDR_SIZE, 0);
+
+    uint64_t session_id = rd64(hdr);
+    uint16_t epoch = rd16(hdr + 8);
+    uint32_t seq = rd32(hdr + 10);
+    uint8_t msg_type = hdr[14];
+
+    // Copy payload after header
+    uint16_t payload_len = p->tot_len - UDP_WAL_HDR_SIZE;
+    uint8_t payload[UDP_WAL_MAX_PAYLOAD];
+    if (payload_len > sizeof(payload)) payload_len = sizeof(payload);
+    pbuf_copy_partial(p, payload, payload_len, UDP_WAL_HDR_SIZE);
+    pbuf_free(p);
+
+    // HELLO is special — no session yet
+    if (msg_type == UMSG_HELLO) {
+        handle_hello(addr, port, payload, payload_len);
+        return;
+    }
+
+    // All other messages need a valid session
+    udp_session_t *s = find_session(session_id);
+
+    if (msg_type == UMSG_RESUME) {
+        handle_resume(addr, port, session_id);
+        return;
+    }
+
+    if (!s) {
+        udp_send_to(addr, port, session_id, UMSG_RESUME_FAIL, NULL, 0);
+        return;
+    }
+
+    // Replay check
+    if (seq <= s->last_seq && s->last_seq > 0) {
+        return;  // drop silently
+    }
+    s->last_seq = seq;
+    s->last_seen_ms = now_ms();
+
+    switch (msg_type) {
+    case UMSG_BATCH_WRITE:
+        handle_batch_write(s, payload, payload_len);
+        break;
+    case UMSG_READ:
+        handle_read(s, payload, payload_len);
+        break;
+    default:
+        break;
+    }
+}
+
+// ============================================================
+// Poll — check pending batches for committed responses
+// ============================================================
+
+void udp_wal_poll(void) {
+    // Currently all writes are synchronous — nothing to poll.
+    // Future: async batch commit tracking goes here.
+}
+
+// ============================================================
+// Init
+// ============================================================
+
+void udp_wal_init(wal_state_t *wal) {
+    g_wal = wal;
+    g_epoch = now_ms();  // boot timestamp as epoch
+    memset(g_sessions, 0, sizeof(g_sessions));
+
+    g_pcb = udp_new();
+    if (!g_pcb) {
+        printf("[udp] Failed to create PCB\n");
+        return;
+    }
+
+    err_t err = udp_bind(g_pcb, IP_ADDR_ANY, UDP_WAL_PORT);
+    if (err != ERR_OK) {
+        printf("[udp] Bind failed: %d\n", err);
+        udp_remove(g_pcb);
+        g_pcb = NULL;
+        return;
+    }
+
+    udp_recv(g_pcb, udp_recv_cb, NULL);
+    printf("[udp] WAL listener on port %d (epoch %lu)\n",
+           UDP_WAL_PORT, (unsigned long)g_epoch);
+}

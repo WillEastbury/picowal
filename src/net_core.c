@@ -7,6 +7,7 @@
 #include "ili9488.h"
 #include "xpt2046.h"
 #include "httpd/web_server.h"
+#include "udp_wal.h"
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
@@ -685,6 +686,9 @@ void net_core_run(wal_state_t *wal) {
     // Start HTTP server on port 80
     web_server_init(g_ctx.wal);
 
+    // Start UDP WAL listener on port 8002
+    udp_wal_init(g_ctx.wal);
+
     // Main poll loop
     uint32_t hb_last = 0;
     bool hb_on = false;
@@ -694,6 +698,7 @@ void net_core_run(wal_state_t *wal) {
         if (g_ctx.connected) {
             drain_responses(&g_ctx);
         }
+        udp_wal_poll();
         if (!web_server_recent_activity(HTTP_UI_QUIET_MS)) {
             lcd_refresh_dashboard(wal);
             flush_cardinality_one();
