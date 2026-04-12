@@ -599,34 +599,44 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
     g_lcd_last_ms = now;
 
     kv_stats_t st = kv_stats();
-    uint32_t records = kv_record_count();
+    uint32_t flash_records = kv_record_count();
     const char *ip_text = ip4addr_ntoa(netif_ip4_addr(netif_list));
     char line[64];
     uint32_t used_pages = st.total - st.free;
-    uint32_t free_bytes = st.free * KV_SECTOR_SIZE;
     bool out_of_space = (st.free == 0);
 
     lcd_clear(COLOR_BLACK);
     lcd_draw_string(20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
 
-    lcd_draw_string(20, 60, "BOOT: OK", COLOR_GREEN, COLOR_BLACK, 2);
+    lcd_draw_string(20, 55, "BOOT: OK", COLOR_GREEN, COLOR_BLACK, 2);
     snprintf(line, sizeof(line), "HTTP: %s:80", ip_text);
-    lcd_draw_string(20, 90, line, COLOR_WHITE, COLOR_BLACK, 2);
+    lcd_draw_string(20, 80, line, COLOR_WHITE, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "RECORDS: %lu", (unsigned long)records);
-    lcd_draw_string(20, 120, line, COLOR_WHITE, COLOR_BLACK, 2);
+    // Flash stats
+    snprintf(line, sizeof(line), "FLASH: %lu recs  %lu pg free",
+             (unsigned long)flash_records, (unsigned long)st.free);
+    lcd_draw_string(20, 110, line, out_of_space ? COLOR_RED : COLOR_WHITE, COLOR_BLACK, 2);
 
-    snprintf(line, sizeof(line), "SPACE: %s", out_of_space ? "FULL" : "OK");
-    lcd_draw_string(20, 150, line, out_of_space ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, 2);
+    // SD card stats
+    if (kvsd_ready()) {
+        kvsd_stats_t sds = kvsd_stats();
+        snprintf(line, sizeof(line), "SD: %lu recs  %lu MB  OTA:OK",
+                 (unsigned long)sds.active, (unsigned long)sds.sd_mb);
+        lcd_draw_string(20, 140, line, COLOR_GREEN, COLOR_BLACK, 2);
+        snprintf(line, sizeof(line), "MAX: %lu cards", (unsigned long)sds.max_cards);
+        lcd_draw_string(20, 165, line, COLOR_YELLOW, COLOR_BLACK, 2);
+    } else {
+        lcd_draw_string(20, 140, "SD: NOT READY", COLOR_RED, COLOR_BLACK, 2);
+        lcd_draw_string(20, 165, "OTA: UNAVAILABLE", COLOR_RED, COLOR_BLACK, 2);
+    }
 
-    snprintf(line, sizeof(line), "FREE BYTES: %lu", (unsigned long)free_bytes);
-    lcd_draw_string(20, 180, line, COLOR_YELLOW, COLOR_BLACK, 2);
-
-    snprintf(line, sizeof(line), "USED PAGES: %lu", (unsigned long)used_pages);
-    lcd_draw_string(20, 210, line, COLOR_WHITE, COLOR_BLACK, 2);
-
-    snprintf(line, sizeof(line), "REFRESH: 10S");
-    lcd_draw_string(20, 240, line, COLOR_CYAN, COLOR_BLACK, 2);
+    // Uptime
+    uint32_t secs = now / 1000;
+    snprintf(line, sizeof(line), "UP: %luh %lum %lus",
+             (unsigned long)(secs / 3600),
+             (unsigned long)((secs / 60) % 60),
+             (unsigned long)(secs % 60));
+    lcd_draw_string(20, 200, line, COLOR_CYAN, COLOR_BLACK, 2);
 }
 
 // ============================================================

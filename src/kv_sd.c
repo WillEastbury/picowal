@@ -120,7 +120,11 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.total_cards = 0;
 
     // Region sizes
-    uint32_t reserved = 8;  // blocks 0-7
+    // Block 0: superblock, blocks 1-1024: OTA staging (512KB)
+    uint32_t reserved = 1 + KVSD_OTA_BLOCKS;  // superblock + OTA
+    g_sb.ota_start = 1;
+    g_sb.ota_blocks = KVSD_OTA_BLOCKS;
+
     uint32_t available = total_blocks - reserved;
     uint32_t index_total = available * 15 / 100;  // 15% for index
     uint32_t data_total = available - index_total;
@@ -147,6 +151,8 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.dirty = 0;
 
     web_log("[kvsd] Format: %lu total blocks\n", (unsigned long)total_blocks);
+    web_log("[kvsd]   OTA:   %lu blocks @ %lu (512KB staging)\n",
+            (unsigned long)g_sb.ota_blocks, (unsigned long)g_sb.ota_start);
     web_log("[kvsd]   Index: %lu blocks @ %lu (bitmap=%lu, keylist=%lu, bloom=%lu)\n",
             (unsigned long)index_total, (unsigned long)g_sb.index_start,
             (unsigned long)bitmap_blks, (unsigned long)keylist_blks, (unsigned long)bloom_blks);
@@ -449,3 +455,10 @@ uint32_t kvsd_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t ma
 }
 
 bool kvsd_ready(void) { return g_ready; }
+
+uint32_t kvsd_ota_start_block(void) {
+    if (!g_ready) return 0;
+    // Backward compat: old superblocks may have ota_start=0
+    if (g_sb.ota_start == 0 || g_sb.ota_blocks == 0) return 1; // default
+    return g_sb.ota_start;
+}

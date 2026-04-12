@@ -1306,50 +1306,24 @@ static void handle_metadata(struct tcp_pcb *pcb, http_verb_t verb, const char *p
 }
 
 // ============================================================
-// OTA firmware update — A/B slot scheme
+// OTA firmware update — SD-staged
 //
-// Slot A: 0x000000–0x07FFFF (512KB) — default boot location
-// Slot B: 0x080000–0x0FFFFF (512KB) — OTA staging area
-//
-// Normal boot: RP2350 boots from 0x000000 (slot A).
-//
-// OTA when running from slot A:
-//   1. begin: prepare to write slot B
-//   2. chunk: write new firmware to slot B (safe — not running code)
-//   3. commit: erase first sector of slot A, write a tiny trampoline
-//      that loads SP/PC from slot B's vector table and jumps there.
-//      Then reboot — boots the trampoline which jumps to slot B.
-//
-// OTA when running from slot B (trampoline active in A):
-//   1. begin: prepare to write slot A
-//   2. chunk: write new firmware directly to slot A (safe — slot B is running)
-//   3. commit: reboot — boots directly from slot A (real firmware).
-//
-// The trampoline is ~64 bytes: a Cortex-M33 vector table whose
-// reset handler loads SP/PC from slot B and branches there.
+// Upload chunks → SD staging area (512KB reserved blocks 1-1024)
+// Commit → read from SD → SRAM → erase+write flash slot A
+// No XIP contention: SD reads via SPI, independent of flash
 // ============================================================
 
 #define OTA_SLOT_A      0x000000
-#define OTA_SLOT_B      (512 * 1024)   // 0x080000
 #define OTA_SLOT_SIZE   (512 * 1024)
 #define OTA_XIP_BASE    0x10000000
 
-// Detect which slot we're running from by checking our own PC
-static bool running_from_slot_b(void) {
-    uint32_t pc;
-    __asm volatile ("mov %0, pc" : "=r" (pc));
-    return pc >= (OTA_XIP_BASE + OTA_SLOT_B);
-}
-
 static struct {
     bool     active;
-    uint32_t target_base;  // flash offset where we're writing (slot A or B)
-    uint32_t offset;       // bytes written so far
+    uint32_t offset;       // bytes written to SD so far
     uint32_t total_written;
-    uint32_t erased_up_to; // absolute flash offset erased up to
+    uint32_t sd_base;      // SD block where staging starts
 } g_ota;
 
-// These MUST run from RAM — they touch flash
 static void __no_inline_not_in_flash_func(ota_flash_erase)(uint32_t offset) {
     flash_range_erase(offset, FLASH_SECTOR_SIZE);
 }
@@ -1358,10 +1332,6 @@ static void __no_inline_not_in_flash_func(ota_flash_program)(uint32_t offset, co
     flash_range_program(offset, data, 256);
 }
 
-// OTA commit: copy slot B → slot A.
-// CRITICAL: XIP reads from slot B can fail while flash is in erase/program mode.
-// Solution: read a large chunk of B into SRAM, then erase+write that chunk to A.
-// We use 128KB chunks (fits in SRAM alongside everything else).
 #define OTA_CHUNK_SIZE (16 * 1024)
 static uint8_t g_ota_chunk_buf[OTA_CHUNK_SIZE];
 
@@ -1370,11 +1340,9 @@ static void __no_inline_not_in_flash_func(ota_erase_write_chunk)(
     for (uint32_t off = 0; off < len; off += FLASH_SECTOR_SIZE) {
         uint32_t slen = len - off;
         if (slen > FLASH_SECTOR_SIZE) slen = FLASH_SECTOR_SIZE;
-
         flash_range_erase(dest_off + off, FLASH_SECTOR_SIZE);
         for (uint32_t p = 0; p < slen; p += 256)
             flash_range_program(dest_off + off + p, ram_data + off + p, 256);
-        // Pad remainder of sector with 0xFF
         if (slen < FLASH_SECTOR_SIZE) {
             uint8_t pad[256];
             for (int i = 0; i < 256; i++) pad[i] = 0xFF;
@@ -1384,33 +1352,28 @@ static void __no_inline_not_in_flash_func(ota_erase_write_chunk)(
     }
 }
 
-static void ota_write_chunk(const uint8_t *data, uint16_t len) {
-    uint8_t page_buf[256];
-    uint32_t abs_off = g_ota.target_base + g_ota.offset;
-
+// Write OTA chunk to SD staging area
+static void ota_write_chunk_sd(const uint8_t *data, uint16_t len) {
+    uint8_t blk_buf[512];
     while (len > 0 && g_ota.offset < OTA_SLOT_SIZE) {
-        // Erase sector if needed
-        if (abs_off >= g_ota.erased_up_to) {
-            uint32_t irq = save_and_disable_interrupts();
-            ota_flash_erase(g_ota.erased_up_to);
-            restore_interrupts(irq);
-            g_ota.erased_up_to += FLASH_SECTOR_SIZE;
+        uint32_t blk_off = g_ota.offset / 512;
+        uint32_t byte_off = g_ota.offset % 512;
+        uint16_t space = (uint16_t)(512 - byte_off);
+        uint16_t chunk = len < space ? len : space;
+
+        if (byte_off == 0 && chunk == 512) {
+            sd_write_block(g_ota.sd_base + blk_off, data);
+        } else {
+            if (byte_off > 0) sd_read_block(g_ota.sd_base + blk_off, blk_buf);
+            else memset(blk_buf, 0xFF, 512);
+            memcpy(blk_buf + byte_off, data, chunk);
+            sd_write_block(g_ota.sd_base + blk_off, blk_buf);
         }
 
-        uint16_t chunk = (len > 256) ? 256 : len;
-        memcpy(page_buf, data, chunk);
-        if (chunk < 256) memset(page_buf + chunk, 0xFF, 256 - chunk);
-
-        uint32_t irq = save_and_disable_interrupts();
-        ota_flash_program(abs_off, page_buf);
-        restore_interrupts(irq);
-
-        abs_off += chunk;
         g_ota.offset += chunk;
         data += chunk;
         len -= chunk;
     }
-
     g_ota.total_written = g_ota.offset;
 }
 
@@ -3251,7 +3214,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         return;
     }
 
-    // ---- OTA: POST /update/begin — prepare inactive slot ----
+    // ---- OTA: POST /update/begin — prepare SD staging ----
     if (verb == VERB_POST && strcmp(path, "/update/begin") == 0) {
         user_session_t session;
         if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
@@ -3262,28 +3225,27 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             http_json(pcb, "409 Conflict", "{\"error\":\"OTA already in progress\"}");
             return;
         }
+        if (!kvsd_ready()) {
+            http_json(pcb, "503 Service Unavailable", "{\"error\":\"SD card not ready\"}");
+            return;
+        }
 
-        bool from_b = running_from_slot_b();
         g_ota.active = true;
-        g_ota.target_base = from_b ? OTA_SLOT_A : OTA_SLOT_B;
+        g_ota.sd_base = kvsd_ota_start_block();
         g_ota.offset = 0;
         g_ota.total_written = 0;
-        g_ota.erased_up_to = g_ota.target_base;
 
-        printf("[ota] BEGIN — running from slot %c, writing to slot %c (0x%lx)\n",
-               from_b ? 'B' : 'A', from_b ? 'A' : 'B',
-               (unsigned long)g_ota.target_base);
+        web_log("[ota] BEGIN — staging to SD block %lu\n", (unsigned long)g_ota.sd_base);
 
         char resp[128];
         snprintf(resp, sizeof(resp),
-                 "{\"ok\":true,\"max\":%lu,\"slot\":\"%c\",\"target\":\"%c\"}",
-                 (unsigned long)OTA_SLOT_SIZE,
-                 from_b ? 'B' : 'A', from_b ? 'A' : 'B');
+                 "{\"ok\":true,\"max\":%lu,\"staging\":\"SD\",\"block\":%lu}",
+                 (unsigned long)OTA_SLOT_SIZE, (unsigned long)g_ota.sd_base);
         http_json(pcb, "200 OK", resp);
         return;
     }
 
-    // ---- OTA: POST /update/chunk — write firmware chunk ----
+    // ---- OTA: POST /update/chunk — write firmware chunk to SD ----
     if (verb == VERB_POST && strcmp(path, "/update/chunk") == 0) {
         user_session_t session;
         if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
@@ -3299,12 +3261,12 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             return;
         }
         if (g_ota.offset + body_len > OTA_SLOT_SIZE) {
-            http_json(pcb, "413 Payload Too Large", "{\"error\":\"exceeds slot size (512KB)\"}");
+            http_json(pcb, "413 Payload Too Large", "{\"error\":\"exceeds 512KB\"}");
             g_ota.active = false;
             return;
         }
 
-        ota_write_chunk(body, body_len);
+        ota_write_chunk_sd(body, body_len);
 
         char resp[80];
         snprintf(resp, sizeof(resp), "{\"ok\":true,\"written\":%lu}", (unsigned long)g_ota.total_written);
@@ -3312,7 +3274,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         return;
     }
 
-    // ---- OTA: POST /update/commit — reboot ----
+    // ---- OTA: POST /update/commit — read SD → flash, reboot ----
     if (verb == VERB_POST && strcmp(path, "/update/commit") == 0) {
         user_session_t session;
         if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
@@ -3324,13 +3286,10 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             return;
         }
 
-        bool from_b = running_from_slot_b();
+        web_log("[ota] COMMIT — %lu bytes from SD → flash\n",
+                (unsigned long)g_ota.total_written);
 
-        printf("[ota] COMMIT — %lu bytes to slot %c\n",
-               (unsigned long)g_ota.total_written,
-               from_b ? 'A' : 'B');
-
-        // Send response before the destructive part
+        // Send response before destructive flash operations
         char resp[80];
         snprintf(resp, sizeof(resp), "{\"ok\":true,\"total\":%lu,\"rebooting\":true}",
                  (unsigned long)g_ota.total_written);
@@ -3338,31 +3297,30 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         tcp_output(pcb);
         sleep_ms(500);
 
-        if (!from_b) {
-            // Running from A, wrote to B — copy B→A in 128KB chunks.
-            // Read each chunk from XIP BEFORE touching flash, then erase+write from SRAM.
-            printf("[ota] Copying slot B → A (%lu bytes) in 128KB chunks...\n",
-                   (unsigned long)g_ota.total_written);
+        // Flush SD index before we go
+        kvsd_flush();
 
-            hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
+        hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
 
-            uint32_t size = g_ota.total_written;
-            for (uint32_t coff = 0; coff < size; coff += OTA_CHUNK_SIZE) {
-                uint32_t clen = size - coff;
-                if (clen > OTA_CHUNK_SIZE) clen = OTA_CHUNK_SIZE;
+        // Read from SD in chunks → SRAM → erase+write flash
+        uint32_t size = g_ota.total_written;
+        uint32_t sd_blk = g_ota.sd_base;
 
-                // Phase 1: Read from slot B via XIP into SRAM (interrupts enabled, XIP works)
-                const uint8_t *src = (const uint8_t *)(OTA_XIP_BASE + OTA_SLOT_B + coff);
-                memcpy(g_ota_chunk_buf, src, clen);
+        for (uint32_t coff = 0; coff < size; coff += OTA_CHUNK_SIZE) {
+            uint32_t clen = size - coff;
+            if (clen > OTA_CHUNK_SIZE) clen = OTA_CHUNK_SIZE;
 
-                // Phase 2: Write to slot A from SRAM (interrupts disabled, no XIP needed)
-                uint32_t irq = save_and_disable_interrupts();
-                ota_erase_write_chunk(OTA_SLOT_A + coff, g_ota_chunk_buf, clen);
-                restore_interrupts(irq);
-            }
+            // Phase 1: Read from SD into SRAM (SPI, no flash contention)
+            uint32_t blks = (clen + 511) / 512;
+            sd_read_blocks(sd_blk + (coff / 512), g_ota_chunk_buf, blks);
+
+            // Phase 2: Write to flash from SRAM (interrupts disabled)
+            uint32_t irq = save_and_disable_interrupts();
+            ota_erase_write_chunk(OTA_SLOT_A + coff, g_ota_chunk_buf, clen);
+            restore_interrupts(irq);
         }
-        // If from B, wrote directly to A — just reboot
 
+        g_ota.active = false;
         watchdog_reboot(0, 0, 0);
         while (1) tight_loop_contents();
         return;
@@ -3376,41 +3334,43 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             return;
         }
 
-        bool from_b = running_from_slot_b();
         char pg[2048]; int n = 0;
+        bool sd_ok = kvsd_ready();
         n += snprintf(pg + n, sizeof(pg) - n,
             "<h2>Firmware Update</h2>"
             "<div class=card>"
-            "<p>Running from <strong>Slot %c</strong> (0x%s). "
-            "OTA will write to <strong>Slot %c</strong>.</p>"
+            "<p>Staging via <strong>%s</strong>. Flash target: <strong>Slot A</strong> (0x000000).</p>"
+            "<p>%s</p>"
             "<p>Select a <code>.bin</code> firmware file. Max 512KB.</p>"
             "<input type=file id=fw accept='.bin'>"
-            "<button onclick=doOTA() style='margin-top:8px;width:100%%'>Upload &amp; Flash</button>"
-            "<pre id=otaLog>Ready</pre>"
+            "<button onclick=doOTA() style='margin-top:8px;width:100%%'%s>Upload &amp; Flash</button>"
+            "<pre id=otaLog>%s</pre>"
             "</div>"
             "<script>"
             "async function doOTA(){"
             "var f=document.getElementById('fw').files[0];"
             "if(!f){document.getElementById('otaLog').textContent='No file selected';return}"
             "var log=document.getElementById('otaLog');"
-            "log.textContent='Starting OTA ('+f.size+' bytes)...';"
+            "log.textContent='Uploading to SD ('+f.size+' bytes)...';"
             "var r=await fetch('/update/begin',{method:'POST',credentials:'same-origin'});"
             "if(!r.ok){log.textContent='BEGIN failed: '+r.status;return}"
-            "var info=await r.json();log.textContent='Writing to slot '+info.target+'...';"
+            "var info=await r.json();log.textContent='Staging to SD block '+info.block+'...';"
             "var buf=new Uint8Array(await f.arrayBuffer());"
             "var chunk=1024,off=0;"
             "while(off<buf.length){"
             "var end=Math.min(off+chunk,buf.length);"
             "var r=await fetch('/update/chunk',{method:'POST',credentials:'same-origin',body:buf.slice(off,end)});"
             "if(!r.ok){log.textContent='CHUNK failed at '+off+': '+r.status;return}"
-            "off=end;log.textContent='Written '+off+'/'+buf.length+' ('+Math.round(100*off/buf.length)+'%%)'}"
-            "log.textContent='Committing...';"
+            "off=end;log.textContent='SD: '+off+'/'+buf.length+' ('+Math.round(100*off/buf.length)+'%%)'}"
+            "log.textContent='Committing: SD → Flash...';"
             "await fetch('/update/commit',{method:'POST',credentials:'same-origin'}).catch(function(){});"
             "log.textContent='Rebooting! Page will reload in 15s...';"
             "setTimeout(function(){location.reload()},15000)}"
             "</script>",
-            from_b ? 'B' : 'A', from_b ? "080000" : "000000",
-            from_b ? 'A' : 'B');
+            sd_ok ? "SD Card" : "Not available",
+            sd_ok ? "Firmware uploads to SD staging area, then flashes on commit." : "<strong style='color:#b04050'>SD card not available — OTA disabled.</strong>",
+            sd_ok ? "" : " disabled",
+            sd_ok ? "Ready — SD staging available" : "ERROR: SD card required for OTA");
 
         http_page_req(pcb, req, pg, (uint16_t)n);
         return;
