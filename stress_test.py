@@ -11,7 +11,7 @@ HOST = sys.argv[1] if len(sys.argv) > 1 else "192.168.0.9"
 UDP_PORT = 8002
 HTTP_PORT = 80
 
-TOTAL_CARDS = 1_000_000
+TOTAL_CARDS = int(sys.argv[2]) if len(sys.argv) > 2 else 10_000
 NUM_PACKS = 10
 PACKS = list(range(10, 20))  # packs 10-19
 NUM_UDP_CONNS = 5
@@ -91,6 +91,21 @@ class UdpConn:
             pass
         return None
 
+    def batch_ack_durable(self, cards):
+        """Returns committed bitmap or None on timeout."""
+        batch_seq = self.seq & 0xFFFF
+        body = wr16(batch_seq) + bytes([len(cards), 0x03])  # ACK_DURABLE
+        for pack, card_id, payload in cards:
+            body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
+        self._send(0x20, body)
+        try:
+            msg, payload = self._recv(timeout=10.0)
+            if msg in (0x21, 0x22):
+                return rd32(payload, 3)
+        except socket.timeout:
+            pass
+        return None
+
     def close(self):
         self.sock.close()
 
@@ -106,20 +121,28 @@ class WriterThread(threading.Thread):
         self.count = count
         self.packs = packs
         self.written = 0
+        self.acked = 0
+        self.committed = 0
         self.errors = 0
         self.elapsed = 0
         self.done = False
 
     def run(self):
         conn = UdpConn(self.host, UDP_PORT)
-        if not conn.hello():
-            print(f"  [W{self.thread_id}] HELLO failed")
+        try:
+            if not conn.hello():
+                print(f"  [W{self.thread_id}] HELLO failed")
+                self.done = True
+                return
+        except Exception as e:
+            print(f"  [W{self.thread_id}] HELLO error: {e}")
             self.done = True
             return
 
         t0 = time.perf_counter()
         card_id = self.start_card
         batch = []
+        batches_since_commit = 0
 
         for i in range(self.count):
             pack = self.packs[i % len(self.packs)]
@@ -128,17 +151,38 @@ class WriterThread(threading.Thread):
             card_id += 1
 
             if len(batch) >= BATCH_SIZE:
-                conn.batch_fire_and_forget(batch)
-                self.written += len(batch)
+                batches_since_commit += 1
+
+                # Every 10th batch: ACK_DURABLE (hard commit)
+                # Otherwise: ACK_QUEUED (fast, paced)
+                if batches_since_commit >= 10:
+                    bitmap = conn.batch_ack_durable(batch)
+                    batches_since_commit = 0
+                    if bitmap is not None:
+                        bits = bin(bitmap).count('1')
+                        self.committed += bits
+                        self.written += len(batch)
+                    else:
+                        self.errors += 1
+                else:
+                    bitmap = conn.batch_ack_queued(batch)
+                    if bitmap is not None:
+                        bits = bin(bitmap).count('1')
+                        self.acked += bits
+                        self.written += len(batch)
+                    else:
+                        self.errors += 1
+
                 batch = []
 
-                # Brief yield every 1000 cards to not saturate
-                if self.written % 1000 == 0:
-                    time.sleep(0.001)
-
+        # Final batch: always hard commit
         if batch:
-            conn.batch_fire_and_forget(batch)
-            self.written += len(batch)
+            bitmap = conn.batch_ack_durable(batch)
+            if bitmap is not None:
+                self.committed += bin(bitmap).count('1')
+                self.written += len(batch)
+            else:
+                self.errors += 1
 
         self.elapsed = time.perf_counter() - t0
         conn.close()
@@ -246,6 +290,8 @@ def main():
 
     # Results
     total_written = sum(w.written for w in writers)
+    total_acked = sum(w.acked for w in writers)
+    total_committed = sum(w.committed for w in writers)
     total_errors = sum(w.errors for w in writers)
     write_rate = total_written / t_total if t_total > 0 else 0
 
@@ -254,13 +300,16 @@ def main():
     print("=" * 65)
     print(f"  Total time:      {t_total:.1f}s")
     print(f"  Cards sent:      {total_written:,}")
+    print(f"  Cards ACK'd:     {total_acked:,}")
+    print(f"  Cards committed: {total_committed:,}")
     print(f"  Write errors:    {total_errors:,}")
-    print(f"  Write rate:      {write_rate:,.0f} cards/sec (fire-and-forget)")
+    print(f"  Write rate:      {write_rate:,.0f} cards/sec (paced)")
     print()
 
     for w in writers:
         wr = w.written / w.elapsed if w.elapsed > 0 else 0
-        print(f"  Writer {w.thread_id}: {w.written:,} cards in {w.elapsed:.1f}s = {wr:,.0f}/sec")
+        print(f"  Writer {w.thread_id}: {w.written:,} sent, {w.acked:,} ack'd, "
+              f"{w.committed:,} committed, {w.errors} errors in {w.elapsed:.1f}s = {wr:,.0f}/sec")
 
     print()
     print(f"  HTTP queries:    {qt.queries}")

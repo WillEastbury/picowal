@@ -3118,7 +3118,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         return;
     }
 
-    // ---- Route: POST /admin/wipe — erase all user data (flash KV + SD) ----
+    // ---- Route: POST /admin/wipe — erase all user data (flash KV + SD + flash index) ----
     if (verb == VERB_POST && strcmp(path, "/admin/wipe") == 0) {
         user_session_t session;
         if (!check_auth_session(req, &session) || !user_auth_is_admin(&session)) {
@@ -3130,6 +3130,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         // Erase flash KV (keeps firmware, erases KV region)
         kv_wipe();
         web_log("[admin] Flash KV wiped\n");
+
+        // Erase flash index tier (768KB–1MB region)
+        {
+            uint32_t irq = save_and_disable_interrupts();
+            for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
+                flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
+            }
+            restore_interrupts(irq);
+        }
+        web_log("[admin] Flash index wiped\n");
 
         // Reinitialise flash KV (empty)
         kv_init();
