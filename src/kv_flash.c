@@ -654,7 +654,13 @@ void kv_init(void) {
         uint8_t  pending_flags    = 0;
         uint32_t pending_mg       = 0;
 
-        // Minimum bytes needed to safely read the magic at offset 6.
+        // Loop minimum: sizeof(kv_commit_rec_t) = 14 bytes ensures we can safely
+        // read both rec_len (2 bytes at offset 0) and magic (4 bytes at offset 6)
+        // for any record type.  Data records that overlap the sector boundary are
+        // caught by the explicit `off + rec_len > KV_SECTOR_SIZE` bounds check
+        // inside each branch, so no unsafe memory access can occur.  Using the
+        // smaller commit-record minimum (14 < 26) is intentional: commit records
+        // near the sector end are valid and must not be missed.
         while ((uint32_t)off + sizeof(kv_commit_rec_t) <= KV_SECTOR_SIZE) {
             const uint8_t *rptr = xip_ptr(page_off + off);
             uint16_t rec_len = *(const uint16_t *)rptr;
@@ -736,8 +742,19 @@ void kv_init(void) {
         }
     }
 
-    // Start mutation group counter above all page sequences so there is no
-    // accidental collision with in-flash mutation_group values from this boot.
+    // Seed g_mutation_group above all page sequences seen this boot.
+    // Safety invariant: the recovery scanner matches data records with commit
+    // markers by mutation_group value ONLY WITHIN a sequential page scan.
+    // Because the scan processes records strictly in flash order (data immediately
+    // followed by its commit), a new-boot mutation_group value that coincidentally
+    // equals an old in-flash value cannot create a false commit match:
+    // (a) old committed pairs have already been consumed and cleared from pending,
+    // (b) the new write's commit appears only after the new data record, so the
+    //     state machine always pairs them correctly regardless of numeric value.
+    // Seeding from g_page_sequence ensures new-boot mutation_group IDs start well
+    // above any IDs written by the recovered pages: page sequences and mutation_group
+    // counters both increment per operation, so g_page_sequence bounds the range of
+    // mutation_group IDs that could have been written to the recovered flash pages.
     g_mutation_group = g_page_sequence + 1u;
 
     if (saw_data) {

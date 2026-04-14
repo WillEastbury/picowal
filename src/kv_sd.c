@@ -96,7 +96,13 @@ static void fidx_count_entries(void) {
     // in either keys or slots is detected before the data is used.
     const uint8_t *entries = (const uint8_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET);
     uint32_t computed = crc32_range(entries, hdr->entry_count * FIDX_ENTRY_SIZE);
-    if (computed != hdr->crc32) return;  // entry data corrupted — discard
+    if (computed != hdr->crc32) {
+        // Entry data is corrupted or was partially written; discard the flash
+        // index so the SRAM tier is rebuilt from the SD keylist on this boot.
+        printf("[fidx] boot: CRC mismatch seq=%lu — discarding flash index\n",
+               (unsigned long)hdr->sequence);
+        return;
+    }
 
     g_fidx_count    = hdr->entry_count;
     g_fidx_sequence = hdr->sequence;
@@ -119,22 +125,6 @@ static void fidx_count_entries(void) {
 // the header CRC will not match the partial entry data — also safely discarded.
 static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t count) {
     if (count > FIDX_MAX_ENTRIES) count = FIDX_MAX_ENTRIES;
-
-    // Pre-compute CRC from SRAM arrays so we can write the header last.
-    // The byte layout matches what will be written (little-endian uint32_t pairs).
-    uint32_t crc = 0xFFFFFFFFu;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t k = keys[i], sl = slots[i];
-        for (int b = 0; b < 4; b++) {
-            crc ^= (uint8_t)(k  >> (b * 8));
-            for (int j = 0; j < 8; j++) crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
-        }
-        for (int b = 0; b < 4; b++) {
-            crc ^= (uint8_t)(sl >> (b * 8));
-            for (int j = 0; j < 8; j++) crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
-        }
-    }
-    crc ^= 0xFFFFFFFFu;
 
     uint32_t irq = save_and_disable_interrupts();
 
@@ -162,6 +152,11 @@ static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t
 
     // Step 3: seal with header (sequence + entry_count + CRC).
     // Only after this write is the flash index considered authoritative on boot.
+    // CRC is computed over the XIP-mapped entry bytes using the shared crc32_range()
+    // helper — same polynomial and byte layout as what was just written to flash.
+    const uint8_t *written = (const uint8_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET);
+    uint32_t crc = crc32_range(written, count * FIDX_ENTRY_SIZE);
+
     uint8_t hdr_buf[256];
     memset(hdr_buf, 0xFF, 256);
     fidx_region_hdr_t *hdr = (fidx_region_hdr_t *)hdr_buf;
