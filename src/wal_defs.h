@@ -146,6 +146,20 @@ static inline uint8_t fifo_req_id(uint32_t word) {
     return (uint8_t)(word & 0xFF);
 }
 
+// Non-blocking FIFO push with bounded retry (avoids deadlock).
+// Spins up to ~1ms before giving up. Returns true if pushed.
+#include "pico/multicore.h"
+#include "hardware/timer.h"
+static inline bool fifo_push_timeout(uint32_t word) {
+    uint64_t deadline = time_us_64() + 1000;
+    while (!multicore_fifo_wready()) {
+        if (time_us_64() > deadline) return false;
+        tight_loop_contents();
+    }
+    multicore_fifo_push_blocking(word);  // guaranteed immediate — we checked wready
+    return true;
+}
+
 // ============================================================
 // Delta payload header (first bytes of each slot's data)
 // ============================================================

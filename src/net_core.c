@@ -233,7 +233,7 @@ static void dispatch_append_complete(net_ctx_t *ctx, struct pbuf *held_pbuf,
     req->zc_pbuf  = held_pbuf;  // Core 0 frees this on DONE
     wal_dmb();
     req->ready    = REQ_PENDING;
-    multicore_fifo_push_blocking(fifo_signal((uint8_t)rid));
+    fifo_push_timeout(fifo_signal((uint8_t)rid));
 }
 
 static void dispatch_read(net_ctx_t *ctx, uint32_t key_hash) {
@@ -249,7 +249,7 @@ static void dispatch_read(net_ctx_t *ctx, uint32_t key_hash) {
     req->zc_pbuf  = NULL;
     wal_dmb();
     req->ready    = REQ_PENDING;
-    multicore_fifo_push_blocking(fifo_signal((uint8_t)rid));
+    fifo_push_timeout(fifo_signal((uint8_t)rid));
 }
 
 static void dispatch_noop(net_ctx_t *ctx) {
@@ -262,7 +262,7 @@ static void dispatch_noop(net_ctx_t *ctx) {
     req->zc_pbuf = NULL;
     wal_dmb();
     req->ready   = REQ_PENDING;
-    multicore_fifo_push_blocking(fifo_signal((uint8_t)rid));
+    fifo_push_timeout(fifo_signal((uint8_t)rid));
 }
 
 // ============================================================

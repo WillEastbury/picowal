@@ -44,7 +44,7 @@ static void wal_do_append(uint8_t req_id) {
         resp->status = WAL_RESP_ERR;
         wal_dmb();
         req->ready = REQ_DONE;
-        multicore_fifo_push_blocking(fifo_signal(req_id));
+        fifo_push_timeout(fifo_signal(req_id));
         return;
     }
 
@@ -158,7 +158,7 @@ static void wal_do_append(uint8_t req_id) {
         resp->seq    = g_wal->next_seq++;
         wal_dmb();
         req->ready = REQ_DONE;
-        multicore_fifo_push_blocking(fifo_signal(req_id));
+        fifo_push_timeout(fifo_signal(req_id));
         return;
     }
 
@@ -176,7 +176,7 @@ static void wal_do_append(uint8_t req_id) {
     resp->seq    = e->seq;
     wal_dmb();
     req->ready = REQ_DONE;
-    multicore_fifo_push_blocking(fifo_signal(req_id));
+    fifo_push_timeout(fifo_signal(req_id));
 }
 
 // ============================================================
@@ -215,7 +215,7 @@ static void wal_do_read(uint8_t req_id) {
         resp->delta_count = 0;
         wal_dmb();  // fence: commit before ownership transfer
     req->ready = REQ_DONE;
-        multicore_fifo_push_blocking(fifo_signal(req_id));
+        fifo_push_timeout(fifo_signal(req_id));
         return;
     }
 
@@ -240,7 +240,7 @@ static void wal_do_read(uint8_t req_id) {
         resp->status = WAL_RESP_ERR;
         wal_dmb();  // fence: commit before ownership transfer
     req->ready = REQ_DONE;
-        multicore_fifo_push_blocking(fifo_signal(req_id));
+        fifo_push_timeout(fifo_signal(req_id));
         return;
     }
     g_wal->slot_free[rslot] = 0;
@@ -266,7 +266,7 @@ static void wal_do_read(uint8_t req_id) {
 
     wal_dmb();  // fence: commit before ownership transfer
     req->ready = REQ_DONE;
-    multicore_fifo_push_blocking(fifo_signal(req_id));
+    fifo_push_timeout(fifo_signal(req_id));
 }
 
 static void wal_do_kv_get(uint8_t req_id) {
@@ -279,7 +279,7 @@ static void wal_do_kv_get(uint8_t req_id) {
         resp->status = WAL_RESP_ERR;
         wal_dmb();
         req->ready = REQ_DONE;
-        multicore_fifo_push_blocking(fifo_signal(req_id));
+        fifo_push_timeout(fifo_signal(req_id));
         return;
     }
 
@@ -296,7 +296,7 @@ static void wal_do_kv_get(uint8_t req_id) {
 
     wal_dmb();
     req->ready = REQ_DONE;
-    multicore_fifo_push_blocking(fifo_signal(req_id));
+    fifo_push_timeout(fifo_signal(req_id));
 }
 
 static void wal_do_kv_put(uint8_t req_id) {
@@ -309,7 +309,7 @@ static void wal_do_kv_put(uint8_t req_id) {
 
     wal_dmb();
     req->ready = REQ_DONE;
-    multicore_fifo_push_blocking(fifo_signal(req_id));
+    fifo_push_timeout(fifo_signal(req_id));
 }
 
 // ============================================================
@@ -431,7 +431,7 @@ void wal_engine_run(wal_state_t *wal) {
                 g_wal->responses[req_id].status = WAL_RESP_OK;
                 wal_dmb();  // fence: commit response before ownership transfer
                 req->ready = REQ_DONE;
-                multicore_fifo_push_blocking(fifo_signal(req_id));
+                fifo_push_timeout(fifo_signal(req_id));
                 g_wal->req_total++;
                 break;
             }

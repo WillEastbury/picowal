@@ -1023,7 +1023,7 @@ static bool http_kv_get(uint32_t key, uint8_t *out, uint16_t *len) {
     req->zc_pbuf = NULL;
     wal_dmb();
     req->ready = REQ_PENDING;
-    multicore_fifo_push_blocking(fifo_signal((uint8_t)rid));
+    fifo_push_timeout(fifo_signal((uint8_t)rid));
 
     if (!http_wait_req((uint8_t)rid)) {
         req->ready = REQ_EMPTY;
@@ -1065,7 +1065,7 @@ static bool http_kv_put(uint32_t key, const uint8_t *body, uint16_t body_len) {
     req->zc_pbuf = NULL;
     wal_dmb();
     req->ready = REQ_PENDING;
-    multicore_fifo_push_blocking(fifo_signal((uint8_t)rid));
+    fifo_push_timeout(fifo_signal((uint8_t)rid));
 
     if (!http_wait_req((uint8_t)rid)) {
         g_wal->slot_free[slot] = 1;
