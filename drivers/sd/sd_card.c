@@ -242,7 +242,7 @@ bool __no_inline_not_in_flash_func(sd_read_block)(uint32_t block_addr, uint8_t *
     return true;
 }
 
-bool sd_write_block(uint32_t block_addr, const uint8_t *buf) {
+bool __no_inline_not_in_flash_func(sd_write_block)(uint32_t block_addr, const uint8_t *buf) {
     if (!g_sd_ready) return false;
     uint32_t addr = g_sd_sdhc ? block_addr : (block_addr * 512);
     if (sd_cmd(CMD24, addr) != 0x00) { cs_deselect(); return false; }
@@ -271,7 +271,7 @@ bool __no_inline_not_in_flash_func(sd_read_blocks)(uint32_t block_addr, uint8_t 
     return true;
 }
 
-bool sd_write_blocks(uint32_t block_addr, const uint8_t *buf, uint32_t count) {
+bool __no_inline_not_in_flash_func(sd_write_blocks)(uint32_t block_addr, const uint8_t *buf, uint32_t count) {
     if (!g_sd_ready || count == 0) return false;
     if (count == 1) return sd_write_block(block_addr, buf);
     uint32_t addr = g_sd_sdhc ? block_addr : (block_addr * 512);

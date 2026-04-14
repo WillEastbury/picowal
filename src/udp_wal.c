@@ -27,10 +27,11 @@ typedef struct {
     ip_addr_t addr;
     uint16_t  port;
     uint32_t  last_seq;
+    uint32_t  send_seq;       // per-session nonce counter (prevents nonce reuse)
     uint32_t  last_seen_ms;
     bool      active;
-    bool      encrypted;     // true after key exchange
-    uint8_t   key[32];       // derived session key (ChaCha20-Poly1305)
+    bool      encrypted;
+    uint8_t   key[32];
     uint8_t   client_random[16];
     uint8_t   server_random[16];
 } udp_session_t;
@@ -116,18 +117,17 @@ static void udp_send_encrypted(udp_session_t *s, uint8_t msg_type,
         return;
     }
 
-    // Build nonce from session_id(8) + seq(4)
-    static uint32_t s_send_seq = 0;
-    s_send_seq++;
+    // Build nonce from session_id(8) + per-session seq(4)
+    s->send_seq++;
     uint8_t nonce[12];
     wr64(nonce, s->session_id);
-    wr32(nonce + 8, s_send_seq);
+    wr32(nonce + 8, s->send_seq);
 
     // Header = AAD (not encrypted)
     uint8_t hdr[UDP_WAL_HDR_SIZE];
     wr64(hdr, s->session_id);
     wr16(hdr + 8, (uint16_t)g_epoch);
-    wr32(hdr + 10, s_send_seq);
+    wr32(hdr + 10, s->send_seq);
     hdr[14] = msg_type;
 
     // Encrypt payload

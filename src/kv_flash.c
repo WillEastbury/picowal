@@ -543,6 +543,9 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
     cm->crc = crc32((const uint8_t *)&cm->mutation_group, 8u);
 
     uint16_t prog_len = (uint16_t)((total + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
+    // Initialize full programming region to 0xFF (not just total) to avoid
+    // flashing stale data from previous calls into the padding tail.
+    memset(buf + total, 0xFF, prog_len - total);
     uint32_t ints = save_and_disable_interrupts();
     flash_range_program(rec_off, buf, prog_len);
     restore_interrupts(ints);
@@ -565,6 +568,7 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     if (rp->hdr.flags & KV_REC_FLAG_TOMB) return false;
     if (rp->hdr.raw_len > KV_MAX_VALUE || rp->hdr.store_len > KV_MAX_VALUE) return false;
     if (rp->rec_len < sizeof(kv_rec_prefix_t)) return false;
+    if (sizeof(kv_rec_prefix_t) + rp->hdr.store_len > rp->rec_len) return false;
     if ((uint32_t)off + rp->rec_len > KV_SECTOR_SIZE) return false;
 
     const uint8_t *stored = xip_ptr(rec_flash_off + sizeof(kv_rec_prefix_t));
@@ -712,6 +716,7 @@ void kv_init(void) {
 
                 if (rp->hdr.raw_len   > KV_MAX_VALUE) break;
                 if (rp->hdr.store_len > KV_MAX_VALUE) break;
+                if (sizeof(kv_rec_prefix_t) + rp->hdr.store_len > rec_len) break;
 
                 const uint8_t *stored = xip_ptr(page_off + off + sizeof(kv_rec_prefix_t));
                 if (crc32(stored, rp->hdr.store_len) == rp->hdr.checksum) {
