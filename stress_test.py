@@ -76,34 +76,42 @@ class UdpConn:
             body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
         self._send(0x20, body)
 
-    def batch_ack_queued(self, cards):
-        """Returns bitmap or None on timeout."""
-        batch_seq = self.seq & 0xFFFF
-        body = wr16(batch_seq) + bytes([len(cards), 0x02])  # ACK_QUEUED
-        for pack, card_id, payload in cards:
-            body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
-        self._send(0x20, body)
-        try:
-            msg, payload = self._recv()
-            if msg in (0x21, 0x22):
-                return rd32(payload, 3)
-        except socket.timeout:
-            pass
+    def batch_ack_queued(self, cards, retries=3):
+        """Send batch, wait for ACK. Retry on timeout."""
+        for attempt in range(retries):
+            batch_seq = self.seq & 0xFFFF
+            body = wr16(batch_seq) + bytes([len(cards), 0x02])
+            for pack, card_id, payload in cards:
+                body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
+            self._send(0x20, body)
+            try:
+                msg, payload = self._recv(timeout=5.0 + attempt * 2.0)
+                if msg in (0x21, 0x22):
+                    return rd32(payload, 3)
+                if msg == 0x40:  # BACKPRESSURE
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+            except socket.timeout:
+                continue
         return None
 
-    def batch_ack_durable(self, cards):
-        """Returns committed bitmap or None on timeout."""
-        batch_seq = self.seq & 0xFFFF
-        body = wr16(batch_seq) + bytes([len(cards), 0x03])  # ACK_DURABLE
-        for pack, card_id, payload in cards:
-            body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
-        self._send(0x20, body)
-        try:
-            msg, payload = self._recv(timeout=10.0)
-            if msg in (0x21, 0x22):
-                return rd32(payload, 3)
-        except socket.timeout:
-            pass
+    def batch_ack_durable(self, cards, retries=3):
+        """Send batch, wait for committed ACK. Retry on timeout."""
+        for attempt in range(retries):
+            batch_seq = self.seq & 0xFFFF
+            body = wr16(batch_seq) + bytes([len(cards), 0x03])
+            for pack, card_id, payload in cards:
+                body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
+            self._send(0x20, body)
+            try:
+                msg, payload = self._recv(timeout=10.0 + attempt * 5.0)
+                if msg in (0x21, 0x22):
+                    return rd32(payload, 3)
+                if msg == 0x40:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+            except socket.timeout:
+                continue
         return None
 
     def close(self):
