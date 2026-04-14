@@ -3560,12 +3560,15 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
     }
 
     // ---- Route: GET /notes/{pack}/{card}?writenotes={text} — anonymous notes ----
-    // No auth required. Reads or writes a single text note.
-    // Pack 99 is reserved for notes (RBAC sentinel: anonymous read/write).
+    // No auth required. ONLY pack 99 allowed (anonymous notes sentinel).
     if (verb == VERB_GET && strncmp(path, "/notes/", 7) == 0) {
         unsigned int npack = 0, ncard = 0;
         if (sscanf(path, "/notes/%u/%u", &npack, &ncard) < 2) {
             http_json(pcb, "400 Bad Request", "{\"error\":\"expected /notes/{pack}/{card}\"}");
+            return;
+        }
+        if (npack != 99) {
+            http_json(pcb, "403 Forbidden", "{\"error\":\"notes only allowed on pack 99\"}");
             return;
         }
         uint32_t key = ((uint32_t)(npack & 0x3FF) << 22) | (ncard & 0x3FFFFF);

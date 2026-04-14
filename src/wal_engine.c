@@ -398,7 +398,9 @@ void wal_engine_run(wal_state_t *wal) {
             uint32_t word = multicore_fifo_pop_blocking();
             uint8_t req_id = fifo_req_id(word);
 
-            wal_dmb();  // fence: ensure we see Core 0's writes to request ring
+            if (req_id >= REQ_RING_SIZE) continue;  // bounds check
+
+            wal_dmb();// fence: ensure we see Core 0's writes to request ring
 
             wal_request_t *req = &g_wal->requests[req_id];
             did_work = true;

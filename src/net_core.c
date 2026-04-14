@@ -666,6 +666,11 @@ void net_core_run(wal_state_t *wal) {
         }
     }
 
+    if (!netif_list) {
+        printf("[net] FATAL: no network interface\n");
+        while (1) tight_loop_contents();
+    }
+
     printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
     cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
 

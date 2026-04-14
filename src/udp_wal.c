@@ -441,8 +441,9 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         return;
     }
 
-    // Decrypt if session is encrypted
-    if (s->encrypted && payload_len > 16) {
+    // Decrypt if session is encrypted — ALL packets must be authenticated
+    if (s->encrypted) {
+        if (payload_len < 16) return;  // too short for auth tag, drop
         uint8_t nonce[12];
         wr64(nonce, session_id);
         wr32(nonce + 8, seq);
