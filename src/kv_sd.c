@@ -263,17 +263,10 @@ void kvsd_init(void) {
     g_index_count = 0;
     g_ready = false;
 
-    // Erase flash index tier on boot — rebuilt from SRAM on flush.
-    // Prevents stale entries from poisoning lookups after wipe/OTA.
-    {
-        uint32_t irq = save_and_disable_interrupts();
-        for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
-            flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
-        }
-        restore_interrupts(irq);
-    }
+    // Don't erase flash index at boot — too slow (64 sectors), delays WiFi.
+    // Just ignore it — SRAM index is authoritative, flash rebuilt on flush.
     g_fidx_count = 0;
-    web_log("[kvsd] Flash index cleared (rebuilt on flush)\n");
+    web_log("[kvsd] Flash index ignored (SRAM authoritative)\n");
 
     sd_info_t info;
     if (!sd_get_info(&info)) { web_log("[kvsd] SD not ready\n"); return; }
