@@ -531,11 +531,14 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     if (!write_card(new_slot, card)) return false;
 
     if (!bitmap_set(new_slot, true)) {
-        // SD bitmap write failed — card written but not indexed, will be orphaned
         return false;
     }
     bool is_new = (old_slot < 0);
     index_insert(key, new_slot);
+
+    // Invalidate flash index cache — may have stale slots after COW.
+    // Rebuilt on next kvsd_flush() (1/sec). Safe: SRAM is authoritative.
+    g_fidx_count = 0;
 
     if (!is_new && (uint32_t)old_slot != new_slot) {
         bitmap_set((uint32_t)old_slot, false);  // best-effort free old slot
