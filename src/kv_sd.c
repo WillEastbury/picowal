@@ -613,13 +613,16 @@ uint32_t kvsd_range(uint32_t prefix, uint32_t mask,
     uint32_t masked = prefix & mask;
     uint32_t count = 0;
 
-    // Scan SRAM index (tier 1)
+    // Scan SRAM index (tier 1) — sorted, so early exit is safe
     for (uint32_t i = 0; i < g_index_count && count < max; i++) {
         if ((g_index[i] & mask) == masked) out_keys[count++] = g_index[i];
         else if (g_index[i] > (masked | ~mask)) break;
     }
+    uint32_t sram_count = count;  // mark end of SRAM results
 
-    // Scan flash index (tier 2) for entries not in SRAM
+    // Scan flash index (tier 2) — sorted merge dedup O(n+m)
+    // Use a merge pointer into SRAM results for duplicate detection.
+    uint32_t sp = 0;  // scan pointer into out_keys[0..sram_count)
     for (uint32_t i = 0; i < g_fidx_count && count < max; i++) {
         const fidx_entry_t *e = fidx_xip(i);
         if (e->key == 0xFFFFFFFF) break;
@@ -627,12 +630,11 @@ uint32_t kvsd_range(uint32_t prefix, uint32_t mask,
             if (e->key > (masked | ~mask)) break;
             continue;
         }
-        // Skip if already in SRAM results (dedup)
-        bool dup = false;
-        for (uint32_t j = 0; j < count; j++) {
-            if (out_keys[j] == e->key) { dup = true; break; }
-        }
-        if (!dup) out_keys[count++] = e->key;
+        // Advance SRAM pointer past keys < flash key (both sorted)
+        while (sp < sram_count && out_keys[sp] < e->key) sp++;
+        // Duplicate if SRAM has this exact key
+        if (sp < sram_count && out_keys[sp] == e->key) continue;
+        out_keys[count++] = e->key;
     }
 
     return count;
