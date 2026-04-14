@@ -87,7 +87,7 @@ static inline void wr32(uint8_t *p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t
 static inline void wr64(uint8_t *p, uint64_t v) { wr32(p,(uint32_t)v); wr32(p+4,(uint32_t)(v>>32)); }
 
 // ============================================================
-// Send response datagram
+// Send response datagram (plaintext — for HELLO/RESUME)
 // ============================================================
 
 static void udp_send_to(const ip_addr_t *addr, uint16_t port,
@@ -100,11 +100,50 @@ static void udp_send_to(const ip_addr_t *addr, uint16_t port,
 
     wr64(buf, session_id);
     wr16(buf + 8, (uint16_t)g_epoch);
-    wr32(buf + 10, 0);  // server seq (not used yet)
+    wr32(buf + 10, 0);
     buf[14] = msg_type;
     if (payload_len > 0) memcpy(buf + 15, payload, payload_len);
 
     udp_sendto(g_pcb, p, addr, port);
+    pbuf_free(p);
+}
+
+// Encrypted send — header is AAD, payload is encrypted + 16-byte tag appended
+static void udp_send_encrypted(udp_session_t *s, uint8_t msg_type,
+                                const uint8_t *payload, uint16_t payload_len) {
+    if (!s->encrypted) {
+        udp_send_to(&s->addr, s->port, s->session_id, msg_type, payload, payload_len);
+        return;
+    }
+
+    // Build nonce from session_id(8) + seq(4)
+    static uint32_t s_send_seq = 0;
+    s_send_seq++;
+    uint8_t nonce[12];
+    wr64(nonce, s->session_id);
+    wr32(nonce + 8, s_send_seq);
+
+    // Header = AAD (not encrypted)
+    uint8_t hdr[UDP_WAL_HDR_SIZE];
+    wr64(hdr, s->session_id);
+    wr16(hdr + 8, (uint16_t)g_epoch);
+    wr32(hdr + 10, s_send_seq);
+    hdr[14] = msg_type;
+
+    // Encrypt payload
+    uint8_t ct[UDP_WAL_MAX_PAYLOAD + 16];
+    uint32_t ct_len = aead_encrypt(ct, payload, payload_len,
+                                    hdr, UDP_WAL_HDR_SIZE,
+                                    s->key, nonce);
+
+    uint16_t total = UDP_WAL_HDR_SIZE + ct_len;
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total, PBUF_RAM);
+    if (!p) return;
+    uint8_t *buf = (uint8_t *)p->payload;
+    memcpy(buf, hdr, UDP_WAL_HDR_SIZE);
+    memcpy(buf + UDP_WAL_HDR_SIZE, ct, ct_len);
+
+    udp_sendto(g_pcb, p, &s->addr, s->port);
     pbuf_free(p);
 }
 
@@ -276,7 +315,7 @@ static void handle_batch_write(udp_session_t *s,
     if (!db) {
         // Backpressure — all slots full
         uint8_t bp[1] = { DEFERRED_QUEUE_SIZE };
-        udp_send_to(&s->addr, s->port, s->session_id, UMSG_BACKPRESSURE, bp, 1);
+        udp_send_encrypted(s, UMSG_BACKPRESSURE, bp, 1);
         return;
     }
 
@@ -328,12 +367,12 @@ static void handle_read(udp_session_t *s,
         wr32(resp + 2, card);
         wr16(resp + 6, blen);
         memcpy(resp + 8, buf, blen);
-        udp_send_to(&s->addr, s->port, s->session_id, UMSG_DATA, resp, 8 + blen);
+        udp_send_encrypted(s, UMSG_DATA, resp, 8 + blen);
     } else {
         uint8_t resp[6];
         wr16(resp, pack);
         wr32(resp + 2, card);
-        udp_send_to(&s->addr, s->port, s->session_id, UMSG_NOT_FOUND, resp, 6);
+        udp_send_encrypted(s, UMSG_NOT_FOUND, resp, 6);
     }
 }
 
@@ -402,6 +441,20 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         return;
     }
 
+    // Decrypt if session is encrypted
+    if (s->encrypted && payload_len > 16) {
+        uint8_t nonce[12];
+        wr64(nonce, session_id);
+        wr32(nonce + 8, seq);
+        uint8_t decrypted[UDP_WAL_MAX_PAYLOAD];
+        uint32_t pt_len = aead_decrypt(decrypted, payload, payload_len,
+                                        hdr, UDP_WAL_HDR_SIZE,
+                                        s->key, nonce);
+        if (pt_len == 0) return;  // auth failed, drop silently
+        memcpy(payload, decrypted, pt_len);
+        payload_len = (uint16_t)pt_len;
+    }
+
     // Replay check
     if (seq <= s->last_seq && s->last_seq > 0) {
         return;  // drop silently
@@ -449,7 +502,12 @@ void udp_wal_poll(void) {
                 wr16(ack + 7, 0);
                 uint8_t msg_type = (db->durability >= UDUR_ACK_DURABLE) ?
                     UMSG_BATCH_COMMITTED : UMSG_BATCH_QUEUED;
-                udp_send_to(&db->addr, db->port, db->session_id, msg_type, ack, 9);
+                udp_session_t *ack_s = find_session(db->session_id);
+                if (ack_s) {
+                    udp_send_encrypted(ack_s, msg_type, ack, 9);
+                } else {
+                    udp_send_to(&db->addr, db->port, db->session_id, msg_type, ack, 9);
+                }
             }
             db->active = false;
         }
