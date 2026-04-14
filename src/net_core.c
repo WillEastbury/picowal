@@ -723,10 +723,11 @@ void net_core_run(wal_state_t *wal) {
             drain_responses(&g_ctx);
         }
         udp_wal_poll();
+        // Heavy I/O (LCD redraw, SD flush) only when HTTP is quiet
+        // AND at most once per second to avoid starving cyw43_arch_poll
         if (!web_server_recent_activity(HTTP_UI_QUIET_MS)) {
-            lcd_refresh_dashboard(wal);
+            lcd_refresh_dashboard(wal);  // already internally throttled to 10s
             flush_cardinality_one();
-            if (kvsd_ready() && g_ctx.connected) kvsd_flush();
         }
         // Heartbeat indicator — top-left dot toggles every 1s
         {
@@ -735,6 +736,8 @@ void net_core_run(wal_state_t *wal) {
                 hb_last = now;
                 hb_on = !hb_on;
                 lcd_draw_string(0, 0, hb_on ? "*" : " ", COLOR_GREEN, COLOR_BLACK, 2);
+                // Flush SD index at most once per second (was every poll cycle)
+                if (kvsd_dirty()) kvsd_flush();
             }
         }
         // Tight spin — no sleep. SD writes are the natural throttle.

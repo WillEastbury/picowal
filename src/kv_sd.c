@@ -706,6 +706,7 @@ uint32_t kvsd_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t ma
 }
 
 bool kvsd_ready(void) { return g_ready; }
+bool kvsd_dirty(void) { return g_ready && g_sb.dirty; }
 
 uint32_t kvsd_ota_start_block(void) {
     if (!g_ready) return 0;

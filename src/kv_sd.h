@@ -125,6 +125,7 @@ kvsd_stats_t kvsd_stats(void);
 uint32_t kvsd_record_count(void);
 uint32_t kvsd_type_counts(uint16_t *out_types, uint32_t *out_counts, uint32_t max_types);
 bool kvsd_flush(void);   // persist index + superblock to SD
+bool kvsd_dirty(void);  // true if index needs flushing
 bool kvsd_ready(void);
 
 // OTA staging: returns the SD block offset for OTA firmware staging
