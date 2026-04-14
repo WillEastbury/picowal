@@ -25,7 +25,7 @@
 
 #define KV_LEN_QUANTUM       4u // packed length/offset units
 
-#define KV_INDEX_CAPACITY    4096u
+#define KV_INDEX_CAPACITY    512u   // flash KV: packs 0-1 only (schemas + users)
 
 // Dead log (append-only pages)
 #define KV_DEADLOG_MAGIC     0x444C4731u // DLG1

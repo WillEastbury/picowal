@@ -43,7 +43,7 @@
 #define UDP_WAL_MAX_PAYLOAD (UDP_WAL_MAX_DGRAM - UDP_WAL_HDR_SIZE)
 
 #define UDP_WAL_MAX_SESSIONS 8
-#define UDP_WAL_MAX_BATCH    32
+#define UDP_WAL_MAX_BATCH    16
 
 // Message types
 #define UMSG_HELLO          0x10
