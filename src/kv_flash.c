@@ -275,11 +275,16 @@ static void unpack_loc(uint32_t loc, uint16_t *page, uint16_t *off_bytes, uint16
 }
 
 static int idx_find_linear(uint32_t key) {
-    for (uint32_t i = 0; i < g_count; i++) {
-        if (g_keys[i] == key) return (int)i;
-        if (g_keys[i] > key) return -(int)(i + 1);
+    // Binary search on sorted g_keys[] — O(log n)
+    int lo = 0, hi = (int)g_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (g_keys[mid] == key) return mid;
+        if (g_keys[mid] < key) lo = mid + 1;
+        else hi = mid - 1;
     }
-    return -(int)(g_count + 1u);
+    // Not found: return insertion point as negative (same convention)
+    return -(lo + 1);
 }
 
 static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags) {
