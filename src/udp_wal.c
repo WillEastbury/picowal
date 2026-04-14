@@ -185,7 +185,7 @@ static void handle_resume(const ip_addr_t *addr, uint16_t port,
 typedef struct {
     uint32_t key;
     uint16_t len;
-    uint8_t  data[512];
+    uint8_t  data[128];     // cards are typically <50 bytes
 } pending_card_t;
 
 typedef struct {
@@ -201,7 +201,7 @@ typedef struct {
     pending_card_t cards[UDP_WAL_MAX_BATCH];
 } deferred_batch_t;
 
-#define DEFERRED_QUEUE_SIZE 8
+#define DEFERRED_QUEUE_SIZE 4
 static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 
 // ============================================================
@@ -293,6 +293,22 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                         const ip_addr_t *addr, u16_t port) {
     (void)arg; (void)pcb;
     if (!p || p->tot_len < UDP_WAL_HDR_SIZE) { if (p) pbuf_free(p); return; }
+
+    // Early drop: if all deferred slots full, free pbuf immediately
+    // to keep lwIP pbufs available for WiFi/HTTP
+    {
+        bool any_free = false;
+        for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
+            if (!g_deferred[i].active) { any_free = true; break; }
+        }
+        // Peek at msg type — only drop BATCH_WRITE, allow HELLO/RESUME/READ
+        uint8_t peek_type = 0;
+        pbuf_copy_partial(p, &peek_type, 1, 14);
+        if (!any_free && peek_type == UMSG_BATCH_WRITE) {
+            pbuf_free(p);
+            return;
+        }
+    }
 
     uint8_t hdr[UDP_WAL_HDR_SIZE];
     pbuf_copy_partial(p, hdr, UDP_WAL_HDR_SIZE, 0);

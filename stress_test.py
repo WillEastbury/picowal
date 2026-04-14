@@ -15,7 +15,7 @@ TOTAL_CARDS = int(sys.argv[2]) if len(sys.argv) > 2 else 10_000
 NUM_PACKS = 10
 PACKS = list(range(10, 20))  # packs 10-19
 NUM_UDP_CONNS = 5
-BATCH_SIZE = 32
+BATCH_SIZE = 8
 CARDS_PER_CONN = TOTAL_CARDS // NUM_UDP_CONNS  # 200K each
 
 # ── UDP client (inline, no import) ────────────────────────────

@@ -94,169 +94,121 @@ bool sd_init(void) {
     g_sd_ready = false;
     g_sd_sdhc = false;
     g_sd_blocks = 0;
+    absolute_time_t sd_deadline = make_timeout_time_ms(5000);
 
-    web_log("[sd] SPI1 init: CLK=%d MOSI=%d MISO=%d CS=%d\n",
-            SD_CLK_PIN, SD_MOSI_PIN, SD_MISO_PIN, SD_CS_PIN);
-
-    // Init CS pin
+    // Init CS, deselect LCD/touch
     gpio_init(SD_CS_PIN);
     gpio_set_dir(SD_CS_PIN, GPIO_OUT);
     gpio_put(SD_CS_PIN, 1);
-
-    // Deselect LCD and touch before using SPI1 for SD
     gpio_put(9, 1);   // LCD_CS high
     gpio_put(16, 1);  // TP_CS high
-    // Slow SPI1 to 400kHz for SD card init sequence (required by spec)
     spi_set_baudrate(SD_SPI, 400000);
     gpio_pull_up(SD_MISO_PIN);
-    web_log("[sd] SPI1 slowed to 400kHz for init\n");
 
     sleep_ms(100);
 
-    // 160+ clocks with CS high to enter SPI mode
+    // 160+ clocks with CS high
     gpio_put(SD_CS_PIN, 1);
     for (int i = 0; i < 20; i++) spi_transfer(0xFF);
 
-    // Manual bit-bang test: toggle CLK manually to verify wiring
+    // Bit-bang bus wakeup (required for SPI1 shared with LCD)
     {
-        // Pause for manual test
-        
-        // Set pins to GPIO mode temporarily
         gpio_set_function(SD_CLK_PIN, GPIO_FUNC_SIO);
         gpio_set_function(SD_MOSI_PIN, GPIO_FUNC_SIO);
         gpio_set_dir(SD_CLK_PIN, GPIO_OUT);
         gpio_set_dir(SD_MOSI_PIN, GPIO_OUT);
         gpio_set_dir(SD_MISO_PIN, GPIO_IN);
         gpio_pull_up(SD_MISO_PIN);
-        
-        // Send 0xFF manually (MOSI high) with CS low, check MISO
         gpio_put(SD_CS_PIN, 0);
         sleep_us(10);
-        
-        uint8_t manual_rx = 0;
         for (int bit = 7; bit >= 0; bit--) {
-            gpio_put(SD_MOSI_PIN, 1);  // MOSI high (0xFF)
-            gpio_put(SD_CLK_PIN, 0);
-            sleep_us(5);
-            gpio_put(SD_CLK_PIN, 1);
-            sleep_us(5);
-            if (gpio_get(SD_MISO_PIN)) manual_rx |= (1 << bit);
+            gpio_put(SD_MOSI_PIN, 1);
+            gpio_put(SD_CLK_PIN, 0); sleep_us(5);
+            gpio_put(SD_CLK_PIN, 1); sleep_us(5);
         }
         gpio_put(SD_CS_PIN, 1);
-        
-        web_log("[sd] Manual bit-bang: MISO reads 0x%02x\n", manual_rx);
-        web_log("[sd] CS=%d CLK=%d MOSI=%d MISO=%d\n",
-                gpio_get(SD_CS_PIN), gpio_get(SD_CLK_PIN), 
-                gpio_get(SD_MOSI_PIN), gpio_get(SD_MISO_PIN));
-        
-        // Restore SPI mode on all pins
         gpio_set_function(SD_CLK_PIN, GPIO_FUNC_SPI);
         gpio_set_function(SD_MOSI_PIN, GPIO_FUNC_SPI);
         gpio_set_function(SD_MISO_PIN, GPIO_FUNC_SPI);
     }
 
-    // Diagnostic: send 0xAA and check what comes back
-    {
-        uint8_t test_tx = 0xAA;
-        cs_select();
-        uint8_t test_rx = spi_transfer(test_tx);
-        cs_deselect();
-        web_log("[sd] Diag: sent 0xAA, got 0x%02x (expect 0xFF if no card response)\n", test_rx);
-        
-        // Try reading MISO pin directly
-        bool miso_state = gpio_get(SD_MISO_PIN);
-        web_log("[sd] MISO pin (GP%d) state: %d\n", SD_MISO_PIN, miso_state);
-        web_log("[sd] CLK pin (GP%d) func: %d\n", SD_CLK_PIN, gpio_get_function(SD_CLK_PIN));
-        web_log("[sd] MOSI pin (GP%d) func: %d\n", SD_MOSI_PIN, gpio_get_function(SD_MOSI_PIN));
-        web_log("[sd] MISO pin (GP%d) func: %d\n", SD_MISO_PIN, gpio_get_function(SD_MISO_PIN));
-    }
-
-    // CMD0: GO_IDLE — must get 0x01
+    // CMD0: GO_IDLE
     uint8_t r1 = 0xFF;
     for (int i = 0; i < 10; i++) {
+        if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
+            snprintf(g_sd_debug, sizeof(g_sd_debug), "TIMEOUT CMD0");
+            spi_set_baudrate(SD_SPI, 25000000);
+            return false;
+        }
         r1 = sd_cmd_end(CMD0, 0);
-        web_log("[sd] CMD0 attempt %d: r1=0x%02x\n", i, r1);
         if (r1 == 0x01 || r1 == 0x00) break;
         sleep_ms(100);
     }
     if (r1 != 0x01 && r1 != 0x00) {
-        snprintf(g_sd_debug, sizeof(g_sd_debug), "FAIL: CMD0 r1=0x%02x (need 0x01 or 0x00)", r1);
-        web_log("[sd] %s\n", g_sd_debug);
+        snprintf(g_sd_debug, sizeof(g_sd_debug), "CMD0=0x%02x", r1);
+        spi_set_baudrate(SD_SPI, 25000000);
         return false;
     }
 
     // CMD8: check v2
-    web_log("[sd] CMD0 r1=0x%02x, sending CMD8\n", r1);
     bool was_idle = (r1 == 0x01);
     r1 = sd_cmd(CMD8, 0x000001AA);
-    bool v2 = (r1 == 0x01 || r1 == 0x00);  // accept 0x00 if card was already ready
+    bool v2 = (r1 == 0x01 || r1 == 0x00);
     if (r1 == 0x01 || r1 == 0x00) {
         uint8_t r7[4]; spi_read(r7, 4);
-        web_log("[sd] CMD8 r7=%02x%02x%02x%02x\n", r7[0], r7[1], r7[2], r7[3]);
         if (r7[2] != 0x01 || r7[3] != 0xAA) {
-            snprintf(g_sd_debug, sizeof(g_sd_debug), "FAIL: CMD8 pattern");
+            snprintf(g_sd_debug, sizeof(g_sd_debug), "CMD8 pattern");
             cs_deselect(); return false;
         }
     }
     cs_deselect();
 
     // ACMD41: init
-    web_log("[sd] CMD8 v2=%d, starting ACMD41\n", v2);
     uint32_t a41 = v2 ? 0x40000000 : 0;
     for (int i = 0; i < 1000; i++) {
+        if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
+            snprintf(g_sd_debug, sizeof(g_sd_debug), "TIMEOUT ACMD41");
+            spi_set_baudrate(SD_SPI, 25000000);
+            return false;
+        }
         sd_cmd_end(CMD55, 0);
         r1 = sd_cmd_end(ACMD41, a41);
         if (r1 == 0x00) break;
         sleep_ms(1);
     }
     if (r1 != 0x00) {
-        snprintf(g_sd_debug, sizeof(g_sd_debug), "FAIL: ACMD41 r1=0x%02x", r1);
-        web_log("[sd] %s\n", g_sd_debug);
+        snprintf(g_sd_debug, sizeof(g_sd_debug), "ACMD41=0x%02x", r1);
+        spi_set_baudrate(SD_SPI, 25000000);
         return false;
     }
 
-    // CMD58: OCR — check SDHC
+    // CMD58: OCR
     g_sd_sdhc = false;
     if (v2) {
         r1 = sd_cmd(CMD58, 0);
         if (r1 == 0x00) {
             uint8_t ocr[4]; spi_read(ocr, 4);
             g_sd_sdhc = (ocr[0] & 0x40) != 0;
-            web_log("[sd] OCR=%02x%02x%02x%02x SDHC=%d\n", ocr[0], ocr[1], ocr[2], ocr[3], g_sd_sdhc);
         }
         cs_deselect();
     }
-
     if (!g_sd_sdhc) sd_cmd_end(CMD16, 512);
 
-    // Restore SPI1 to high speed — works for both LCD (up to 60MHz) and SD (up to 25MHz)
     spi_set_baudrate(SD_SPI, 25000000);
-    web_log("[sd] SPI1 restored to 25MHz\n");
 
-    // Read CSD for capacity
-    web_log("[sd] Reading CSD...\n");
+    // CSD: read capacity
     r1 = sd_cmd(CMD9, 0);
-    web_log("[sd] CMD9 r1=0x%02x, waiting for data token...\n", r1);
     bool got_token = false;
     if (r1 == 0x00) {
-        // Wait longer for data token
         for (int t = 0; t < 200000; t++) {
             uint8_t b = spi_transfer(0xFF);
             if (b == 0xFE) { got_token = true; break; }
-            if (b != 0xFF) { web_log("[sd] CSD got 0x%02x instead of token\n", b); break; }
+            if (b != 0xFF) break;
         }
     }
     if (r1 == 0x00 && got_token) {
         uint8_t csd[16], crc[2];
         spi_read(csd, 16); spi_read(crc, 2);
-
-        snprintf(g_sd_debug, sizeof(g_sd_debug),
-            "CSD: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x v=%u",
-            csd[0],csd[1],csd[2],csd[3],csd[4],csd[5],csd[6],csd[7],
-            csd[8],csd[9],csd[10],csd[11],csd[12],csd[13],csd[14],csd[15],
-            (unsigned)(csd[0] >> 6));
-        web_log("[sd] %s\n", g_sd_debug);
-
         if ((csd[0] >> 6) == 1) {
             uint32_t c = ((uint32_t)(csd[7] & 0x3F) << 16) |
                          ((uint32_t)csd[8] << 8) | csd[9];
@@ -269,16 +221,13 @@ bool sd_init(void) {
             g_sd_blocks = (c + 1) * (1u << (m + 2)) * (1u << bl) / 512;
         }
     } else {
-        snprintf(g_sd_debug, sizeof(g_sd_debug), "CSD read failed r1=0x%02x", r1);
-        web_log("[sd] %s\n", g_sd_debug);
+        snprintf(g_sd_debug, sizeof(g_sd_debug), "CSD fail r1=0x%02x", r1);
     }
     cs_deselect();
 
     g_sd_ready = true;
-    web_log("[sd] Ready: %s, %lu blocks (%lu MB)\n",
-           g_sd_sdhc ? "SDHC" : "SDSC",
-           (unsigned long)g_sd_blocks,
-           (unsigned long)(g_sd_blocks / 2048));
+    snprintf(g_sd_debug, sizeof(g_sd_debug), "%s %luMB",
+             g_sd_sdhc ? "SDHC" : "SDSC", (unsigned long)(g_sd_blocks / 2048));
     return true;
 }
 

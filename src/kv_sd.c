@@ -243,14 +243,8 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.next_free_hint = 0;
     g_sb.dirty = 0;
 
-    web_log("[kvsd] Format: %lu total blocks\n", (unsigned long)total_blocks);
-    web_log("[kvsd]   OTA:   %lu blocks @ %lu (600KB staging)\n",
-            (unsigned long)g_sb.ota_blocks, (unsigned long)g_sb.ota_start);
-    web_log("[kvsd]   Index: %lu blocks @ %lu (bitmap=%lu, keylist=%lu, bloom=%lu)\n",
-            (unsigned long)index_total, (unsigned long)g_sb.index_start,
-            (unsigned long)bitmap_blks, (unsigned long)keylist_blks, (unsigned long)bloom_blks);
-    web_log("[kvsd]   Data:  %lu blocks @ %lu, max %lu cards\n",
-            (unsigned long)data_total, (unsigned long)g_sb.data_start, (unsigned long)max_cards);
+    web_log("[kvsd] fmt %lu blks, max %lu cards\n",
+            (unsigned long)total_blocks, (unsigned long)max_cards);
 
     sb_write();
 }
@@ -263,24 +257,17 @@ void kvsd_init(void) {
     g_index_count = 0;
     g_ready = false;
 
-    // Don't erase flash index at boot — too slow (64 sectors), delays WiFi.
-    // Just ignore it — SRAM index is authoritative, flash rebuilt on flush.
     g_fidx_count = 0;
-    web_log("[kvsd] Flash index ignored (SRAM authoritative)\n");
 
     sd_info_t info;
-    if (!sd_get_info(&info)) { web_log("[kvsd] SD not ready\n"); return; }
-    web_log("[kvsd] SD: %lu MB, %lu blocks\n", (unsigned long)info.capacity_mb, (unsigned long)info.block_count);
+    if (!sd_get_info(&info)) { web_log("[kvsd] no SD\n"); return; }
 
     if (sb_read()) {
-        web_log("[kvsd] Superblock found — %lu cards, data@%lu, max=%lu\n",
-                (unsigned long)g_sb.total_cards, (unsigned long)g_sb.data_start,
-                (unsigned long)g_sb.max_cards);
+        web_log("[kvsd] %lu cards, max %lu\n",
+                (unsigned long)g_sb.total_cards, (unsigned long)g_sb.max_cards);
 
-        // Load sorted key+slot pairs from keylist (64 pairs per block)
         uint32_t saved = g_sb.total_cards;
         if (saved > 0 && saved <= KVSD_INDEX_MAX && g_sb.keylist_blocks > 0) {
-            web_log("[kvsd] Loading %lu key+slot pairs...\n", (unsigned long)saved);
             uint32_t loaded = 0;
             for (uint32_t b = 0; b < g_sb.keylist_blocks && loaded < saved; b++) {
                 uint8_t buf[512];
@@ -298,12 +285,9 @@ void kvsd_init(void) {
                 }
             }
             g_index_count = loaded;
-            web_log("[kvsd] Loaded %lu pairs\n", (unsigned long)loaded);
         }
 
-        // If keylist was empty/corrupt, fall back to bitmap scan
         if (g_index_count == 0 && g_sb.total_cards > 0) {
-            web_log("[kvsd] Keylist empty, scanning bitmap...\n");
             for (uint32_t bm = 0; bm < g_sb.bitmap_blocks && g_index_count < KVSD_INDEX_MAX; bm++) {
                 uint8_t buf[512];
                 if (!sd_read_block(g_sb.bitmap_start + bm, buf)) continue;
@@ -336,17 +320,16 @@ void kvsd_init(void) {
                 }
                 g_index[j+1] = k; g_slots[j+1] = s;
             }
-            web_log("[kvsd] Bitmap scan: %lu keys\n", (unsigned long)g_index_count);
+            web_log("[kvsd] scan: %lu keys\n", (unsigned long)g_index_count);
         }
     } else {
-        web_log("[kvsd] No superblock — formatting\n");
+        web_log("[kvsd] no superblock, formatting\n");
         format_sd(info.block_count);
     }
 
     g_ready = true;
-    web_log("[kvsd] Ready (index: %lu/%lu, max cards: %lu)\n",
-            (unsigned long)g_index_count, (unsigned long)KVSD_INDEX_MAX,
-            (unsigned long)g_sb.max_cards);
+    web_log("[kvsd] ready %lu/%lu\n",
+            (unsigned long)g_index_count, (unsigned long)KVSD_INDEX_MAX);
 }
 
 // ============================================================
@@ -588,7 +571,7 @@ bool kvsd_flush(void) {
     // Also update flash index tier (tier 2) from SRAM
     fidx_write_all(g_index, g_slots, g_index_count);
 
-    web_log("[kvsd] Flushed %lu pairs → SD + flash index\n", (unsigned long)to_save);
+    web_log("[kvsd] flush %lu\n", (unsigned long)to_save);
     return true;
 }
 

@@ -32,29 +32,20 @@ int main(void) {
     stdio_init_all();
     sleep_ms(500);
 
-    printf("\n================================\n");
-    printf("  Pico 2W Storage Appliance\n");
-    printf("  192 x 2KB delta buffer pool\n");
-    printf("  APPEND | READ | COMPACT\n");
-    printf("================================\n");
-
-    web_log("[boot] PicoWAL starting\n");
+    printf("\nPicoWAL v2\n");
+    web_log("[boot] start\n");
 
     lcd_init();
     touch_init();
-
     lcd_clear(COLOR_BLACK);
     lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
     lcd_draw_string(40, 70, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
-    // SD card + KV-SD init
-    web_log("[boot] SD init deferred — trigger via /admin/log\n");
-    // Try auto-init SD at boot
     if (sd_init()) {
-        web_log("[boot] SD OK, initializing KV-SD\n");
+        web_log("[boot] SD:%s\n", sd_get_debug());
         kvsd_init();
     } else {
-        web_log("[boot] SD not available, using flash KV only\n");
+        web_log("[boot] SD fail:%s\n", sd_get_debug());
     }
 
     // Initialize WAL state
