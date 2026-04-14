@@ -5,11 +5,11 @@
 #include <stdbool.h>
 
 // ============================================================
-// Buffer Pool: 32 slots × 2KB = 64KB SRAM
+// Buffer Pool: 32 slots × 512B = 16KB SRAM (max card = 508 bytes)
 // ============================================================
 
 #define SLOT_COUNT  32
-#define SLOT_SIZE   2048
+#define SLOT_SIZE   512
 
 // ============================================================
 // Request / Response Ring: 32 entries
