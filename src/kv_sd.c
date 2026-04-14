@@ -12,6 +12,15 @@
 
 // ============================================================
 // Flash Index Tier (tier 2) — XIP-mapped sorted (key,slot) pairs
+//
+// Layout (with FIDX_ENTRY_OFFSET = 256):
+//   FIDX_FLASH_OFFSET + 0   : fidx_region_hdr_t  (256 bytes, written LAST)
+//   FIDX_FLASH_OFFSET + 256 : fidx_entry_t[N]    (8 bytes each, written first)
+//
+// Write ordering: entries are written to flash before the header is sealed.
+// This ensures that if power is lost during a flush, the header is absent
+// (or stale from the previous flush), fidx_count_entries() returns 0, and
+// the flash index is safely ignored until the next successful flush.
 // ============================================================
 
 typedef struct __attribute__((packed)) {
@@ -19,11 +28,29 @@ typedef struct __attribute__((packed)) {
     uint32_t slot;
 } fidx_entry_t;
 
-static uint32_t g_fidx_count = 0;  // entries currently in flash index
+// Monotonically increasing flush sequence — loaded from the header on boot,
+// incremented each time fidx_write_all() seals a new snapshot.
+static uint32_t g_fidx_sequence = 0;
 
-// Read a flash index entry via XIP (zero-copy)
+static uint32_t g_fidx_count = 0;  // entries currently live in flash index
+
+// CRC32 over an arbitrary byte range (standard IEEE 802.3 polynomial).
+// Used both to compute the header CRC during flush and to validate it on boot.
+static uint32_t crc32_range(const uint8_t *data, uint32_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+        }
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// Read a flash index entry via XIP (zero-copy).
+// Entries start at FIDX_ENTRY_OFFSET bytes into the FIDX region, after the header.
 static inline const fidx_entry_t *fidx_xip(uint32_t idx) {
-    return &((const fidx_entry_t *)FIDX_XIP_BASE)[idx];
+    return &((const fidx_entry_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET))[idx];
 }
 
 // Binary search the flash index via XIP — O(log n), zero I/O
@@ -46,25 +73,67 @@ static int32_t fidx_lookup(uint32_t key) {
     return -1;
 }
 
-// Count valid entries in flash index (scan on boot)
+// fidx_count_entries: validate the FIDX region header on boot.
+//
+// Recovery algorithm (issue requirement §5 for tier-2 index):
+//   1. Read the header at FIDX_FLASH_OFFSET.
+//   2. Validate magic and version.
+//   3. Compute CRC32 over all entry data and compare against hdr.crc32.
+//      A mismatch means the entries were partially written (or bit-flipped);
+//      the entire flash index is discarded (g_fidx_count = 0).
+//   4. Use hdr.entry_count as the authoritative count — no scan needed.
+//   5. Restore g_fidx_sequence so the next flush gets a higher number.
 static void fidx_count_entries(void) {
     g_fidx_count = 0;
-    for (uint32_t i = 0; i < FIDX_MAX_ENTRIES; i++) {
-        if (fidx_xip(i)->key == 0xFFFFFFFF) break;
-        g_fidx_count++;
+    const fidx_region_hdr_t *hdr = (const fidx_region_hdr_t *)FIDX_XIP_BASE;
+
+    if (hdr->magic   != FIDX_MAGIC)   return;  // not initialised or wrong magic
+    if (hdr->version != FIDX_VERSION) return;  // incompatible format
+    if (hdr->entry_count > FIDX_MAX_ENTRIES) return;  // corrupt count field
+
+    // Validate all entry data against the stored CRC.
+    // CRC is computed over the raw bytes of the entry array so any bit-flip
+    // in either keys or slots is detected before the data is used.
+    const uint8_t *entries = (const uint8_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET);
+    uint32_t computed = crc32_range(entries, hdr->entry_count * FIDX_ENTRY_SIZE);
+    if (computed != hdr->crc32) {
+        // Entry data is corrupted or was partially written; discard the flash
+        // index so the SRAM tier is rebuilt from the SD keylist on this boot.
+        printf("[fidx] boot: CRC mismatch seq=%lu — discarding flash index\n",
+               (unsigned long)hdr->sequence);
+        return;
     }
+
+    g_fidx_count    = hdr->entry_count;
+    g_fidx_sequence = hdr->sequence;
+
+    printf("[fidx] boot: %lu entries seq=%lu\n",
+           (unsigned long)g_fidx_count, (unsigned long)g_fidx_sequence);
 }
 
-// Write entire flash index from sorted arrays (called during flush)
+// fidx_write_all: flush the entire sorted SRAM index to the flash index tier.
+//
+// Write ordering (issue requirement §4):
+//   1. Erase all FIDX sectors (header + entries both cleared).
+//   2. Write entries starting at offset FIDX_ENTRY_OFFSET.
+//      The header region (offset 0) remains 0xFF (erased) — unrecognisable.
+//   3. Seal: write the header with incremented sequence and CRC over the entries.
+//
+// If power is lost between steps 2 and 3, the header is absent; the next boot
+// returns g_fidx_count = 0 and the SRAM index is rebuilt from the SD keylist.
+// If power is lost mid-erase (step 1), some sectors may be partially erased;
+// the header CRC will not match the partial entry data — also safely discarded.
 static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t count) {
     if (count > FIDX_MAX_ENTRIES) count = FIDX_MAX_ENTRIES;
 
     uint32_t irq = save_and_disable_interrupts();
-    // Erase all flash index sectors
+
+    // Step 1: erase all sectors (this also clears any previous header).
     for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
         flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
     }
-    // Program entries in 256-byte pages (32 entries per page)
+
+    // Step 2: write entries starting at FIDX_ENTRY_OFFSET (32 entries per 256-byte page).
     uint8_t page[256];
     for (uint32_t i = 0; i < count; i += 32) {
         memset(page, 0xFF, 256);
@@ -73,15 +142,34 @@ static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t
         for (uint32_t j = 0; j < batch; j++) {
             uint32_t off = j * 8;
             uint32_t k = keys[i + j], sl = slots[i + j];
-            page[off+0]=(uint8_t)k; page[off+1]=(uint8_t)(k>>8);
+            page[off+0]=(uint8_t)k;    page[off+1]=(uint8_t)(k>>8);
             page[off+2]=(uint8_t)(k>>16); page[off+3]=(uint8_t)(k>>24);
-            page[off+4]=(uint8_t)sl; page[off+5]=(uint8_t)(sl>>8);
+            page[off+4]=(uint8_t)sl;   page[off+5]=(uint8_t)(sl>>8);
             page[off+6]=(uint8_t)(sl>>16); page[off+7]=(uint8_t)(sl>>24);
         }
-        flash_range_program(FIDX_FLASH_OFFSET + i * 8, page, 256);
+        flash_range_program(FIDX_FLASH_OFFSET + FIDX_ENTRY_OFFSET + i * 8, page, 256);
     }
-    restore_interrupts(irq);
 
+    // Step 3: seal with header (sequence + entry_count + CRC).
+    // Only after this write is the flash index considered authoritative on boot.
+    // CRC is computed over the XIP-mapped entry bytes using the shared crc32_range()
+    // helper — same polynomial and byte layout as what was just written to flash.
+    const uint8_t *written = (const uint8_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET);
+    uint32_t crc = crc32_range(written, count * FIDX_ENTRY_SIZE);
+
+    uint8_t hdr_buf[256];
+    memset(hdr_buf, 0xFF, 256);
+    fidx_region_hdr_t *hdr = (fidx_region_hdr_t *)hdr_buf;
+    hdr->magic       = FIDX_MAGIC;
+    hdr->version     = FIDX_VERSION;
+    memset(hdr->_pad, 0, sizeof(hdr->_pad));
+    hdr->sequence    = ++g_fidx_sequence;  // strictly increasing across flushes
+    hdr->entry_count = count;
+    hdr->crc32       = crc;
+    memset(hdr->_reserved, 0xFF, sizeof(hdr->_reserved));
+    flash_range_program(FIDX_FLASH_OFFSET, hdr_buf, 256);
+
+    restore_interrupts(irq);
     g_fidx_count = count;
 }
 
@@ -255,13 +343,20 @@ static void format_sd(uint32_t total_blocks) {
 // ============================================================
 
 void kvsd_init(void) {
-    g_index_count = 0;
-    g_ready = false;
-
-    g_fidx_count = 0;
+    g_index_count    = 0;
+    g_ready          = false;
+    g_fidx_count     = 0;
+    g_fidx_sequence  = 0;
 
     sd_info_t info;
     if (!sd_get_info(&info)) { web_log("[kvsd] no SD\n"); return; }
+
+    // Validate and load the flash index tier (tier 2) before the SD keylist.
+    // fidx_count_entries() checks the header magic, version, and CRC; if the
+    // check fails the flash index is silently empty — the SRAM index is then
+    // rebuilt from the SD keylist below.  This activates the 3-tier index on
+    // every boot, not only after a flush.
+    fidx_count_entries();
 
     if (sb_read()) {
         web_log("[kvsd] %lu cards, max %lu\n",

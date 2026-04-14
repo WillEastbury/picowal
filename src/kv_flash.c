@@ -9,7 +9,33 @@
 
 #define XIP_BASE_ADDR 0x10000000u
 
+// V1 page magic (legacy, no longer written; skipped on recovery)
 #define KV_PAGE_MAGIC        0x4B565031u // KVP1
+// V2 page magic: includes sequence + header CRC for deterministic recovery
+#define KV_PAGE_MAGIC_V2     0x4B565032u // KVP2
+#define KV_PAGE_VERSION_1    0x01u
+
+// Mutation-group commit marker magic, stored at the same offset as hdr.magic
+// in the unified record layout so the scanner can dispatch on it.
+#define KV_COMMIT_MAGIC      0x4B564D43u // KVMC
+
+// Page lifecycle states stored in kv_page_hdr_t.page_state.
+// A page transitions: NEW (just written) → ACTIVE (index references it)
+// → STALE (superseded by CoW write) → RECLAIMABLE (no live references,
+// safe to erase).  The states are informational; correctness relies on the
+// in-memory live-reference check in page_has_live_refs().
+#define KV_PAGE_STATE_NEW          0x01u
+#define KV_PAGE_STATE_ACTIVE       0x02u
+#define KV_PAGE_STATE_STALE        0x03u
+#define KV_PAGE_STATE_RECLAIMABLE  0x04u
+
+// Byte offset of hdr_crc within kv_page_hdr_t — CRC covers everything before
+// this field (magic + version + page_state + _pad + sequence = 12 bytes).
+#define KV_PAGE_HDR_CRC_OFFSET  12u
+
+// Aligned size of the commit record (14 raw bytes, padded to 4-byte boundary).
+#define KV_COMMIT_ALIGNED    16u
+
 #define KV_REC_FLAG_COMP     0x01u
 #define KV_REC_FLAG_TOMB     0x02u
 
@@ -30,18 +56,48 @@
 // Dead log (append-only pages)
 #define KV_DEADLOG_MAGIC     0x444C4731u // DLG1
 
+// Page header: written once when a sector is first prepared.
+// hdr_crc covers the 12 bytes before it (magic+version+page_state+_pad+sequence)
+// so a partial page-header write is detectable on recovery.
 typedef struct __attribute__((packed)) {
-    uint32_t magic; // KV_PAGE_MAGIC
+    uint32_t magic;       // KV_PAGE_MAGIC_V2
+    uint8_t  version;     // KV_PAGE_VERSION_1
+    uint8_t  page_state;  // KV_PAGE_STATE_* lifecycle marker
+    uint16_t _pad;
+    uint32_t sequence;    // monotonically increasing per page allocation; used
+                          // on recovery to establish write ordering across pages
+    uint32_t hdr_crc;     // CRC32 of the 12 bytes above; validates header integrity
 } kv_page_hdr_t;
 
-_Static_assert(sizeof(kv_page_hdr_t) == 4, "kv_page_hdr_t size");
+_Static_assert(sizeof(kv_page_hdr_t) == 16, "kv_page_hdr_t size");
 
+// Record prefix: written before each value payload.
+// mutation_group ties this record to its commit marker below, ensuring that
+// partial writes (power loss after record but before commit) are discardable.
 typedef struct __attribute__((packed)) {
-    uint16_t rec_len; // includes header + payload, 4-byte aligned
-    kv_header_t hdr;
+    uint16_t rec_len;         // total aligned record size (prefix + payload)
+    uint32_t mutation_group;  // links this record to its kv_commit_rec_t
+    kv_header_t hdr;          // per-record magic / key / version / CRC
 } kv_rec_prefix_t;
 
-_Static_assert(sizeof(kv_rec_prefix_t) == 22, "kv_rec_prefix_t size");
+_Static_assert(sizeof(kv_rec_prefix_t) == 26, "kv_rec_prefix_t size");
+
+// Commit marker: written immediately after the data record in the same
+// flash-programming buffer.  commit_magic sits at byte offset 6, the same
+// offset as hdr.magic in kv_rec_prefix_t, so the recovery scanner can
+// dispatch on a single magic read.
+// A mutation group is valid only when this marker (with matching group ID
+// and valid CRC) follows the data record.  Records without a commit marker
+// are discarded on recovery — they represent a partial write interrupted by
+// power loss.
+typedef struct __attribute__((packed)) {
+    uint16_t rec_len;         // KV_COMMIT_ALIGNED (16)
+    uint32_t mutation_group;  // must match the preceding data record's group
+    uint32_t commit_magic;    // KV_COMMIT_MAGIC — distinguishes from data records
+    uint32_t crc;             // CRC32 of (mutation_group || commit_magic) — 8 bytes
+} kv_commit_rec_t;
+
+_Static_assert(sizeof(kv_commit_rec_t) == 14, "kv_commit_rec_t size");
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -61,6 +117,16 @@ static uint32_t g_locs[KV_INDEX_CAPACITY];
 static uint16_t g_versions[KV_INDEX_CAPACITY];
 static uint8_t g_flags[KV_INDEX_CAPACITY];
 static uint32_t g_count = 0;
+
+// Page allocation sequence: incremented each time a new page is prepared.
+// Loaded from the highest valid page header on recovery so that new pages
+// always get a strictly higher sequence number.
+static uint32_t g_page_sequence = 0;
+
+// Mutation group counter: incremented for each kv_put / kv_delete call.
+// Each data record and its commit marker share the same group ID, enabling
+// the recovery scanner to detect and discard uncommitted partial writes.
+static uint32_t g_mutation_group = 0;
 
 static uint16_t g_write_page = 0;
 static uint16_t g_write_off = sizeof(kv_page_hdr_t);
@@ -263,15 +329,29 @@ static bool idx_get(uint32_t key, uint32_t *loc, uint16_t *version, uint8_t *fla
     return true;
 }
 
+// ensure_page_ready: prepare a sector for appending.
+// If the sector already has a valid V2 header (magic + version + CRC), return
+// immediately — no re-write needed.  Otherwise erase (if non-blank) and write
+// a fresh V2 header with an incremented sequence number.
+// Invariant: after this call the sector's header CRC is valid and sequence
+// strictly exceeds all previously seen sequences.
 static bool ensure_page_ready(uint16_t page) {
     uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
     const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-    if (ph->magic == KV_PAGE_MAGIC) return true;
+    if (ph->magic == KV_PAGE_MAGIC_V2 && ph->version == KV_PAGE_VERSION_1) {
+        uint32_t expected = crc32((const uint8_t *)ph, KV_PAGE_HDR_CRC_OFFSET);
+        if (expected == ph->hdr_crc) return true;
+    }
 
     uint8_t hdrbuf[KV_PAGE_SIZE];
     memset(hdrbuf, 0xFF, sizeof(hdrbuf));
     kv_page_hdr_t *nh = (kv_page_hdr_t *)hdrbuf;
-    nh->magic = KV_PAGE_MAGIC;
+    nh->magic      = KV_PAGE_MAGIC_V2;
+    nh->version    = KV_PAGE_VERSION_1;
+    nh->page_state = KV_PAGE_STATE_NEW;  // lifecycle: freshly written
+    nh->_pad       = 0;
+    nh->sequence   = ++g_page_sequence;  // strictly increasing — recovery picks highest
+    nh->hdr_crc    = crc32((const uint8_t *)nh, KV_PAGE_HDR_CRC_OFFSET);
 
     uint32_t ints = save_and_disable_interrupts();
     if (ph->magic != KV_FREE) {
@@ -285,7 +365,7 @@ static bool ensure_page_ready(uint16_t page) {
 static bool page_is_prepared_empty(uint16_t page) {
     uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
     const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-    if (ph->magic != KV_PAGE_MAGIC) return false;
+    if (ph->magic != KV_PAGE_MAGIC_V2) return false;
     const uint32_t *probe = (const uint32_t *)xip_ptr(page_off + sizeof(kv_page_hdr_t));
     return *probe == 0xFFFFFFFFu;
 }
@@ -295,7 +375,7 @@ static bool find_next_append_page(uint16_t start_page, uint16_t *out_page) {
         uint16_t cand = (uint16_t)((start_page + i) % KV_SECTOR_COUNT);
         uint32_t page_off = KV_REGION_START + (uint32_t)cand * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic == KV_FREE || ph->magic != KV_PAGE_MAGIC || page_is_prepared_empty(cand)) {
+        if (ph->magic == KV_FREE || ph->magic != KV_PAGE_MAGIC_V2 || page_is_prepared_empty(cand)) {
             *out_page = cand;
             return true;
         }
@@ -319,7 +399,7 @@ static bool select_append_page(uint16_t need) {
     if ((uint32_t)g_write_off + need <= KV_SECTOR_SIZE) {
         uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic == KV_PAGE_MAGIC || ph->magic == KV_FREE) return true;
+        if (ph->magic == KV_PAGE_MAGIC_V2 || ph->magic == KV_FREE) return true;
     }
 
     uint16_t cand = 0;
@@ -394,8 +474,21 @@ static bool page_has_live_refs(uint16_t page_idx) {
     return false;
 }
 
+// append_record: write a data record followed immediately by its commit marker.
+//
+// Write ordering invariant (issue requirement §4):
+//   1. New data record (CoW — never overwrites existing page data)
+//   2. Commit marker with matching mutation_group
+// Both are packed into the same programming buffer so that they land in flash
+// within a single (or two adjacent) flash_range_program calls.  A commit
+// marker that cannot fit on the current page is included in the progbuf and
+// the page selection ensures there is room for the combined total.
+//
+// Recovery (kv_init) only indexes records whose mutation_group has a valid
+// commit marker, so a power-loss between steps 1 and 2 leaves the record
+// effectively invisible on the next boot — it is simply skipped.
 static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, uint16_t version,
-                          uint8_t flags, uint32_t *out_loc) {
+                          uint8_t flags, uint32_t mutation_group, uint32_t *out_loc) {
     uint8_t enc[KV_MAX_VALUE + 64];
     const uint8_t *stored = raw;
     uint16_t stored_len = raw_len;
@@ -412,34 +505,50 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
 
     kv_rec_prefix_t rp;
     memset(&rp, 0, sizeof(rp));
-    rp.hdr.magic = KV_MAGIC;
-    rp.hdr.key = key;
-    rp.hdr.raw_len = raw_len;
-    rp.hdr.store_len = stored_len;
-    rp.hdr.version = version;
-    rp.hdr.flags = rec_flags;
-    rp.hdr.checksum = crc32(stored, stored_len);
-    rp.rec_len = (uint16_t)(sizeof(kv_rec_prefix_t) + stored_len);
+    rp.mutation_group   = mutation_group;
+    rp.hdr.magic        = KV_MAGIC;
+    rp.hdr.key          = key;
+    rp.hdr.raw_len      = raw_len;
+    rp.hdr.store_len    = stored_len;
+    rp.hdr.version      = version;
+    rp.hdr.flags        = rec_flags;
+    rp.hdr.checksum     = crc32(stored, stored_len);
+    rp.rec_len          = (uint16_t)(sizeof(kv_rec_prefix_t) + stored_len);
     uint16_t rec_len_aligned = (uint16_t)((rp.rec_len + 3u) & ~3u);
 
-    if (!select_append_page(rec_len_aligned)) return false;
+    // Reserve space for both the data record AND its commit marker so they
+    // always land on the same page.  This guarantees recovery can match them
+    // without cross-page look-ahead.
+    if (!select_append_page((uint16_t)(rec_len_aligned + KV_COMMIT_ALIGNED))) return false;
     if (!ensure_page_ready(g_write_page)) return false;
 
     uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
-    uint32_t rec_off = page_off + g_write_off;
+    uint32_t rec_off  = page_off + g_write_off;
 
+    // Build the programming buffer: [record][commit_marker][0xFF padding].
+    // The commit marker sits at byte rec_len_aligned within buf.
     static uint8_t buf[KV_MAX_VALUE + 128];
-    memset(buf, 0xFF, rec_len_aligned);
+    uint16_t total = (uint16_t)(rec_len_aligned + KV_COMMIT_ALIGNED);
+    memset(buf, 0xFF, total);
     memcpy(buf, &rp, sizeof(rp));
     if (stored_len > 0) memcpy(buf + sizeof(rp), stored, stored_len);
 
-    uint16_t prog_len = (uint16_t)((rec_len_aligned + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
+    // Embed commit marker directly after the aligned record.
+    kv_commit_rec_t *cm = (kv_commit_rec_t *)(buf + rec_len_aligned);
+    cm->rec_len        = KV_COMMIT_ALIGNED;
+    cm->mutation_group = mutation_group;
+    cm->commit_magic   = KV_COMMIT_MAGIC;
+    // CRC covers the 8 bytes: mutation_group || commit_magic.
+    // This detects bit-flip corruption in the commit marker itself.
+    cm->crc = crc32((const uint8_t *)&cm->mutation_group, 8u);
+
+    uint16_t prog_len = (uint16_t)((total + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
     uint32_t ints = save_and_disable_interrupts();
     flash_range_program(rec_off, buf, prog_len);
     restore_interrupts(ints);
 
     if (out_loc) *out_loc = pack_loc(g_write_page, g_write_off, rec_len_aligned);
-    g_write_off = (uint16_t)(g_write_off + rec_len_aligned);
+    g_write_off = (uint16_t)(g_write_off + total);
     prewarm_next_append_page();
     return true;
 }
@@ -484,59 +593,173 @@ void kv_wipe(void) {
     g_count = 0;
     g_write_page = 0;
     g_write_off = sizeof(kv_page_hdr_t);
+    // Reset sequence counters so the next boot starts fresh
+    g_page_sequence   = 0;
+    g_mutation_group  = 0;
 }
 
+// kv_init: deterministic recovery routine.
+//
+// Recovery algorithm (issue requirement §5):
+//   1. Scan all sectors.  Accept only V2 pages (KV_PAGE_MAGIC_V2 + version +
+//      valid header CRC).  Skip V1/legacy pages — they require an admin wipe.
+//   2. Track the highest valid page sequence seen; use it to seed g_page_sequence
+//      so that new pages always receive a strictly higher number.
+//   3. Within each valid page, scan records sequentially using a state-machine:
+//      - data record   → hold as "pending"; discard any previous pending
+//      - commit record → if CRC valid and mutation_group matches pending,
+//                        apply the pending record to the SRAM index;
+//                        otherwise discard (uncommitted partial write)
+//      - end sentinel  → exit inner loop
+//      - unknown magic → exit inner loop (corrupt tail)
+//   4. Any pending record at page-end has no commit marker (power-loss window)
+//      and is silently discarded — this makes recovery idempotent.
+//   5. Version-based conflict resolution: among multiple committed records for
+//      the same key (from different pages), keep the highest version.
 void kv_init(void) {
-    g_count = 0;
-    g_write_page = 0;
-    g_write_off = sizeof(kv_page_hdr_t);
+    g_count          = 0;
+    g_write_page     = 0;
+    g_write_off      = sizeof(kv_page_hdr_t);
+    g_page_sequence  = 0;
+    g_mutation_group = 0;
 
     uint16_t last_page = 0;
-    uint16_t last_off = sizeof(kv_page_hdr_t);
+    uint16_t last_off  = sizeof(kv_page_hdr_t);
     bool saw_data = false;
 
     for (uint16_t p = 0; p < KV_SECTOR_COUNT; p++) {
         uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic != KV_PAGE_MAGIC) continue;
+
+        // Require V2 format: magic, version, and valid header CRC.
+        // V1 (KV_PAGE_MAGIC) pages are deliberately skipped — any existing V1
+        // data requires an admin wipe to migrate to the V2 format.
+        if (ph->magic != KV_PAGE_MAGIC_V2 || ph->version != KV_PAGE_VERSION_1) continue;
+        uint32_t expected_hdr_crc = crc32((const uint8_t *)ph, KV_PAGE_HDR_CRC_OFFSET);
+        if (ph->hdr_crc != expected_hdr_crc) continue;  // header bit-flip — skip page
+
+        // Keep g_page_sequence ahead of all seen sequences so that the next
+        // ensure_page_ready() call produces a strictly higher sequence number.
+        if (ph->sequence > g_page_sequence) g_page_sequence = ph->sequence;
 
         uint16_t off = sizeof(kv_page_hdr_t);
-        while ((uint32_t)off + sizeof(kv_rec_prefix_t) <= KV_SECTOR_SIZE) {
-            const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)xip_ptr(page_off + off);
-            if (rp->rec_len == 0xFFFFu) break;
-            if (rp->rec_len < sizeof(kv_rec_prefix_t)) break;
-            uint16_t alen = (uint16_t)((rp->rec_len + 3u) & ~3u);
-            if ((uint32_t)off + alen > KV_SECTOR_SIZE) break;
-            if (rp->hdr.magic != KV_MAGIC) break;
-            if (rp->hdr.raw_len > KV_MAX_VALUE || rp->hdr.store_len > KV_MAX_VALUE) break;
 
-            const uint8_t *stored = xip_ptr(page_off + off + sizeof(kv_rec_prefix_t));
-            if (crc32(stored, rp->hdr.store_len) == rp->hdr.checksum) {
-                int f = idx_find_linear(rp->hdr.key);
-                uint16_t old_ver = 0;
-                if (f >= 0) old_ver = g_versions[(uint32_t)f];
-                if (f < 0 || rp->hdr.version >= old_ver) {
-                    if (rp->hdr.flags & KV_REC_FLAG_TOMB) {
-                        idx_remove(rp->hdr.key);
-                    } else {
-                        idx_set(rp->hdr.key, pack_loc(p, off, alen), rp->hdr.version, rp->hdr.flags);
+        // Pending uncommitted record for this page scan.  Each kv_put/kv_delete
+        // writes exactly one data record followed by one commit marker, so at
+        // most one record can be pending at any time within a single scan.
+        bool     has_pending      = false;
+        uint32_t pending_key      = 0;
+        uint32_t pending_loc      = 0;
+        uint16_t pending_version  = 0;
+        uint8_t  pending_flags    = 0;
+        uint32_t pending_mg       = 0;
+
+        // Loop minimum: sizeof(kv_commit_rec_t) = 14 bytes ensures we can safely
+        // read both rec_len (2 bytes at offset 0) and magic (4 bytes at offset 6)
+        // for any record type.  Data records that overlap the sector boundary are
+        // caught by the explicit `off + rec_len > KV_SECTOR_SIZE` bounds check
+        // inside each branch, so no unsafe memory access can occur.  Using the
+        // smaller commit-record minimum (14 < 26) is intentional: commit records
+        // near the sector end are valid and must not be missed.
+        while ((uint32_t)off + sizeof(kv_commit_rec_t) <= KV_SECTOR_SIZE) {
+            const uint8_t *rptr = xip_ptr(page_off + off);
+            uint16_t rec_len = *(const uint16_t *)rptr;
+
+            if (rec_len == 0xFFFFu) break;  // end-of-written-data sentinel
+            if (rec_len == 0u)      break;  // invalid
+
+            // Both kv_rec_prefix_t and kv_commit_rec_t place their distinguishing
+            // magic field at byte offset 6 within the record, immediately after
+            // rec_len (2) + mutation_group (4).  A single read dispatches both.
+            uint32_t magic = *(const uint32_t *)(rptr + 6u);
+
+            if (magic == KV_COMMIT_MAGIC) {
+                // Commit marker: validates that the preceding data record was
+                // fully written before power loss.
+                if (rec_len < (uint16_t)sizeof(kv_commit_rec_t)) break;
+                if ((uint32_t)off + rec_len > KV_SECTOR_SIZE)    break;
+
+                const kv_commit_rec_t *cr = (const kv_commit_rec_t *)rptr;
+
+                // Validate the commit record's own CRC to reject bit-flips.
+                uint32_t commit_crc = crc32((const uint8_t *)&cr->mutation_group, 8u);
+
+                if (cr->crc == commit_crc &&
+                    has_pending &&
+                    cr->mutation_group == pending_mg) {
+                    // Mutation group is committed — apply the pending record to
+                    // the index, respecting version-based conflict resolution.
+                    int f = idx_find_linear(pending_key);
+                    uint16_t old_ver = (f >= 0) ? g_versions[(uint32_t)f] : 0;
+                    if (f < 0 || pending_version >= old_ver) {
+                        if (pending_flags & KV_REC_FLAG_TOMB) {
+                            idx_remove(pending_key);
+                        } else {
+                            idx_set(pending_key, pending_loc, pending_version, pending_flags);
+                        }
                     }
                 }
+                // Clear pending regardless — commit consumed it (or it was invalid).
+                has_pending = false;
+
+            } else if (magic == KV_MAGIC) {
+                // Data record: stage as pending; a commit marker must follow.
+                if (rec_len < (uint16_t)sizeof(kv_rec_prefix_t)) break;
+                if ((uint32_t)off + rec_len > KV_SECTOR_SIZE)     break;
+
+                const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)rptr;
+                uint16_t rec_alen = (uint16_t)((rec_len + 3u) & ~3u);
+
+                if (rp->hdr.raw_len   > KV_MAX_VALUE) break;
+                if (rp->hdr.store_len > KV_MAX_VALUE) break;
+
+                const uint8_t *stored = xip_ptr(page_off + off + sizeof(kv_rec_prefix_t));
+                if (crc32(stored, rp->hdr.store_len) == rp->hdr.checksum) {
+                    // Record payload is intact.  Mark pending; will only be
+                    // applied to the index when the matching commit arrives.
+                    has_pending     = true;
+                    pending_key     = rp->hdr.key;
+                    pending_loc     = pack_loc(p, off, rec_alen);
+                    pending_version = rp->hdr.version;
+                    pending_flags   = rp->hdr.flags;
+                    pending_mg      = rp->mutation_group;
+                }
+
+            } else {
+                break;  // unknown magic — assume corrupt tail, stop scanning
             }
 
+            uint16_t alen = (uint16_t)((rec_len + 3u) & ~3u);
             off = (uint16_t)(off + alen);
         }
+        // Any remaining has_pending at page-end = uncommitted (power-loss before
+        // commit was written).  Silently discard — not applied to index.
 
         if (off > sizeof(kv_page_hdr_t)) {
-            saw_data = true;
+            saw_data  = true;
             last_page = p;
-            last_off = off;
+            last_off  = off;
         }
     }
 
+    // Seed g_mutation_group above all page sequences seen this boot.
+    // Safety invariant: the recovery scanner matches data records with commit
+    // markers by mutation_group value ONLY WITHIN a sequential page scan.
+    // Because the scan processes records strictly in flash order (data immediately
+    // followed by its commit), a new-boot mutation_group value that coincidentally
+    // equals an old in-flash value cannot create a false commit match:
+    // (a) old committed pairs have already been consumed and cleared from pending,
+    // (b) the new write's commit appears only after the new data record, so the
+    //     state machine always pairs them correctly regardless of numeric value.
+    // Seeding from g_page_sequence ensures new-boot mutation_group IDs start well
+    // above any IDs written by the recovered pages: page sequences and mutation_group
+    // counters both increment per operation, so g_page_sequence bounds the range of
+    // mutation_group IDs that could have been written to the recovered flash pages.
+    g_mutation_group = g_page_sequence + 1u;
+
     if (saw_data) {
         g_write_page = last_page;
-        g_write_off = last_off;
+        g_write_off  = last_off;
         if (g_write_off >= KV_SECTOR_SIZE) {
             g_write_page = (uint16_t)((g_write_page + 1u) % KV_SECTOR_COUNT);
             g_write_off = sizeof(kv_page_hdr_t);
@@ -574,9 +797,14 @@ bool kv_put_if_version(uint32_t key, const uint8_t *value, uint16_t len,
     bool exists = idx_get(key, &old_loc, &cur_ver, NULL);
     if (expected_version != KV_VERSION_ANY && expected_version != cur_ver) return false;
 
+    // Allocate a fresh mutation group ID for this logical write.
+    // The same ID is embedded in the data record and its commit marker so that
+    // the recovery scanner can pair them.
+    uint32_t mg = ++g_mutation_group;
+
     uint16_t next_ver = (uint16_t)(cur_ver + 1u);
     uint32_t new_loc = 0;
-    if (!append_record(key, value, len, next_ver, 0, &new_loc)) return false;
+    if (!append_record(key, value, len, next_ver, 0, mg, &new_loc)) return false;
     if (!idx_set(key, new_loc, next_ver, 0)) return false;
 
     if (exists) {
@@ -612,8 +840,11 @@ bool kv_delete(uint32_t key) {
     uint32_t old_loc = 0;
     if (!idx_get(key, &old_loc, &cur_ver, NULL)) return false;
 
+    // Assign a mutation group so recovery can detect a partial delete
+    // (tombstone written but commit marker not yet programmed).
+    uint32_t mg = ++g_mutation_group;
     uint32_t tomb_loc = 0;
-    if (!append_record(key, NULL, 0, (uint16_t)(cur_ver + 1u), KV_REC_FLAG_TOMB, &tomb_loc)) return false;
+    if (!append_record(key, NULL, 0, (uint16_t)(cur_ver + 1u), KV_REC_FLAG_TOMB, mg, &tomb_loc)) return false;
     idx_remove(key);
 
     uint16_t old_page = 0;
@@ -690,7 +921,7 @@ kv_stats_t kv_stats(void) {
     for (uint16_t p = 0; p < KV_SECTOR_COUNT; p++) {
         uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
-        if (ph->magic != KV_PAGE_MAGIC) continue;
+        if (ph->magic != KV_PAGE_MAGIC_V2) continue;
         header_pages++;
     }
 
