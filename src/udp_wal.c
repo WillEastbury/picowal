@@ -13,80 +13,8 @@
 #include <string.h>
 #include <stdio.h>
 
-// ============================================================
-// SD ring buffer — circular WAL for SRAM deferred queue overflow
-// Uses the LAST 256 blocks of the SD card (128KB).
-// Guarded: data region max_cards is reduced to exclude this area.
-// Each block (512 bytes) holds 3 entries: [key:4][len:2][data:128] = 134 × 3 = 402
-// 256 blocks = 768 entries
-// ============================================================
-
-#define SDRING_BLOCKS       256
-#define SDRING_ENTRY_SIZE   134   // key(4) + len(2) + data(128)
-#define SDRING_PER_BLOCK    3     // 3 × 134 = 402, fits in 512
-#define SDRING_MAX_ENTRIES  (SDRING_BLOCKS * SDRING_PER_BLOCK)  // 768
-
-static uint32_t g_sdring_base = 0;   // SD block offset (set at init from card size)
-static uint32_t g_sdring_write = 0;
-static uint32_t g_sdring_read = 0;
-static uint32_t g_sdring_count = 0;
-
-static void sdring_init(uint32_t total_blocks) {
-    // Last 256 blocks of the SD card
-    g_sdring_base = total_blocks - SDRING_BLOCKS;
-    g_sdring_write = 0;
-    g_sdring_read = 0;
-    g_sdring_count = 0;
-}
-
-static void sdring_push(uint32_t key, const uint8_t *data, uint16_t len) {
-    if (g_sdring_count >= SDRING_MAX_ENTRIES || !g_sdring_base) return;
-    if (len > 128) len = 128;
-
-    uint32_t slot = g_sdring_write;
-    uint32_t blk = g_sdring_base + (slot / SDRING_PER_BLOCK);
-    uint32_t slot_in_blk = slot % SDRING_PER_BLOCK;
-
-    uint8_t buf[512];
-    // Read existing block (may have other entries)
-    if (slot_in_blk > 0) {
-        sd_read_block(blk, buf);
-    } else {
-        memset(buf, 0xFF, 512);
-    }
-
-    uint32_t off = slot_in_blk * SDRING_ENTRY_SIZE;
-    buf[off+0]=(uint8_t)key; buf[off+1]=(uint8_t)(key>>8);
-    buf[off+2]=(uint8_t)(key>>16); buf[off+3]=(uint8_t)(key>>24);
-    buf[off+4]=(uint8_t)len; buf[off+5]=(uint8_t)(len>>8);
-    memcpy(buf + off + 6, data, len);
-
-    sd_write_block(blk, buf);
-    g_sdring_write = (slot + 1) % SDRING_MAX_ENTRIES;
-    g_sdring_count++;
-}
-
-static bool sdring_pop(uint32_t *key, uint8_t *data, uint16_t *len) {
-    if (g_sdring_count == 0) return false;
-
-    uint32_t slot = g_sdring_read;
-    uint32_t blk = g_sdring_base + (slot / SDRING_PER_BLOCK);
-    uint32_t slot_in_blk = slot % SDRING_PER_BLOCK;
-
-    uint8_t buf[512];
-    if (!sd_read_block(blk, buf)) return false;
-
-    uint32_t off = slot_in_blk * SDRING_ENTRY_SIZE;
-    *key = buf[off] | ((uint32_t)buf[off+1]<<8) |
-           ((uint32_t)buf[off+2]<<16) | ((uint32_t)buf[off+3]<<24);
-    *len = buf[off+4] | ((uint16_t)buf[off+5]<<8);
-    if (*len > 128) *len = 128;
-    memcpy(data, buf + off + 6, *len);
-
-    g_sdring_read = (slot + 1) % SDRING_MAX_ENTRIES;
-    g_sdring_count--;
-    return true;
-}
+// (SD ring buffer removed — SRAM-only buffering is more efficient
+//  since the bottleneck is SD write speed, not buffer space)
 
 // ============================================================
 // Session table
@@ -285,26 +213,22 @@ static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 // ============================================================
 // Raw datagram ring — fast SRAM buffer for callback overflow
 // Just memcpy, no parsing or SD I/O in callback context
+// 64 slots × 512 bytes = 32KB (max available SRAM)
 // ============================================================
 
-#define RAW_RING_SIZE  32
+#define RAW_RING_SIZE  64
 #define RAW_RING_MTU   512
 static uint8_t  g_raw_ring[RAW_RING_SIZE][RAW_RING_MTU];
 static uint16_t g_raw_ring_len[RAW_RING_SIZE];
-static ip_addr_t g_raw_ring_addr[RAW_RING_SIZE];
-static uint16_t g_raw_ring_port[RAW_RING_SIZE];
 static volatile uint32_t g_raw_write = 0;
 static volatile uint32_t g_raw_read = 0;
 
-static bool raw_ring_push(const uint8_t *data, uint16_t len,
-                          const ip_addr_t *addr, uint16_t port) {
+static bool raw_ring_push(const uint8_t *data, uint16_t len) {
     uint32_t next = (g_raw_write + 1) % RAW_RING_SIZE;
-    if (next == g_raw_read) return false;  // full
+    if (next == g_raw_read) return false;
     uint16_t clen = len > RAW_RING_MTU ? RAW_RING_MTU : len;
     memcpy(g_raw_ring[g_raw_write], data, clen);
     g_raw_ring_len[g_raw_write] = clen;
-    g_raw_ring_addr[g_raw_write] = *addr;
-    g_raw_ring_port[g_raw_write] = port;
     g_raw_write = next;
     return true;
 }
@@ -416,7 +340,7 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
             uint16_t clen = total > RAW_RING_MTU ? RAW_RING_MTU : total;
             pbuf_copy_partial(p, raw, clen, 0);
             pbuf_free(p);
-            raw_ring_push(raw, clen, addr, port);
+            raw_ring_push(raw, clen);
             return;
         }
     }
@@ -533,16 +457,6 @@ void udp_wal_poll(void) {
         }
         return;
     }
-
-    // No raw ring work — drain one SD ring entry
-    if (g_sdring_count > 0) {
-        uint32_t key;
-        uint8_t data[128];
-        uint16_t len;
-        if (sdring_pop(&key, data, &len)) {
-            direct_put(key, data, len);
-        }
-    }
 }
 
 // ============================================================
@@ -554,14 +468,6 @@ void udp_wal_init(wal_state_t *wal) {
     g_epoch = now_ms();
     memset(g_sessions, 0, sizeof(g_sessions));
     memset(g_deferred, 0, sizeof(g_deferred));
-
-    // Init SD ring buffer from SD card size
-    sd_info_t info;
-    if (sd_get_info(&info)) {
-        sdring_init(info.block_count);
-        printf("[udp] SD ring: %lu blocks @ %lu\n",
-               (unsigned long)SDRING_BLOCKS, (unsigned long)g_sdring_base);
-    }
 
     g_pcb = udp_new();
     if (!g_pcb) {
