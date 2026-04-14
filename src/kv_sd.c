@@ -212,21 +212,22 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.version = 1;
     g_sb.total_cards = 0;
 
-    // Region sizes
+    // Reserve last 256 blocks for SD ring buffer (UDP overflow WAL)
+    uint32_t usable = total_blocks - SDRING_GUARD_BLOCKS;
+
     // Block 0: superblock, blocks 1-1200: OTA staging (600KB)
-    uint32_t reserved = 1 + KVSD_OTA_BLOCKS;  // superblock + OTA
+    uint32_t reserved = 1 + KVSD_OTA_BLOCKS;
     g_sb.ota_start = 1;
     g_sb.ota_blocks = KVSD_OTA_BLOCKS;
 
-    uint32_t available = total_blocks - reserved;
-    uint32_t index_total = available * 15 / 100;  // 15% for index
+    uint32_t available = usable - reserved;
+    uint32_t index_total = available * 15 / 100;
     uint32_t data_total = available - index_total;
 
-    // Index sub-regions
     uint32_t max_cards = data_total / KVSD_CARD_BLOCKS;
-    uint32_t bitmap_blks = (max_cards + 4095) / 4096;  // 1 bit per card, 4096 per block
-    uint32_t keylist_blks = (max_cards * 4 + 511) / 512;  // 4 bytes per key
-    if (keylist_blks > index_total / 2) keylist_blks = index_total / 2;  // cap at half
+    uint32_t bitmap_blks = (max_cards + 4095) / 4096;
+    uint32_t keylist_blks = (max_cards * 4 + 511) / 512;
+    if (keylist_blks > index_total / 2) keylist_blks = index_total / 2;
     uint32_t bloom_blks = index_total - bitmap_blks - keylist_blks;
 
     g_sb.index_start = reserved;
@@ -244,7 +245,7 @@ static void format_sd(uint32_t total_blocks) {
     g_sb.dirty = 0;
 
     web_log("[kvsd] fmt %lu blks, max %lu cards\n",
-            (unsigned long)total_blocks, (unsigned long)max_cards);
+            (unsigned long)usable, (unsigned long)max_cards);
 
     sb_write();
 }

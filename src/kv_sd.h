@@ -54,6 +54,9 @@ typedef struct __attribute__((packed)) {
 
 #define KVSD_OTA_BLOCKS  1200   // 600KB = 1200 * 512
 
+// SD ring buffer guard — last 256 blocks reserved for UDP overflow WAL
+#define SDRING_GUARD_BLOCKS  256
+
 // SRAM index — key + slot parallel arrays (COW support)
 // 18K entries × 8 bytes = 144KB (same footprint as 36K keys-only)
 #define KVSD_INDEX_MAX      18000

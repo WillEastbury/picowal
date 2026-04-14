@@ -1,14 +1,92 @@
 #include "udp_wal.h"
 #include "wal_defs.h"
 #include "kv_sd.h"
+#include "sd_card.h"
 
 #include "pico/stdlib.h"
 #include "pico/rand.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
 #include "lwip/udp.h"
 #include "lwip/pbuf.h"
 
 #include <string.h>
 #include <stdio.h>
+
+// ============================================================
+// SD ring buffer — circular WAL for SRAM deferred queue overflow
+// Uses the LAST 256 blocks of the SD card (128KB).
+// Guarded: data region max_cards is reduced to exclude this area.
+// Each block (512 bytes) holds 3 entries: [key:4][len:2][data:128] = 134 × 3 = 402
+// 256 blocks = 768 entries
+// ============================================================
+
+#define SDRING_BLOCKS       256
+#define SDRING_ENTRY_SIZE   134   // key(4) + len(2) + data(128)
+#define SDRING_PER_BLOCK    3     // 3 × 134 = 402, fits in 512
+#define SDRING_MAX_ENTRIES  (SDRING_BLOCKS * SDRING_PER_BLOCK)  // 768
+
+static uint32_t g_sdring_base = 0;   // SD block offset (set at init from card size)
+static uint32_t g_sdring_write = 0;
+static uint32_t g_sdring_read = 0;
+static uint32_t g_sdring_count = 0;
+
+static void sdring_init(uint32_t total_blocks) {
+    // Last 256 blocks of the SD card
+    g_sdring_base = total_blocks - SDRING_BLOCKS;
+    g_sdring_write = 0;
+    g_sdring_read = 0;
+    g_sdring_count = 0;
+}
+
+static void sdring_push(uint32_t key, const uint8_t *data, uint16_t len) {
+    if (g_sdring_count >= SDRING_MAX_ENTRIES || !g_sdring_base) return;
+    if (len > 128) len = 128;
+
+    uint32_t slot = g_sdring_write;
+    uint32_t blk = g_sdring_base + (slot / SDRING_PER_BLOCK);
+    uint32_t slot_in_blk = slot % SDRING_PER_BLOCK;
+
+    uint8_t buf[512];
+    // Read existing block (may have other entries)
+    if (slot_in_blk > 0) {
+        sd_read_block(blk, buf);
+    } else {
+        memset(buf, 0xFF, 512);
+    }
+
+    uint32_t off = slot_in_blk * SDRING_ENTRY_SIZE;
+    buf[off+0]=(uint8_t)key; buf[off+1]=(uint8_t)(key>>8);
+    buf[off+2]=(uint8_t)(key>>16); buf[off+3]=(uint8_t)(key>>24);
+    buf[off+4]=(uint8_t)len; buf[off+5]=(uint8_t)(len>>8);
+    memcpy(buf + off + 6, data, len);
+
+    sd_write_block(blk, buf);
+    g_sdring_write = (slot + 1) % SDRING_MAX_ENTRIES;
+    g_sdring_count++;
+}
+
+static bool sdring_pop(uint32_t *key, uint8_t *data, uint16_t *len) {
+    if (g_sdring_count == 0) return false;
+
+    uint32_t slot = g_sdring_read;
+    uint32_t blk = g_sdring_base + (slot / SDRING_PER_BLOCK);
+    uint32_t slot_in_blk = slot % SDRING_PER_BLOCK;
+
+    uint8_t buf[512];
+    if (!sd_read_block(blk, buf)) return false;
+
+    uint32_t off = slot_in_blk * SDRING_ENTRY_SIZE;
+    *key = buf[off] | ((uint32_t)buf[off+1]<<8) |
+           ((uint32_t)buf[off+2]<<16) | ((uint32_t)buf[off+3]<<24);
+    *len = buf[off+4] | ((uint16_t)buf[off+5]<<8);
+    if (*len > 128) *len = 128;
+    memcpy(data, buf + off + 6, *len);
+
+    g_sdring_read = (slot + 1) % SDRING_MAX_ENTRIES;
+    g_sdring_count--;
+    return true;
+}
 
 // ============================================================
 // Session table
@@ -201,7 +279,7 @@ typedef struct {
     pending_card_t cards[UDP_WAL_MAX_BATCH];
 } deferred_batch_t;
 
-#define DEFERRED_QUEUE_SIZE 4
+#define DEFERRED_QUEUE_SIZE 16
 static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 
 // ============================================================
@@ -294,18 +372,37 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     (void)arg; (void)pcb;
     if (!p || p->tot_len < UDP_WAL_HDR_SIZE) { if (p) pbuf_free(p); return; }
 
-    // Early drop: if all deferred slots full, free pbuf immediately
-    // to keep lwIP pbufs available for WiFi/HTTP
+    // Overflow: if SRAM deferred queue full and this is a BATCH_WRITE,
+    // parse cards directly into flash ring buffer instead of dropping
     {
         bool any_free = false;
         for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
             if (!g_deferred[i].active) { any_free = true; break; }
         }
-        // Peek at msg type — only drop BATCH_WRITE, allow HELLO/RESUME/READ
         uint8_t peek_type = 0;
         pbuf_copy_partial(p, &peek_type, 1, 14);
         if (!any_free && peek_type == UMSG_BATCH_WRITE) {
+            // Overflow to SD ring buffer
+            uint16_t plen = p->tot_len - UDP_WAL_HDR_SIZE;
+            uint8_t payload[UDP_WAL_MAX_PAYLOAD];
+            if (plen > sizeof(payload)) plen = sizeof(payload);
+            pbuf_copy_partial(p, payload, plen, UDP_WAL_HDR_SIZE);
             pbuf_free(p);
+
+            if (plen >= 4) {
+                uint8_t count = payload[2];
+                uint16_t off = 4;
+                for (uint8_t i = 0; i < count && off + 8 <= plen; i++) {
+                    uint16_t pack = rd16(payload + off);
+                    uint32_t card = rd32(payload + off + 2);
+                    uint16_t clen = rd16(payload + off + 6);
+                    off += 8;
+                    if (off + clen > plen || clen > 128) break;
+                    uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
+                    sdring_push(key, payload + off, clen);
+                    off += clen;
+                }
+            }
             return;
         }
     }
@@ -399,6 +496,16 @@ void udp_wal_poll(void) {
             db->active = false;
         }
     }
+
+    // Drain SD ring buffer — process up to 4 entries per poll
+    for (int r = 0; r < 4 && g_sdring_count > 0; r++) {
+        uint32_t key;
+        uint8_t data[128];
+        uint16_t len;
+        if (sdring_pop(&key, data, &len)) {
+            direct_put(key, data, len);
+        }
+    }
 }
 
 // ============================================================
@@ -407,8 +514,17 @@ void udp_wal_poll(void) {
 
 void udp_wal_init(wal_state_t *wal) {
     g_wal = wal;
-    g_epoch = now_ms();  // boot timestamp as epoch
+    g_epoch = now_ms();
     memset(g_sessions, 0, sizeof(g_sessions));
+    memset(g_deferred, 0, sizeof(g_deferred));
+
+    // Init SD ring buffer from SD card size
+    sd_info_t info;
+    if (sd_get_info(&info)) {
+        sdring_init(info.block_count);
+        printf("[udp] SD ring: %lu blocks @ %lu\n",
+               (unsigned long)SDRING_BLOCKS, (unsigned long)g_sdring_base);
+    }
 
     g_pcb = udp_new();
     if (!g_pcb) {
