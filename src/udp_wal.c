@@ -382,8 +382,6 @@ void udp_wal_poll(void) {
             }
             db->active = false;
         }
-
-        break;  // only process one batch per poll call
     }
 }
 
