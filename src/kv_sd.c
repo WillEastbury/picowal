@@ -115,7 +115,15 @@ static int32_t index_find(uint32_t key) {
 static bool index_insert(uint32_t key, uint32_t slot) {
     int32_t pos = index_find(key);
     if (pos >= 0) { g_slots[pos] = slot; return true; }
-    if (g_index_count >= KVSD_INDEX_MAX) return false;
+    if (g_index_count >= KVSD_INDEX_MAX) {
+        // Evict first entry (lowest key) — still in flash index tier
+        memmove(&g_index[0], &g_index[1], (g_index_count-1)*4);
+        memmove(&g_slots[0], &g_slots[1], (g_index_count-1)*4);
+        g_index_count--;
+        // Recalculate insertion point after eviction
+        pos = index_find(key);
+        if (pos >= 0) { g_slots[pos] = slot; return true; }
+    }
     uint32_t at = (uint32_t)(-(pos + 1));
     if (at < g_index_count) {
         memmove(&g_index[at+1], &g_index[at], (g_index_count-at)*4);
@@ -255,9 +263,17 @@ void kvsd_init(void) {
     g_index_count = 0;
     g_ready = false;
 
-    // Scan flash index tier on boot
-    fidx_count_entries();
-    web_log("[kvsd] Flash index: %lu entries\n", (unsigned long)g_fidx_count);
+    // Erase flash index tier on boot — rebuilt from SRAM on flush.
+    // Prevents stale entries from poisoning lookups after wipe/OTA.
+    {
+        uint32_t irq = save_and_disable_interrupts();
+        for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
+            flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
+        }
+        restore_interrupts(irq);
+    }
+    g_fidx_count = 0;
+    web_log("[kvsd] Flash index cleared (rebuilt on flush)\n");
 
     sd_info_t info;
     if (!sd_get_info(&info)) { web_log("[kvsd] SD not ready\n"); return; }
@@ -346,14 +362,45 @@ void kvsd_init(void) {
 
 static int32_t alloc_slot(void) {
     uint32_t hint = g_sb.next_free_hint;
+    uint8_t buf[512];
+    uint32_t cached_blk = UINT32_MAX;  // no block cached
+
     for (uint32_t tries = 0; tries < g_sb.max_cards; tries++) {
         uint32_t slot = (hint + tries) % g_sb.max_cards;
-        if (!bitmap_get(slot)) {
+        uint32_t blk = g_sb.bitmap_start + (slot / 4096);
+        uint32_t byte_off = (slot % 4096) / 8;
+        uint8_t bit = 1u << (slot % 8);
+
+        // Cache one bitmap block — scan 4096 slots per SD read
+        if (blk != cached_blk) {
+            if (!sd_read_block(blk, buf)) continue;
+            cached_blk = blk;
+
+            // Fast scan: find first zero byte in this block
+            uint32_t base_slot = (slot / 4096) * 4096;
+            for (uint32_t b = 0; b < 512; b++) {
+                if (buf[b] == 0xFF) continue;
+                for (uint8_t bi = 0; bi < 8; bi++) {
+                    if (!(buf[b] & (1u << bi))) {
+                        uint32_t free_slot = base_slot + b * 8 + bi;
+                        if (free_slot < g_sb.max_cards) {
+                            g_sb.next_free_hint = (free_slot + 1) % g_sb.max_cards;
+                            return (int32_t)free_slot;
+                        }
+                    }
+                }
+            }
+            // Entire block full — skip to next block
+            tries += 4095 - (slot % 4096);
+            continue;
+        }
+
+        if (!(buf[byte_off] & bit)) {
             g_sb.next_free_hint = (slot + 1) % g_sb.max_cards;
             return (int32_t)slot;
         }
     }
-    return -1; // full
+    return -1;
 }
 
 // 3-tier lookup: SRAM → Flash (XIP) → not found
