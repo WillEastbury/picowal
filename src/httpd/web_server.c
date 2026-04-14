@@ -794,7 +794,7 @@ static uint16_t build_nav(char *buf, uint16_t bufsize, const char *req) {
             }
         }
 
-        if (user_auth_is_admin(&session))
+        if (user_auth_is_admin(&session) && n < (int)bufsize - 300)
             n += snprintf(buf + n, bufsize - n,
                 "<div class=dropdown><span>Admin &#x25BE;</span><div class=dropdown-menu>"
                 "<a href=/admin>Users</a>"
@@ -804,7 +804,8 @@ static uint16_t build_nav(char *buf, uint16_t bufsize, const char *req) {
                 "<a href='/admin/ram'>RAM</a>"
                 "<a href=/update>OTA Update</a>"
                 "</div></div>");
-        n += snprintf(buf + n, bufsize - n, "<a href=/logout>Logout</a>");
+        if (n < (int)bufsize - 40)
+            n += snprintf(buf + n, bufsize - n, "<a href=/logout>Logout</a>");
     }
     return (uint16_t)n;
 }

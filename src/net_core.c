@@ -656,10 +656,17 @@ void net_core_run(wal_state_t *wal) {
     cyw43_arch_enable_sta_mode();
 
     printf("[net] Connecting to WiFi '%s'...\n", WIFI_SSID);
-    int werr = cyw43_arch_wifi_connect_timeout_ms(
-        WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, WIFI_TIMEOUT_MS);
+    int werr;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        werr = cyw43_arch_wifi_connect_timeout_ms(
+            WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, WIFI_TIMEOUT_MS);
+        if (!werr) break;
+        printf("[net] WiFi attempt %d failed (err %d), retrying...\n", attempt + 1, werr);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); sleep_ms(500);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); sleep_ms(500);
+    }
     if (werr) {
-        printf("[net] WiFi failed (err %d)\n", werr);
+        printf("[net] WiFi failed after 5 attempts\n");
         while (1) {
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); sleep_ms(200);
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); sleep_ms(200);

@@ -374,7 +374,11 @@ void kvsd_init(void) {
                                    ((uint32_t)buf[off+2]<<16) | ((uint32_t)buf[off+3]<<24);
                     uint32_t slot = (uint32_t)buf[off+4] | ((uint32_t)buf[off+5]<<8) |
                                     ((uint32_t)buf[off+6]<<16) | ((uint32_t)buf[off+7]<<24);
-                    if (key == 0xFFFFFFFF) break;
+                    if (key == 0xFFFFFFFF || key == 0) break;
+                    // Validate slot is within data region
+                    if (slot >= g_sb.max_cards) break;
+                    // Verify sorted order
+                    if (loaded > 0 && key <= g_index[loaded - 1]) break;
                     g_index[loaded] = key;
                     g_slots[loaded] = slot;
                     loaded++;
@@ -526,12 +530,15 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
 
     if (!write_card(new_slot, card)) return false;
 
-    bitmap_set(new_slot, true);
+    if (!bitmap_set(new_slot, true)) {
+        // SD bitmap write failed — card written but not indexed, will be orphaned
+        return false;
+    }
     bool is_new = (old_slot < 0);
     index_insert(key, new_slot);
 
     if (!is_new && (uint32_t)old_slot != new_slot) {
-        bitmap_set((uint32_t)old_slot, false);
+        bitmap_set((uint32_t)old_slot, false);  // best-effort free old slot
     }
     if (is_new) g_sb.total_cards++;
     g_sb.dirty = 1;
