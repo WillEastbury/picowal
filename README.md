@@ -236,33 +236,249 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 - **16GB SDHC** — shared SPI1 bus (GP10=SCK, GP11=MOSI, GP12=MISO, GP22=CS)
 - **Static IP**: 192.168.222.223/16, gateway 192.168.0.1
 
-## Project structure
+## Source files — complete reference
+
+### Boot & orchestration
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/main.c` | 60 | Entry point. Inits LCD, touch, SD, flash KV, SD KV, DMA. Launches Core 1 (`wal_engine_run`), then enters Core 0 network loop (`net_core_run`). |
+| `src/wal_defs.h` | 145 | Shared WAL structures: `wal_state_t`, request/response rings, slot pool (32 × 512B), FIFO helpers, `fifo_push_timeout()`. Owned by both cores. |
+| `src/wal_fence.h` | 9 | `wal_dmb()` — memory barrier for cross-core visibility. |
+
+### Core 0 — network & UI
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/net_core.c` | 659 | Core 0 main loop: WiFi connect (5× retry with backoff), static IP, HTTP init, UDP WAL init, hardware watchdog (8s), poll loop (cyw43 + TCP drain + UDP + LCD + SD flush). Also contains the raw TCP WAL server (port 8001) with HMAC-SHA256 challenge/response auth. Core 1 heartbeat stall detection. |
+| `src/net_core.h` | 51 | WiFi credentials, PSK, static IP config, WAL port constants. |
+| `src/httpd/web_server.c` | 3464 | **Largest file.** Full SSR HTTP server: connection pool (6 conns), request parser, route dispatcher, HTML templating, CSS generation, app.js serving, cookie auth + PSK fallback, RBAC enforcement. Routes: card CRUD, batch writes, query UI, schema editor, user admin, OTA upload, admin wipe/reboot, debug log, notes. |
+| `src/httpd/web_server.h` | 16 | Exports: `web_server_init()`, `web_server_recent_activity()`, `web_log()`, cardinality helpers. |
+| `src/udp_wal.c` | 491 | UDP WAL protocol server (port 8002). Session management (8 sessions, epoch-based), HELLO/RESUME handshake, batch write (up to 16 cards), single-card read, 4 durability levels, bitmap ACK. Optional ChaCha20-Poly1305 encryption. Deferred queue (16 slots) + raw ring (48 overflow) for backpressure. |
+| `src/udp_wal.h` | 65 | Protocol constants, message types, durability flags. |
+
+### Core 1 — WAL engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/wal_engine.c` | 373 | Core 1 consumer: drains request ring via multicore FIFO, dispatches APPEND/READ/KV_GET/KV_PUT/DELETE/RANGE/RECORD_COUNT ops to `kv_flash`. Runs background compaction when idle. OTA halt support (`__wfe()` spin). |
+| `src/wal_engine.h` | 6 | Exports: `wal_engine_run()`. |
+| `src/wal_dma.c` | 60 | DMA copy helper using hardware DMA channel. `wal_dma_copy()` for fast bulk memory moves. |
+| `src/wal_dma.h` | 25 | DMA init/copy/wait/busy API. |
+
+### Storage — KV stores
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/kv_flash.c` | 853 | **Flash-backed KV store** for packs 0–1 (schemas + users). Page-based storage with V2 headers (sequence + CRC), mutation group commits, sorted SRAM index (binary search), compaction, deadlog recovery. Interrupt-safe flash writes. |
+| `src/kv_flash.h` | 101 | Full KV API: `kv_init/put/get/get_copy/delete/exists/range/stats/compact_step/wipe`. |
+| `src/kv_sd.c` | 623 | **SD-backed KV store** for packs 2+. Copy-on-write (COW) slot allocation with bitmap, 3-tier index (SRAM → Flash XIP → SD keylist), sorted merge range queries. Flash index at 0xC0000 with write-order hardening. |
+| `src/kv_sd.h` | 112 | SD KV API: `kvsd_init/put/get/get_copy/delete/exists/range/flush/dirty/stats/ready`. Defines FIDX region, KVSD_INDEX_MAX (18000). |
+| `src/kv_store.h` | 74 | **Unified routing layer.** Inline functions route by pack ordinal: packs 0–1 → `kv_flash`, packs 2+ → `kv_sd` (when ready, else flash fallback). Used by web_server, udp_wal, query engine. |
+| `src/storage.c` | 603 | Experimental packed/compressed storage engine with heatshrink. Superblock, block allocator, pack summaries, log writes. Currently compiled but not active in HTTP routes. |
+| `src/storage.h` | 93 | Storage engine API with compression support. |
+| `src/field_index.c` | 203 | Hash-based field-value index for O(1) lookups on SD. 4096-bucket hash table, chained entries in SD blocks. Used by `storage.c`. |
+| `src/field_index.h` | 48 | Field index API: `fidx_init/insert/search/search_prefix/remove_card`. |
+
+### Metadata & schema
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/metadata_dict.c` | 231 | Schema catalog: caches pack definitions from Pack 0, provides type/field/schema lookups. Reload from flash on boot. |
+| `src/metadata_dict.h` | 60 | Type/field/schema structs, catalog API. |
+
+### Auth & security
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/user_auth.c` | 736 | User management: session table (4 slots), login/logout, SHA-256 password hashing (salted), RBAC (readPacks/writePacks/deletePacks per user), admin detection, password change, user CRUD. Seeds default admin + reference data schemas on first boot. |
+| `src/user_auth.h` | 107 | Auth API: `user_auth_init/login/logout/check/can_read/can_write/can_delete/is_admin/create_user/change_password/seed_schema`. |
+| `src/crypto.c` | 299 | **Standalone crypto** (no mbedTLS for ciphers): ChaCha20 stream cipher, Poly1305 MAC, AEAD encrypt/decrypt, HKDF-SHA256 key derivation. Used by UDP WAL encryption. |
+| `src/crypto.h` | 36 | Crypto primitives API. |
+| `src/key_store.c` | 66 | PSK flash persistence (load/generate/format). Not currently in build target. |
+| `src/key_store.h` | 12 | PSK store API. |
+
+### Query engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/query.c` | 820 | Full query engine: `S:/F:/W:` parser, cost-based optimizer (cardinality estimates, predicate reordering, fanout stats), executor with cross-pack joins, aggregates (SUM/AVG/MIN/MAX/COUNT), pipe-delimited output. |
+| `src/query.h` | 87 | Query structs, parse/execute API. |
+
+### Configuration headers
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/lwipopts.h` | 44 | lwIP tuning: 20 TCP PCBs, 8 UDP PCBs, 2s TIME_WAIT, 41KB heap, keepalive on. |
+| `src/mbedtls_config.h` | 10 | Minimal mbedTLS: SHA-256 only (for password hashing + HKDF). |
+| `src/hs_config.h` | 10 | Heatshrink compression: window=8, lookahead=4. |
+
+### Hardware drivers
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `drivers/lcd/ili9488.c` | 212 | ILI9488 480×320 LCD driver over SPI0. Init sequence, pixel/rect/char/string drawing, backlight PWM. Shares bus with nothing (dedicated SPI0). |
+| `drivers/lcd/ili9488.h` | 33 | LCD API + color constants. |
+| `drivers/sd/sd_card.c` | 276 | SD card SPI driver on SPI1. Bit-bang bus wakeup (required after LCD init), CMD0/CMD8/ACMD41 with timeout, single/multi block read/write. SPI transfer has 50ms timeout guard. All read+write functions `__no_inline_not_in_flash_func` for OTA safety. |
+| `drivers/sd/sd_card.h` | 35 | SD API: `sd_init/read_block/read_blocks/write_block/write_blocks/get_info/get_debug`. Pin definitions. |
+| `drivers/touch/xpt2046.c` | 46 | XPT2046 resistive touch over SPI0 (shared with LCD). 3-sample averaging. |
+| `drivers/touch/xpt2046.h` | 16 | Touch API: `touch_init/read`. |
+
+### Libraries
+
+| Directory | Purpose |
+|-----------|---------|
+| `lib/heatshrink/` | LZSS compression library (encoder + decoder). Used by `storage.c`. |
+
+### Python tools
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `ota_deploy.py` | 132 | OTA firmware uploader — login, begin, chunk (1KB), commit, verify. |
+| `bench_run.py` | 270 | HTTP benchmark — login, writes, reads, queries, mixed load. |
+| `udp_client.py` | 296 | UDP WAL protocol client — HELLO, batch write, single read, encryption. |
+| `stress_test.py` | 335 | Mixed load stress test — 5 UDP writers + 1 HTTP query thread. |
+| `tcp_test.py` | 273 | Raw TCP WAL protocol tester — HMAC auth, NOOP/APPEND/READ. |
+
+---
+
+## Data flow
+
+### HTTP request → KV store → response
 
 ```
-├── CMakeLists.txt
-├── ota_deploy.py          — OTA deployment script
-├── src/
-│   ├── main.c             — Boot sequence, core launch
-│   ├── net_core.c         — WiFi, poll loop, LCD dashboard
-│   ├── kv_flash.c/.h      — Flash-backed KV store
-│   ├── kv_sd.c/.h         — SD-backed KV store
-│   ├── kv_store.h         — Unified routing (flash vs SD)
-│   ├── storage.c/.h       — Packed compressed storage engine
-│   ├── field_index.c/.h   — O(1) hash-based field value index
-│   ├── query.c/.h         — Query parser, optimizer, executor
-│   ├── user_auth.c/.h     — Auth, RBAC, schema seeding
-│   ├── hs_config.h        — Heatshrink compression config
-│   ├── mbedtls_config.h   — Minimal mbedtls (SHA-256 only)
-│   └── httpd/
-│       ├── web_server.c   — All HTTP routes, SSR, OTA
-│       └── web_server.h
-├── drivers/
-│   ├── lcd/ili9488.c      — ILI9488 LCD driver
-│   ├── touch/xpt2046.c    — XPT2046 touch driver
-│   └── sd/sd_card.c/.h    — SD card SPI driver
-├── lib/heatshrink/        — Compression library
-└── docs/
-    └── FPGA_DESIGN.md     — FPGA KV engine design doc
+Browser ──HTTP──► lwIP TCP ──► web_server.c route dispatcher
+                                    │
+                         ┌──────────┴──────────┐
+                         │ Cookie/PSK auth      │
+                         │ RBAC check           │
+                         └──────────┬──────────┘
+                                    │
+                              kv_store.h router
+                              ┌─────┴─────┐
+                       Pack 0-1│           │Pack 2+
+                         kv_flash.c    kv_sd.c
+                              │           │
+                         4MB Flash    16GB SD Card
+```
+
+### UDP WAL → KV store
+
+```
+UDP datagram ──► udp_wal.c recv callback
+                      │
+              ┌───────┴────────┐
+              │ Session lookup  │
+              │ Decrypt (opt)   │
+              │ Validate batch  │
+              └───────┬────────┘
+                      │
+                 Deferred queue (16 slots)
+                 Raw ring overflow (48 slots)
+                      │
+                 udp_wal_poll() ── one card per cycle ──► kv_store.h
+```
+
+### TCP WAL → flash KV (Core 1)
+
+```
+TCP connect ──► net_core.c ──► HMAC challenge/response
+                                    │
+                            wal_state_t request ring
+                                    │
+                            ──FIFO signal──►
+                                    │
+                            Core 1: wal_engine.c
+                                    │
+                              kv_flash.c (packs 0-1 only)
+```
+
+### OTA firmware update
+
+```
+POST /update/begin  ──► Clear SD staging area (blocks 1-1024)
+POST /update/chunk  ──► Write 1KB chunks to SD
+POST /update/commit ──► Halt Core 1 ──► Copy SD → SRAM → Flash
+                        (sector-0-last write order)
+                        ──► watchdog_reboot()
+```
+
+### Boot sequence
+
+```
+main.c
+  │
+  ├── lcd_init() + touch_init()      (SPI0)
+  ├── sd_init()                       (SPI1, bit-bang wakeup)
+  ├── kv_init()                       (flash scan + recovery)
+  ├── kvsd_init()                     (SD superblock + keylist)
+  ├── metadata_reload_cache()         (schema catalog)
+  ├── user_auth_init()                (seed admin if first boot)
+  ├── wal_dma_init()                  (DMA channel)
+  ├── multicore_launch_core1()        (wal_engine_run)
+  └── net_core_run()                  (WiFi + poll loop, never returns)
+```
+
+---
+
+## Memory layout
+
+### Flash (4MB)
+
+| Region | Offset | Size | Purpose |
+|--------|--------|------|---------|
+| Firmware | 0x000000 | ~504KB | Application code + read-only data |
+| Flash index (FIDX) | 0x0C0000 | 64KB | SD key index cache (write-order hardened) |
+| KV region | 0x100000+ | ~3MB | Flash KV pages (V2 headers, mutation groups) |
+
+### SRAM (520KB total, ~348KB BSS)
+
+| Component | Size | Notes |
+|-----------|------|-------|
+| g_index[] (18K keys) | 72KB | Sorted SD key index |
+| g_slots[] (18K slots) | 72KB | Parallel slot array |
+| WAL slot pool (32 × 512B) | 16KB | Request/response ring |
+| UDP deferred queue | ~35KB | 16 batches × 16 cards × 134B |
+| UDP raw ring | 24KB | 48 overflow datagram slots |
+| lwIP heap + pbufs | 41KB | Network buffers |
+| HTTP conn buffers | 24KB | 6 connections × 4KB |
+| OTA chunk buffer | 16KB | SD → flash staging |
+| Stack + heap | ~60KB | Both cores |
+| **Free** | **~172KB** | Available for future use |
+
+### SD card (16GB, raw block access)
+
+| Region | Blocks | Purpose |
+|--------|--------|---------|
+| Superblock | 0 | Magic, version, counts, keylist pointer |
+| OTA staging | 1–1024 | 512KB firmware staging area |
+| Bitmap | 1025–1056 | 32 blocks × 4096 bits = 131K slot tracker |
+| Keylist | 1057–1312 | 256 blocks × 64 entries = 16K key+slot pairs |
+| Data slots | 1313+ | 4 blocks per card (2KB), COW allocation |
+
+---
+
+## Interaction map
+
+```
+main.c ──────────► net_core.c (Core 0)
+    │                  │
+    │                  ├── web_server.c ──► kv_store.h ──► kv_flash.c / kv_sd.c
+    │                  │       │                               │          │
+    │                  │       ├── query.c ◄── metadata_dict.c │          │
+    │                  │       ├── user_auth.c                 │          │
+    │                  │       └── storage.c ◄── field_index.c │          │
+    │                  │                                       │          │
+    │                  ├── udp_wal.c ──► crypto.c              │          │
+    │                  │       └──────► kv_store.h ────────────┘          │
+    │                  │                                                  │
+    │                  └── ili9488.c (LCD dashboard)                      │
+    │                                                                     │
+    └────────────► wal_engine.c (Core 1) ──► kv_flash.c                  │
+                        │                                                 │
+                        └── wal_dma.c                                    │
+                                                                         │
+                   sd_card.c ◄───────────────────────────────────────────┘
 ```
 
 ## Build
@@ -276,6 +492,8 @@ cmake --build build
 ```
 
 Output: `build/pico2w_lcd.uf2` (BOOTSEL) and `build/pico2w_lcd.bin` (OTA).
+
+**Build stats:** ~504KB text, ~348KB BSS, 14 source files + 3 drivers + heatshrink lib.
 
 ## License
 
