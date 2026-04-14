@@ -2,6 +2,8 @@
 #include "wal_defs.h"
 #include "kv_sd.h"
 #include "sd_card.h"
+#include "crypto.h"
+#include "net_core.h"
 
 #include "pico/stdlib.h"
 #include "pico/rand.h"
@@ -27,6 +29,10 @@ typedef struct {
     uint32_t  last_seq;
     uint32_t  last_seen_ms;
     bool      active;
+    bool      encrypted;     // true after key exchange
+    uint8_t   key[32];       // derived session key (ChaCha20-Poly1305)
+    uint8_t   client_random[16];
+    uint8_t   server_random[16];
 } udp_session_t;
 
 static udp_session_t g_sessions[UDP_WAL_MAX_SESSIONS];
@@ -153,15 +159,32 @@ static void handle_hello(const ip_addr_t *addr, uint16_t port,
     s->last_seen_ms = now_ms();
     s->active = true;
 
+    // Store client random
+    memcpy(s->client_random, payload, 16);
+
+    // Generate server random
+    for (int i = 0; i < 16; i++)
+        s->server_random[i] = (uint8_t)(get_rand_32() >> ((i%4)*8));
+
+    // Derive session key: HKDF(PSK, client_random || server_random || epoch)
+    {
+        static const uint8_t psk[] = AUTH_PSK;
+        uint8_t ikm[36]; // client_random(16) + server_random(16) + epoch(4)
+        memcpy(ikm, s->client_random, 16);
+        memcpy(ikm + 16, s->server_random, 16);
+        wr32(ikm + 32, g_epoch);
+        hkdf_sha256(s->key, 32, ikm, 36, psk, sizeof(psk),
+                     (const uint8_t *)"picowal-udp", 11);
+        s->encrypted = true;
+    }
+
     // Response: [session_id:8][server_random:16][epoch:4]
     uint8_t resp[28];
     wr64(resp, s->session_id);
-    for (int i = 0; i < 16; i++) resp[8+i] = (uint8_t)(get_rand_32() >> ((i%4)*8));
+    memcpy(resp + 8, s->server_random, 16);
     wr32(resp + 24, g_epoch);
 
     udp_send_to(addr, port, s->session_id, UMSG_HELLO_OK, resp, 28);
-    printf("[udp] HELLO → session %016llx from %s:%d\n",
-           (unsigned long long)s->session_id, ipaddr_ntoa(addr), port);
 }
 
 // ============================================================
