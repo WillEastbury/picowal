@@ -586,14 +586,14 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
 }
 
 void kv_wipe(void) {
-    // Erase entire KV region + deadlog
+    uint32_t irq = save_and_disable_interrupts();
     for (uint32_t off = KV_REGION_START; off < KV_DEADLOG_END; off += KV_SECTOR_SIZE) {
         flash_range_erase(off, KV_SECTOR_SIZE);
     }
+    restore_interrupts(irq);
     g_count = 0;
     g_write_page = 0;
     g_write_off = sizeof(kv_page_hdr_t);
-    // Reset sequence counters so the next boot starts fresh
     g_page_sequence   = 0;
     g_mutation_group  = 0;
 }
