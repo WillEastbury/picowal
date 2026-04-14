@@ -283,6 +283,33 @@ typedef struct {
 static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 
 // ============================================================
+// Raw datagram ring — fast SRAM buffer for callback overflow
+// Just memcpy, no parsing or SD I/O in callback context
+// ============================================================
+
+#define RAW_RING_SIZE  32
+#define RAW_RING_MTU   512
+static uint8_t  g_raw_ring[RAW_RING_SIZE][RAW_RING_MTU];
+static uint16_t g_raw_ring_len[RAW_RING_SIZE];
+static ip_addr_t g_raw_ring_addr[RAW_RING_SIZE];
+static uint16_t g_raw_ring_port[RAW_RING_SIZE];
+static volatile uint32_t g_raw_write = 0;
+static volatile uint32_t g_raw_read = 0;
+
+static bool raw_ring_push(const uint8_t *data, uint16_t len,
+                          const ip_addr_t *addr, uint16_t port) {
+    uint32_t next = (g_raw_write + 1) % RAW_RING_SIZE;
+    if (next == g_raw_read) return false;  // full
+    uint16_t clen = len > RAW_RING_MTU ? RAW_RING_MTU : len;
+    memcpy(g_raw_ring[g_raw_write], data, clen);
+    g_raw_ring_len[g_raw_write] = clen;
+    g_raw_ring_addr[g_raw_write] = *addr;
+    g_raw_ring_port[g_raw_write] = port;
+    g_raw_write = next;
+    return true;
+}
+
+// ============================================================
 // Handle BATCH_WRITE — parse and queue, don't do SD I/O
 // ============================================================
 
@@ -382,27 +409,14 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         uint8_t peek_type = 0;
         pbuf_copy_partial(p, &peek_type, 1, 14);
         if (!any_free && peek_type == UMSG_BATCH_WRITE) {
-            // Overflow to SD ring buffer
-            uint16_t plen = p->tot_len - UDP_WAL_HDR_SIZE;
-            uint8_t payload[UDP_WAL_MAX_PAYLOAD];
-            if (plen > sizeof(payload)) plen = sizeof(payload);
-            pbuf_copy_partial(p, payload, plen, UDP_WAL_HDR_SIZE);
+            // SRAM deferred queue full — push raw datagram to SRAM ring
+            // (fast memcpy, parsed + written to SD in poll loop)
+            uint16_t total = p->tot_len;
+            uint8_t raw[RAW_RING_MTU];
+            uint16_t clen = total > RAW_RING_MTU ? RAW_RING_MTU : total;
+            pbuf_copy_partial(p, raw, clen, 0);
             pbuf_free(p);
-
-            if (plen >= 4) {
-                uint8_t count = payload[2];
-                uint16_t off = 4;
-                for (uint8_t i = 0; i < count && off + 8 <= plen; i++) {
-                    uint16_t pack = rd16(payload + off);
-                    uint32_t card = rd32(payload + off + 2);
-                    uint16_t clen = rd16(payload + off + 6);
-                    off += 8;
-                    if (off + clen > plen || clen > 128) break;
-                    uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
-                    sdring_push(key, payload + off, clen);
-                    off += clen;
-                }
-            }
+            raw_ring_push(raw, clen, addr, port);
             return;
         }
     }
@@ -465,14 +479,13 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 // ============================================================
 
 void udp_wal_poll(void) {
-    // Process one entire deferred batch per poll call.
-    // Each batch is up to 32 cards — ~10ms of SD I/O.
+    // Process ONE card from the first active deferred batch.
+    // One SD write per poll keeps cyw43_arch_poll() responsive.
     for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
         deferred_batch_t *db = &g_deferred[i];
         if (!db->active) continue;
 
-        // Write ALL remaining cards in this batch
-        while (db->next < db->count) {
+        if (db->next < db->count) {
             pending_card_t *c = &db->cards[db->next];
             if (direct_put(c->key, c->data, c->len)) {
                 db->bitmap |= (1u << db->next);
@@ -481,24 +494,48 @@ void udp_wal_poll(void) {
         }
 
         if (db->next >= db->count) {
-            // Batch complete — send ACK
             if (db->durability >= UDUR_ACK_QUEUED) {
                 uint8_t ack[9];
                 wr16(ack, db->batch_seq);
                 ack[2] = db->count;
                 wr32(ack + 3, db->bitmap);
                 wr16(ack + 7, 0);
-
                 uint8_t msg_type = (db->durability >= UDUR_ACK_DURABLE) ?
                     UMSG_BATCH_COMMITTED : UMSG_BATCH_QUEUED;
                 udp_send_to(&db->addr, db->port, db->session_id, msg_type, ack, 9);
             }
             db->active = false;
         }
+        return;  // one card per poll
     }
 
-    // Drain SD ring buffer — process up to 4 entries per poll
-    for (int r = 0; r < 4 && g_sdring_count > 0; r++) {
+    // No deferred work — drain one raw ring entry
+    if (g_raw_read != g_raw_write) {
+        uint8_t *raw = g_raw_ring[g_raw_read];
+        uint16_t rlen = g_raw_ring_len[g_raw_read];
+        g_raw_read = (g_raw_read + 1) % RAW_RING_SIZE;
+
+        if (rlen >= UDP_WAL_HDR_SIZE + 8) {
+            uint8_t *payload = raw + UDP_WAL_HDR_SIZE;
+            uint16_t plen = rlen - UDP_WAL_HDR_SIZE;
+            uint8_t count = payload[2];
+            uint16_t off = 4;
+            for (uint8_t ci = 0; ci < count && off + 8 <= plen; ci++) {
+                uint16_t pack = rd16(payload + off);
+                uint32_t card = rd32(payload + off + 2);
+                uint16_t clen = rd16(payload + off + 6);
+                off += 8;
+                if (off + clen > plen || clen > 128) break;
+                uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
+                direct_put(key, payload + off, clen);
+                off += clen;
+            }
+        }
+        return;
+    }
+
+    // No raw ring work — drain one SD ring entry
+    if (g_sdring_count > 0) {
         uint32_t key;
         uint8_t data[128];
         uint16_t len;

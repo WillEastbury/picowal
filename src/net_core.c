@@ -713,6 +713,7 @@ void net_core_run(wal_state_t *wal) {
                 lcd_draw_string(0, 0, hb_on ? "*" : " ", COLOR_GREEN, COLOR_BLACK, 2);
             }
         }
-        sleep_ms(1);
+        // Tight spin — no sleep. SD writes are the natural throttle.
+        // cyw43_arch_poll() yields to WiFi driver as needed.
     }
 }
