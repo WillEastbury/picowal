@@ -1,6 +1,8 @@
 #include "sd_card.h"
 
 #include "hardware/gpio.h"
+#include "hardware/spi.h"
+#include "hardware/timer.h"
 #include "pico/stdlib.h"
 #include "httpd/web_server.h"
 #include <stdio.h>
@@ -11,7 +13,6 @@
 // GP5=CLK, GP18=MOSI, GP19=MISO, GP22=CS (manual)
 // ============================================================
 
-#include "hardware/spi.h"
 #define SD_SPI spi1
 static bool g_sd_ready = false;
 static bool g_sd_sdhc = false;
@@ -41,8 +42,16 @@ static inline void cs_deselect(void) {
 
 // Send one byte, receive one byte simultaneously
 // Placed in SRAM for OTA flash-write safety
+// Timeout: 50ms per byte — if SPI locks up, return 0xFF (bus idle)
+#define SPI_BYTE_TIMEOUT_US 50000
+
 static uint8_t __no_inline_not_in_flash_func(spi_transfer)(uint8_t tx) {
-    uint8_t rx;
+    uint8_t rx = 0xFF;
+    // Check SPI is writable before blocking — timeout if stuck
+    uint64_t deadline = time_us_64() + SPI_BYTE_TIMEOUT_US;
+    while (!spi_is_writable(SD_SPI)) {
+        if (time_us_64() > deadline) return 0xFF;
+    }
     spi_write_read_blocking(SD_SPI, &tx, &rx, 1);
     return rx;
 }
