@@ -14,6 +14,7 @@
 #include "cyw43.h"
 #include "pico/multicore.h"
 #include "pico/rand.h"
+#include "hardware/watchdog.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
 #include "lwip/dns.h"
@@ -701,14 +702,20 @@ void net_core_run(wal_state_t *wal) {
     // Start UDP WAL listener on port 8002
     udp_wal_init(g_ctx.wal);
 
+    // Enable hardware watchdog — 8s timeout, reboot if poll loop stalls
+    watchdog_enable(8000, true);
+
     // Main poll loop
     uint32_t hb_last = 0;
     bool hb_on = false;
     bool wal_tcp_started = false;
     uint32_t poll_count = 0;
+    uint32_t core1_hb_prev = 0;
+    uint32_t core1_stall_count = 0;
     while (true) {
         wal->core0_heartbeat++;
         poll_count++;
+        watchdog_update();   // feed hardware watchdog every poll cycle
         cyw43_arch_poll();
 
         // Lazy-start WAL TCP listener after WiFi is stable (~100 poll cycles)
@@ -738,6 +745,17 @@ void net_core_run(wal_state_t *wal) {
                 lcd_draw_string(0, 0, hb_on ? "*" : " ", COLOR_GREEN, COLOR_BLACK, 2);
                 // Flush SD index at most once per second (was every poll cycle)
                 if (kvsd_dirty()) kvsd_flush();
+                // Core 1 stall detection (skip during OTA halt)
+                if (!wal->ota_halt_core1) {
+                    if (wal->core1_heartbeat == core1_hb_prev) {
+                        core1_stall_count++;
+                        if (core1_stall_count >= 5)
+                            printf("[net] WARN: Core 1 stalled for %us\n", core1_stall_count);
+                    } else {
+                        core1_stall_count = 0;
+                    }
+                    core1_hb_prev = wal->core1_heartbeat;
+                }
             }
         }
         // Tight spin — no sleep. SD writes are the natural throttle.
