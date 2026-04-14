@@ -179,7 +179,33 @@ static void handle_resume(const ip_addr_t *addr, uint16_t port,
 }
 
 // ============================================================
-// Handle BATCH_WRITE
+// Deferred write queue — callback stashes, poll loop executes
+// ============================================================
+
+typedef struct {
+    uint32_t key;
+    uint16_t len;
+    uint8_t  data[512];
+} pending_card_t;
+
+typedef struct {
+    bool       active;
+    uint64_t   session_id;
+    ip_addr_t  addr;
+    uint16_t   port;
+    uint16_t   batch_seq;
+    uint8_t    count;
+    uint8_t    durability;
+    uint8_t    next;          // next card to write
+    uint32_t   bitmap;        // result bitmap
+    pending_card_t cards[UDP_WAL_MAX_BATCH];
+} deferred_batch_t;
+
+#define DEFERRED_QUEUE_SIZE 4
+static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
+
+// ============================================================
+// Handle BATCH_WRITE — parse and queue, don't do SD I/O
 // ============================================================
 
 static void handle_batch_write(udp_session_t *s,
@@ -190,37 +216,42 @@ static void handle_batch_write(udp_session_t *s,
     uint8_t durability = payload[3];
     if (count == 0 || count > UDP_WAL_MAX_BATCH) return;
 
-    // Parse cards and write directly (synchronous, Core 0)
-    uint32_t bitmap = 0;
-    uint16_t off = 4;
+    // Find free deferred slot
+    deferred_batch_t *db = NULL;
+    for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
+        if (!g_deferred[i].active) { db = &g_deferred[i]; break; }
+    }
+    if (!db) {
+        // Backpressure — all slots full
+        uint8_t bp[1] = { DEFERRED_QUEUE_SIZE };
+        udp_send_to(&s->addr, s->port, s->session_id, UMSG_BACKPRESSURE, bp, 1);
+        return;
+    }
 
+    db->active = true;
+    db->session_id = s->session_id;
+    db->addr = s->addr;
+    db->port = s->port;
+    db->batch_seq = batch_seq;
+    db->durability = durability;
+    db->next = 0;
+    db->bitmap = 0;
+    db->count = 0;
+
+    // Parse cards into the deferred batch
+    uint16_t off = 4;
     for (uint8_t i = 0; i < count && off + 8 <= len; i++) {
         uint16_t pack = rd16(payload + off);
         uint32_t card = rd32(payload + off + 2);
         uint16_t clen = rd16(payload + off + 6);
         off += 8;
-        if (off + clen > len) break;
+        if (off + clen > len || clen > 512) break;
 
-        uint32_t key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
-        if (direct_put(key, payload + off, clen)) {
-            bitmap |= (1u << i);
-        }
+        db->cards[i].key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
+        db->cards[i].len = clen;
+        memcpy(db->cards[i].data, payload + off, clen);
+        db->count++;
         off += clen;
-    }
-
-    // Send ACK based on durability
-    // Since writes are synchronous, QUEUED and COMMITTED are the same
-    if (durability >= UDUR_ACK_QUEUED) {
-        uint8_t ack[9];
-        wr16(ack, batch_seq);
-        ack[2] = count;
-        wr32(ack + 3, bitmap);
-        uint16_t est_ms = 0;  // already done
-        wr16(ack + 7, est_ms);
-
-        uint8_t msg_type = (durability >= UDUR_ACK_DURABLE) ?
-            UMSG_BATCH_COMMITTED : UMSG_BATCH_QUEUED;
-        udp_send_to(&s->addr, s->port, s->session_id, msg_type, ack, 9);
     }
 }
 
@@ -321,8 +352,39 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 // ============================================================
 
 void udp_wal_poll(void) {
-    // Currently all writes are synchronous — nothing to poll.
-    // Future: async batch commit tracking goes here.
+    // Process one card from the first active deferred batch.
+    // Called from the main poll loop — cyw43_arch_poll() runs between calls.
+    for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
+        deferred_batch_t *db = &g_deferred[i];
+        if (!db->active) continue;
+
+        if (db->next < db->count) {
+            // Write one card
+            pending_card_t *c = &db->cards[db->next];
+            if (direct_put(c->key, c->data, c->len)) {
+                db->bitmap |= (1u << db->next);
+            }
+            db->next++;
+        }
+
+        if (db->next >= db->count) {
+            // Batch complete — send ACK
+            if (db->durability >= UDUR_ACK_QUEUED) {
+                uint8_t ack[9];
+                wr16(ack, db->batch_seq);
+                ack[2] = db->count;
+                wr32(ack + 3, db->bitmap);
+                wr16(ack + 7, 0);
+
+                uint8_t msg_type = (db->durability >= UDUR_ACK_DURABLE) ?
+                    UMSG_BATCH_COMMITTED : UMSG_BATCH_QUEUED;
+                udp_send_to(&db->addr, db->port, db->session_id, msg_type, ack, 9);
+            }
+            db->active = false;
+        }
+
+        break;  // only process one batch per poll call
+    }
 }
 
 // ============================================================

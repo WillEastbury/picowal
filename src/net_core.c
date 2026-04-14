@@ -669,11 +669,11 @@ void net_core_run(wal_state_t *wal) {
     printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
     cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
 
-    // Static IP: 192.168.222.223/16, gw+dns 192.168.0.1
+    // Static IP: 192.168.0.9/24, gw+dns 192.168.0.1
     {
         ip4_addr_t ip, mask, gw;
-        IP4_ADDR(&ip,   192, 168, 222, 223);
-        IP4_ADDR(&mask,  255, 255,   0,   0);
+        IP4_ADDR(&ip,   192, 168,   0,   9);
+        IP4_ADDR(&mask,  255, 255, 255,   0);
         IP4_ADDR(&gw,   192, 168,   0,   1);
         dhcp_stop(netif_list);
         netif_set_addr(netif_list, &ip, &mask, &gw);

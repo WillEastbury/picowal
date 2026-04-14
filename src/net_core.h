@@ -4,7 +4,7 @@
 #include "wal_defs.h"
 
 // WiFi config
-#define WIFI_SSID       "Puddles-Mesh"
+#define WIFI_SSID       "Bussy5G"
 #define WIFI_PASSWORD   "Whatever1"
 #define WIFI_TIMEOUT_MS 15000
 

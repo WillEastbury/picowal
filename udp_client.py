@@ -168,15 +168,19 @@ def main():
     # 2. Single writes with ACK_QUEUED
     print("\n[2] Single-card writes ×100 (ACK_QUEUED)...")
     times = []
+    errors = 0
     for i in range(100):
         card = build_card(f"udp_{i}", i * 7)
         t0 = time.perf_counter()
-        seq, bitmap, err = c.batch_write([(10, i, card)], UDUR_ACK_QUEUED)
-        dt = (time.perf_counter() - t0) * 1000
-        if err:
-            print(f"    Error at {i}: {err}")
-            break
-        times.append(dt)
+        try:
+            seq, bitmap, err = c.batch_write([(10, i, card)], UDUR_ACK_QUEUED)
+            dt = (time.perf_counter() - t0) * 1000
+            if err:
+                errors += 1
+            else:
+                times.append(dt)
+        except Exception:
+            errors += 1
     if times:
         p = percentiles(times)
         rate = len(times) / (sum(times)/1000) if sum(times)>0 else 0
@@ -186,37 +190,50 @@ def main():
     # 3. Batch writes (32 cards per batch)
     print("\n[3] Batch ×32 writes ×10 (ACK_QUEUED)...")
     batch_times = []
+    batch_errors = 0
     for b in range(10):
         cards = [(10, 1000+b*32+i, build_card(f"batch_{b}_{i}", b*32+i)) for i in range(32)]
         t0 = time.perf_counter()
-        seq, bitmap, err = c.batch_write(cards, UDUR_ACK_QUEUED)
-        dt = (time.perf_counter() - t0) * 1000
-        if err:
-            print(f"    Batch {b} error: {err}")
-            break
-        if bitmap != 0xFFFFFFFF:
-            print(f"    Batch {b}: partial bitmap 0x{bitmap:08x}")
-        batch_times.append(dt)
+        try:
+            seq, bitmap, err = c.batch_write(cards, UDUR_ACK_QUEUED)
+            dt = (time.perf_counter() - t0) * 1000
+            if err:
+                batch_errors += 1
+            else:
+                if bitmap != 0xFFFFFFFF:
+                    print(f"    Batch {b}: partial bitmap 0x{bitmap:08x}")
+                batch_times.append(dt)
+        except Exception:
+            batch_errors += 1
     if batch_times:
         p = percentiles(batch_times)
         cards_per_sec = (len(batch_times)*32) / (sum(batch_times)/1000)
-        print(f"    {len(batch_times)} batches = {cards_per_sec:.0f} cards/sec")
+        print(f"    {len(batch_times)} batches ({batch_errors} errors) = {cards_per_sec:.0f} cards/sec")
         print(f"    {fmt(p)}")
+    else:
+        print(f"    All failed ({batch_errors} errors)")
 
-    # 4. Batch with ACK_DURABLE (2-phase)
-    print("\n[4] Batch ×8 with ACK_DURABLE (queued + committed)...")
+    # 4. Batch with ACK_DURABLE
+    print("\n[4] Batch ×8 with ACK_DURABLE...")
     dur_times = []
+    dur_errors = 0
     for b in range(5):
         cards = [(10, 2000+b*8+i, build_card(f"dur_{b}_{i}", b*100+i)) for i in range(8)]
         t0 = time.perf_counter()
-        seq, bitmap, err = c.batch_write(cards, UDUR_ACK_DURABLE)
-        dt = (time.perf_counter() - t0) * 1000
-        if err:
-            print(f"    Batch {b}: {err}")
-        dur_times.append(dt)
+        try:
+            seq, bitmap, err = c.batch_write(cards, UDUR_ACK_DURABLE)
+            dt = (time.perf_counter() - t0) * 1000
+            if err:
+                dur_errors += 1
+            else:
+                dur_times.append(dt)
+        except Exception:
+            dur_errors += 1
     if dur_times:
         p = percentiles(dur_times)
-        print(f"    {fmt(p)}")
+        print(f"    {len(dur_times)} ok ({dur_errors} errors)  {fmt(p)}")
+    else:
+        print(f"    All failed ({dur_errors} errors)")
 
     # 5. Reads
     print("\n[5] Reads ×50...")
