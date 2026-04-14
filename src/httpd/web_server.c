@@ -842,6 +842,7 @@ static void http_page(struct tcp_pcb *pcb, const char *content, uint16_t content
 static void http_status_page(struct tcp_pcb *pcb, const char *req) {
     kv_stats_t st = kv_stats();
     uint32_t records = kv_record_count();
+    uint32_t sd_records = kvsd_ready() ? kvsd_record_count() : 0;
     uint16_t types[16];
     uint32_t counts[16];
     uint32_t n_types = kv_type_counts(types, counts, 16);
@@ -856,7 +857,7 @@ static void http_status_page(struct tcp_pcb *pcb, const char *req) {
         "<h2>Appliance Status</h2>"
         "<div class=card><pre>"
         "HTTP:         %s:80\n"
-        "RECORDS:      %lu\n"
+        "RECORDS:      %lu (flash) + %lu (SD) = %lu\n"
         "USED BYTES:   %lu\n"
         "FREE BYTES:   %lu\n"
         "USAGE:        %lu.%lu%%\n"
@@ -868,7 +869,8 @@ static void http_status_page(struct tcp_pcb *pcb, const char *req) {
         "RECLAIMED:    %lu\n"
         "</pre></div>",
         ip_text,
-        (unsigned long)records,
+        (unsigned long)records, (unsigned long)sd_records,
+        (unsigned long)(records + sd_records),
         (unsigned long)used_bytes,
         (unsigned long)free_bytes,
         (unsigned long)(usage_tenths / 10u),
@@ -3554,6 +3556,69 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
             "</script>";
 
         http_page_req(pcb, req, qpage, sizeof(qpage) - 1);
+        return;
+    }
+
+    // ---- Route: GET /notes/{pack}/{card}?writenotes={text} — anonymous notes ----
+    // No auth required. Reads or writes a single text note.
+    // Pack 99 is reserved for notes (RBAC sentinel: anonymous read/write).
+    if (verb == VERB_GET && strncmp(path, "/notes/", 7) == 0) {
+        unsigned int npack = 0, ncard = 0;
+        if (sscanf(path, "/notes/%u/%u", &npack, &ncard) < 2) {
+            http_json(pcb, "400 Bad Request", "{\"error\":\"expected /notes/{pack}/{card}\"}");
+            return;
+        }
+        uint32_t key = ((uint32_t)(npack & 0x3FF) << 22) | (ncard & 0x3FFFFF);
+
+        // Check for ?writenotes= query parameter
+        const char *wn = query ? strstr(query, "writenotes=") : NULL;
+        if (wn) {
+            wn += 11;  // skip "writenotes="
+            // Build a minimal card: magic + version + utf8 field
+            uint8_t card[512];
+            uint16_t tlen = 0;
+            for (const char *p2 = wn; *p2 && *p2 != '&' && tlen < 480; p2++) {
+                // URL decode: + → space, %XX → byte
+                if (*p2 == '+') { card[6 + tlen++] = ' '; }
+                else if (*p2 == '%' && p2[1] && p2[2]) {
+                    uint8_t hi = p2[1], lo = p2[2];
+                    uint8_t v = 0;
+                    if (hi >= '0' && hi <= '9') v = (hi-'0')<<4;
+                    else if (hi >= 'a' && hi <= 'f') v = (hi-'a'+10)<<4;
+                    else if (hi >= 'A' && hi <= 'F') v = (hi-'A'+10)<<4;
+                    if (lo >= '0' && lo <= '9') v |= lo-'0';
+                    else if (lo >= 'a' && lo <= 'f') v |= lo-'a'+10;
+                    else if (lo >= 'A' && lo <= 'F') v |= lo-'A'+10;
+                    card[6 + tlen++] = v;
+                    p2 += 2;
+                } else { card[6 + tlen++] = (uint8_t)*p2; }
+            }
+            // Header: magic + version
+            card[0] = 0x7D; card[1] = 0xCA; card[2] = 1; card[3] = 0;
+            // Field 0 (ord 0, type utf8): the note text
+            card[4] = 0x00;  // ord byte
+            card[5] = (uint8_t)tlen;
+            uint16_t total = 6 + tlen;
+
+            if (kv_store_put(key, card, total)) {
+                http_json(pcb, "200 OK", "{\"ok\":true}");
+            } else {
+                http_json(pcb, "500 Internal Server Error", "{\"error\":\"write failed\"}");
+            }
+            return;
+        }
+
+        // Read note
+        uint8_t nbuf[512];
+        uint16_t nlen = sizeof(nbuf);
+        if (kv_store_get_copy(key, nbuf, &nlen, NULL) && nlen > 6 &&
+            nbuf[0] == 0x7D && nbuf[1] == 0xCA) {
+            uint8_t flen = nbuf[5];
+            if (flen > nlen - 6) flen = nlen - 6;
+            http_respond(pcb, "200 OK", "text/plain", nbuf + 6, flen);
+        } else {
+            http_json(pcb, "404 Not Found", "{\"error\":\"note not found\"}");
+        }
         return;
     }
 

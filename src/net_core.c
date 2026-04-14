@@ -692,9 +692,21 @@ void net_core_run(wal_state_t *wal) {
     // Main poll loop
     uint32_t hb_last = 0;
     bool hb_on = false;
+    bool wal_tcp_started = false;
+    uint32_t poll_count = 0;
     while (true) {
         wal->core0_heartbeat++;
+        poll_count++;
         cyw43_arch_poll();
+
+        // Lazy-start WAL TCP listener after WiFi is stable (~100 poll cycles)
+        if (!wal_tcp_started && poll_count > 100) {
+            if (tcp_start_listen(&g_ctx)) {
+                printf("[net] WAL TCP on port %d\n", WAL_LISTEN_PORT);
+            }
+            wal_tcp_started = true;
+        }
+
         if (g_ctx.connected) {
             drain_responses(&g_ctx);
         }

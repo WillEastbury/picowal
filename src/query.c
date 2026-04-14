@@ -488,6 +488,12 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         else return snprintf(buf, buf_size, "error: pack '%s' not found\r\n", q->from_decks[i]);
     }
 
+    // Block queries against users pack (contains password hashes)
+    for (uint8_t i = 0; i < pack_resolved; i++) {
+        if (packs[i].ord == 1)
+            return snprintf(buf, buf_size, "error: query access to users pack denied\r\n");
+    }
+
     // Primary pack = first FROM
     pack_schema_t *primary = &packs[0];
     static char s_pname[32];

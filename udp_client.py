@@ -80,32 +80,44 @@ class UdpWalClient:
             return True
         return False
 
-    def batch_write(self, cards, durability=UDUR_ACK_QUEUED):
-        """cards: list of (pack, card_id, payload_bytes)"""
-        batch_seq = self.seq & 0xFFFF
-        body = wr16(batch_seq) + bytes([len(cards), durability])
-        for pack, card_id, payload in cards:
-            body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
-        self._send(UMSG_BATCH_WRITE, body)
+    def batch_write(self, cards, durability=UDUR_ACK_QUEUED, retries=3):
+        """cards: list of (pack, card_id, payload_bytes). Retries on backpressure/timeout."""
+        for attempt in range(retries):
+            batch_seq = self.seq & 0xFFFF
+            body = wr16(batch_seq) + bytes([len(cards), durability])
+            for pack, card_id, payload in cards:
+                body += wr16(pack) + wr32(card_id) + wr16(len(payload)) + payload
+            self._send(UMSG_BATCH_WRITE, body)
 
-        if durability == UDUR_FIRE_AND_FORGET:
-            return batch_seq, 0xFFFFFFFF, None
+            if durability == UDUR_FIRE_AND_FORGET:
+                return batch_seq, 0xFFFFFFFF, None
 
-        # Wait for QUEUED ACK
-        msg, payload, _ = self._recv()
-        if msg != UMSG_BATCH_QUEUED:
-            return batch_seq, 0, f"Expected QUEUED, got 0x{msg:02x}" if msg else "timeout"
-        q_bitmap = rd32(payload, 3)
+            # Wait for QUEUED ACK
+            try:
+                msg, payload, _ = self._recv(timeout=5.0 + attempt * 2.0)
+            except Exception:
+                continue
+            if msg == 0x40:  # BACKPRESSURE
+                time.sleep(0.1 * (attempt + 1))
+                continue
+            if msg not in (UMSG_BATCH_QUEUED, UMSG_BATCH_COMMITTED):
+                return batch_seq, 0, f"Unexpected 0x{msg:02x}" if msg else "timeout"
+            q_bitmap = rd32(payload, 3)
 
-        if durability < UDUR_ACK_DURABLE:
-            return batch_seq, q_bitmap, None
+            if durability < UDUR_ACK_DURABLE:
+                return batch_seq, q_bitmap, None
 
-        # Wait for COMMITTED ACK
-        msg2, payload2, _ = self._recv(timeout=10.0)
-        if msg2 != UMSG_BATCH_COMMITTED:
-            return batch_seq, q_bitmap, f"No COMMITTED (got 0x{msg2:02x})" if msg2 else "timeout"
-        c_bitmap = rd32(payload2, 3)
-        return batch_seq, c_bitmap, None
+            # Wait for COMMITTED ACK
+            try:
+                msg2, payload2, _ = self._recv(timeout=10.0 + attempt * 5.0)
+            except Exception:
+                return batch_seq, q_bitmap, "commit timeout"
+            if msg2 == UMSG_BATCH_COMMITTED:
+                c_bitmap = rd32(payload2, 3)
+                return batch_seq, c_bitmap, None
+            return batch_seq, q_bitmap, f"No COMMITTED (got 0x{msg2:02x})" if msg2 else "commit timeout"
+
+        return 0, 0, "max retries"
 
     def read(self, pack, card_id):
         body = wr16(pack) + wr32(card_id)
