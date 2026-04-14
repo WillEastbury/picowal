@@ -336,7 +336,7 @@ static void handle_batch_write(udp_session_t *s,
         uint32_t card = rd32(payload + off + 2);
         uint16_t clen = rd16(payload + off + 6);
         off += 8;
-        if (off + clen > len || clen > 512) break;
+        if (off + clen > len || clen > 128) break;
 
         db->cards[i].key = ((uint32_t)(pack & 0x3FF) << 22) | (card & 0x3FFFFF);
         db->cards[i].len = clen;
