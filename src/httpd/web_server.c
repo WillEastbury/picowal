@@ -595,10 +595,8 @@ static uint16_t http_respond_with_headers(struct tcp_pcb *pcb, const char *statu
     return (uint16_t)n + blen;
 }
 
-// Check auth: try cookie session first, then fall back to PSK.
-// If session found, fills *session and returns true.
-// If PSK valid but no session, session is zeroed but returns true.
-// Otherwise returns false.
+// Check auth: cookie session only.
+// If session found, fills *session and returns true, otherwise false.
 static bool check_auth_session(const char *req, user_session_t *session) {
     memset(session, 0, sizeof(*session));
 

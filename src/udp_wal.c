@@ -207,7 +207,7 @@ static void handle_hello(const ip_addr_t *addr, uint16_t port,
 
     // Derive session key: HKDF(PSK, client_random || server_random || epoch)
     {
-        static const uint8_t psk[] = AUTH_PSK;
+        static const uint8_t psk[] = UDP_WAL_PSK;
         uint8_t ikm[36]; // client_random(16) + server_random(16) + epoch(4)
         memcpy(ikm, s->client_random, 16);
         memcpy(ikm + 16, s->server_random, 16);
