@@ -896,19 +896,58 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     uint8_t comp[PACKED_DATA_MAX];
     uint16_t clen = hs_compress(value, len, comp, PACKED_DATA_MAX);
     if (clen == 0) return false;
+    uint16_t entry_size = PACKED_ENTRY_HDR + clen;
 
-    // Append to open block (allocates new block if needed)
+    // Try in-place update: if key exists in a block, remove old entry and
+    // re-insert if the block has enough space. Avoids fragmentation.
+    if (old_blk >= 0) {
+        uint8_t blk[512];
+        if (packed_read((uint32_t)old_blk, blk)) {
+            uint16_t off = packed_find(blk, key);
+            if (off > 0) {
+                packed_blk_hdr_t *hdr = (packed_blk_hdr_t *)blk;
+                const packed_entry_hdr_t *old_e = (const packed_entry_hdr_t *)(blk + off);
+                uint16_t old_size = PACKED_ENTRY_HDR + old_e->comp_len;
+                uint16_t free_after = 512 - hdr->used + old_size;
+
+                if (entry_size <= free_after) {
+                    // In-place: remove old, compact, append new
+                    uint16_t tail = hdr->used - off - old_size;
+                    if (tail > 0) memmove(blk + off, blk + off + old_size, tail);
+                    hdr->used -= old_size;
+                    hdr->count--;
+                    // Append new entry at end
+                    packed_entry_hdr_t *ne = (packed_entry_hdr_t *)(blk + hdr->used);
+                    ne->key = key;
+                    ne->comp_len = clen;
+                    ne->raw_len = len;
+                    memcpy(blk + hdr->used + PACKED_ENTRY_HDR, comp, clen);
+                    hdr->used += entry_size;
+                    hdr->count++;
+                    memset(blk + hdr->used, 0, 512 - hdr->used);
+                    sd_write_block(blk_addr((uint32_t)old_blk), blk);
+                    // Update open block tracking if this was the open block
+                    if ((uint32_t)old_blk == g_sb.open_block) {
+                        g_sb.open_used = hdr->used;
+                        g_sb.open_count = hdr->count;
+                    }
+                    g_sb.dirty = 1;
+                    return true;  // no hash/index change needed — same block
+                }
+            }
+        }
+    }
+
+    // COW path: append to open block, remove from old
     uint32_t new_blk = packed_append(key, comp, clen, len);
     if (new_blk == UINT32_MAX) return false;
 
-    // Update hash table: key → block_number
     ht_insert(key, new_blk);
 
     bool is_new = (old_blk < 0);
     index_insert(key, new_blk);
     g_fidx_count = 0;
 
-    // Remove from old block if COW update (different block)
     if (!is_new && (uint32_t)old_blk != new_blk) {
         packed_remove_card((uint32_t)old_blk, key);
     }
