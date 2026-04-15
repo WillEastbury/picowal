@@ -7,19 +7,19 @@
 
 #define MEM_LIBC_MALLOC             0
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    (16 * 1024)
+#define MEM_SIZE                    (24 * 1024)
 
 #define MEMP_NUM_TCP_PCB            20
 #define MEMP_NUM_TCP_PCB_LISTEN     4
 #define MEMP_NUM_UDP_PCB            8
 #define MEMP_NUM_TCP_SEG            80
 #define MEMP_NUM_ARP_QUEUE          10
-#define MEMP_NUM_PBUF               32
+#define MEMP_NUM_PBUF               48
 
 // Size pbuf pool buffers to match our slot size — one TCP
 // segment's worth of WAL data fits in a single pbuf, reducing
 // fragmentation and enabling zero-copy reads by Core 1.
-#define PBUF_POOL_SIZE              16
+#define PBUF_POOL_SIZE              24
 #define PBUF_POOL_BUFSIZE           1600
 
 #define TCP_MSS                     1460

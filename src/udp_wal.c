@@ -269,7 +269,7 @@ typedef struct {
     pending_card_t cards[UDP_WAL_MAX_BATCH];
 } deferred_batch_t;
 
-#define DEFERRED_QUEUE_SIZE 16
+#define DEFERRED_QUEUE_SIZE 24
 static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 
 // ============================================================
@@ -278,7 +278,7 @@ static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 // 64 slots × 512 bytes = 32KB (max available SRAM)
 // ============================================================
 
-#define RAW_RING_SIZE  48
+#define RAW_RING_SIZE  64
 #define RAW_RING_MTU   512
 static uint8_t  g_raw_ring[RAW_RING_SIZE][RAW_RING_MTU];
 static uint16_t g_raw_ring_len[RAW_RING_SIZE];
