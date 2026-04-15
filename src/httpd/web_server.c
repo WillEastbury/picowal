@@ -3390,7 +3390,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
         sleep_ms(500);
 
         // Don't flush index — flash is about to be rewritten.
-        // SD keylist + flash index will be rebuilt on next boot.
+        // SD hash table + flash index will be rebuilt on next boot.
 
         // Park Core 1 — set halt flag and wait for it to stop touching flash
         g_wal->ota_halt_core1 = true;

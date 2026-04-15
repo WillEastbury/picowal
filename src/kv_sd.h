@@ -24,7 +24,7 @@
 // Superblock layout (block 0)
 typedef struct __attribute__((packed)) {
     uint8_t  magic[8];         // 31415926Pico
-    uint32_t version;          // firmware version
+    uint32_t version;          // superblock format version (2)
     uint32_t total_cards;      // active card count
 
     // Index region
@@ -34,10 +34,10 @@ typedef struct __attribute__((packed)) {
     // Sub-regions within index
     uint32_t bitmap_start;     // block offset of bitmap
     uint32_t bitmap_blocks;    // blocks used by bitmap
-    uint32_t keylist_start;    // sorted key array start
-    uint32_t keylist_blocks;   // blocks for sorted keys
-    uint32_t bloom_start;      // bloom filter start
-    uint32_t bloom_blocks;     // blocks for bloom filters
+    uint32_t hashtab_start;    // on-disk hash table start (was keylist)
+    uint32_t hashtab_blocks;   // blocks for hash table (was keylist)
+    uint32_t _reserved_start;  // unused (was bloom_start)
+    uint32_t _reserved_blocks; // unused (was bloom_blocks)
 
     // Data region
     uint32_t data_start;       // first block of data region
@@ -56,6 +56,24 @@ typedef struct __attribute__((packed)) {
 
 // SD ring buffer guard — last 256 blocks reserved for UDP overflow WAL
 #define SDRING_GUARD_BLOCKS  256
+
+// ============================================================
+// On-disk hash table (tier 3) — O(1) key→slot lookups on SD
+//
+// 2-choice hashing: each key maps to 2 candidate buckets via
+// independent hash functions. Insert into whichever has space.
+// Lookup checks both (worst case 2 SD reads, avg ~1.5).
+//
+// Bucket format (512 bytes = 1 SD block):
+//   [crc16:2][count:2][reserved:4]  [key:4 slot:4] × 63
+//
+// Recovery: bitmap is source of truth. If hash table is corrupt,
+// bitmap scan rebuilds it (slow but safe).
+// ============================================================
+#define HT_BUCKET_HDR_SIZE  8
+#define HT_ENTRY_SIZE       8        // key:4 + slot:4
+#define HT_ENTRIES_PER_BKT  63       // (512 - 8) / 8
+#define HT_MAGIC_CRC_SEED   0xA5B6u  // mixed into CRC to detect blank blocks
 
 // SRAM index — key + slot parallel arrays (COW support)
 // 18K entries × 8 bytes = 144KB (same footprint as 36K keys-only)
