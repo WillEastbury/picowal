@@ -587,22 +587,24 @@ _Static_assert(sizeof(packed_entry_hdr_t) == PACKED_ENTRY_HDR, "packed_entry_hdr
 #include "heatshrink_encoder.h"
 #include "heatshrink_decoder.h"
 
-static heatshrink_encoder g_hs_enc;
-static heatshrink_decoder g_hs_dec;
+static union {
+    heatshrink_encoder enc;
+    heatshrink_decoder dec;
+} g_hs;
 
 static uint16_t hs_compress(const uint8_t *in, uint16_t in_len,
                             uint8_t *out, uint16_t out_max) {
-    heatshrink_encoder_reset(&g_hs_enc);
+    heatshrink_encoder_reset(&g_hs.enc);
     size_t sunk = 0, polled = 0, total_out = 0;
     while (sunk < in_len) {
         size_t n = 0;
-        heatshrink_encoder_sink(&g_hs_enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
+        heatshrink_encoder_sink(&g_hs.enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
         sunk += n;
     }
-    heatshrink_encoder_finish(&g_hs_enc);
+    heatshrink_encoder_finish(&g_hs.enc);
     HSE_poll_res pr;
     do {
-        pr = heatshrink_encoder_poll(&g_hs_enc, &out[total_out],
+        pr = heatshrink_encoder_poll(&g_hs.enc, &out[total_out],
                                       out_max - total_out, &polled);
         total_out += polled;
         if (total_out > out_max) return 0;
@@ -612,24 +614,24 @@ static uint16_t hs_compress(const uint8_t *in, uint16_t in_len,
 
 static uint16_t hs_decompress(const uint8_t *in, uint16_t in_len,
                               uint8_t *out, uint16_t out_max) {
-    heatshrink_decoder_reset(&g_hs_dec);
+    heatshrink_decoder_reset(&g_hs.dec);
     size_t sunk = 0, polled = 0, total_out = 0;
     while (sunk < in_len) {
         size_t n = 0;
-        heatshrink_decoder_sink(&g_hs_dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
+        heatshrink_decoder_sink(&g_hs.dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
         sunk += n;
         HSD_poll_res pr;
         do {
-            pr = heatshrink_decoder_poll(&g_hs_dec, &out[total_out],
+            pr = heatshrink_decoder_poll(&g_hs.dec, &out[total_out],
                                           out_max - total_out, &polled);
             total_out += polled;
             if (total_out > out_max) return 0;
         } while (pr == HSDR_POLL_MORE);
     }
-    heatshrink_decoder_finish(&g_hs_dec);
+    heatshrink_decoder_finish(&g_hs.dec);
     HSD_poll_res pr;
     do {
-        pr = heatshrink_decoder_poll(&g_hs_dec, &out[total_out],
+        pr = heatshrink_decoder_poll(&g_hs.dec, &out[total_out],
                                       out_max - total_out, &polled);
         total_out += polled;
     } while (pr == HSDR_POLL_MORE);

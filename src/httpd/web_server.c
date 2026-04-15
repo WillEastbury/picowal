@@ -1333,7 +1333,7 @@ static void __no_inline_not_in_flash_func(ota_flash_program)(uint32_t offset, co
     flash_range_program(offset, data, 256);
 }
 
-#define OTA_CHUNK_SIZE (16 * 1024)
+#define OTA_CHUNK_SIZE FLASH_SECTOR_SIZE
 static uint8_t g_ota_chunk_buf[OTA_CHUNK_SIZE];
 
 static void __no_inline_not_in_flash_func(ota_erase_write_chunk)(
