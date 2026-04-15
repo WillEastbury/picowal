@@ -16,13 +16,30 @@
 // Magic: 31415926 + "Pico"
 // ============================================================
 
-#define KVSD_CARD_BLOCKS    1       // 1 SD block per card (was 4)
-#define KVSD_CARD_SIZE      512     // bytes per card = 1 block
-#define KVSD_KEY_OFFSET     508     // key footer at bytes 508-511
-#define KVSD_MAX_PAYLOAD    508     // usable payload per card
+#define KVSD_CARD_BLOCKS    1       // 1 SD block per packed data block
+#define KVSD_CARD_SIZE      512     // bytes per SD block
+#define KVSD_MAX_PAYLOAD    508     // max uncompressed card payload
 #define KVSD_MAGIC_LO       0x7D   // card data magic
 #define KVSD_MAGIC_HI       0xCA
-#define KVSD_SB_VERSION     3       // v3: 1-block cards (was v2: 4-block)
+#define KVSD_SB_VERSION     4       // v4: variable-density packed blocks
+
+// ============================================================
+// Packed block format — multiple compressed cards per SD block
+//
+// Block header (8 bytes):
+//   [count:1][_pad:1][used:2][reserved:4]
+//   count = number of card entries in this block
+//   used  = total bytes used (header + all entries)
+//
+// Card entry (variable length):
+//   [key:4][comp_len:2][raw_len:2][compressed_data... comp_len bytes]
+//
+// Entries packed sequentially after header. 504 bytes available.
+// Typical ~80B card → ~50B compressed → ~58B entry → 8+ cards/block.
+// ============================================================
+#define PACKED_BLK_HDR      8
+#define PACKED_ENTRY_HDR    8       // key:4 + comp_len:2 + raw_len:2
+#define PACKED_DATA_MAX     (512 - PACKED_BLK_HDR)  // 504 bytes for entries
 
 // Superblock layout (block 0)
 typedef struct __attribute__((packed)) {
@@ -47,8 +64,12 @@ typedef struct __attribute__((packed)) {
     uint32_t data_blocks;      // total blocks in data region
     uint32_t max_cards;        // data_blocks / KVSD_CARD_BLOCKS
 
-    uint32_t next_free_hint;   // next likely free card slot
+    uint32_t next_free_hint;   // next likely free block in bitmap
     uint32_t dirty;            // 1 = index needs flush
+    uint32_t open_block;       // current write block (append target)
+    uint16_t open_used;        // bytes used in open block
+    uint8_t  open_count;       // entries in open block
+    uint8_t  _pad2;
 
     // OTA staging region — 600KB = 1200 blocks, right after superblock
     uint32_t ota_start;        // block offset of OTA staging area

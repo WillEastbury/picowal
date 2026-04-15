@@ -182,9 +182,10 @@ static uint32_t g_index_count = 0;
 static bool g_ready = false;
 static uint8_t g_card_buf[KVSD_CARD_SIZE];
 
-// Slot allocation: key→slot mapping via bitmap scan
-// Cards stored at data_start + slot*KVSD_CARD_BLOCKS
-// First 4 bytes of each SD card block stores the composite key for verification
+// Forward declarations
+static int32_t alloc_slot(void);
+
+// Block allocation: bitmap tracks data blocks, packed with compressed cards
 
 // ============================================================
 // Sorted index
@@ -461,35 +462,38 @@ static bool ht_remove(uint32_t key) {
 }
 
 // ============================================================
-// Data addressing — sub-slot packing with heatshrink compression
+// Packed data blocks — variable-density compressed card storage
 //
-// Each SD block (512 bytes) holds 1 or 2 cards:
-//   - Full slot: compressed card > 248 bytes → occupies entire block
-//   - Half slot: compressed card ≤ 248 bytes → occupies one 256-byte sub-slot
-//     Sub-slot 0 at bytes [0..255], sub-slot 1 at bytes [256..511]
+// Block header (8 bytes):
+//   [count:1][_pad:1][used:2][reserved:4]
 //
-// Sub-slot header (8 bytes):
-//   [compressed_len:2][raw_len:2][key:4]
-//   Followed by compressed_len bytes of heatshrink-compressed payload.
-//   compressed_len == 0 means empty sub-slot.
+// Card entries packed sequentially after header:
+//   [key:4][comp_len:2][raw_len:2][compressed_data... comp_len bytes]
 //
-// Slot numbering: each slot is a sub-slot.
-//   slot_to_block(slot) = data_start + slot / 2
-//   sub-slot index      = slot % 2
-//   Bitmap tracks sub-slots (2 per SD block).
+// 504 bytes available for entries. Typical ~80B card → ~50B compressed
+// → 58B per entry → 8+ cards per block.
+//
+// Hash table maps key → block_number. Read block, scan for key.
+// Bitmap tracks data blocks (1 bit each).
+// "Open block" in superblock = current append target.
 // ============================================================
 
-#define SUBSLOT_HDR_SIZE    8
-#define SUBSLOT_DATA_MAX    248     // 256 - 8 byte header
-#define FULLSLOT_DATA_MAX   504     // 512 - 8 byte header
+typedef struct __attribute__((packed)) {
+    uint8_t  count;       // entries in this block
+    uint8_t  _pad;
+    uint16_t used;        // total bytes used (incl header)
+    uint32_t _reserved;
+} packed_blk_hdr_t;
+
+_Static_assert(sizeof(packed_blk_hdr_t) == PACKED_BLK_HDR, "packed_blk_hdr_t size");
 
 typedef struct __attribute__((packed)) {
-    uint16_t comp_len;    // compressed payload length (0 = empty)
-    uint16_t raw_len;     // original payload length
-    uint32_t key;         // composite key
-} subslot_hdr_t;
+    uint32_t key;
+    uint16_t comp_len;
+    uint16_t raw_len;
+} packed_entry_hdr_t;
 
-_Static_assert(sizeof(subslot_hdr_t) == SUBSLOT_HDR_SIZE, "subslot_hdr_t size");
+_Static_assert(sizeof(packed_entry_hdr_t) == PACKED_ENTRY_HDR, "packed_entry_hdr_t size");
 
 #include "heatshrink_encoder.h"
 #include "heatshrink_decoder.h"
@@ -497,21 +501,16 @@ _Static_assert(sizeof(subslot_hdr_t) == SUBSLOT_HDR_SIZE, "subslot_hdr_t size");
 static heatshrink_encoder g_hs_enc;
 static heatshrink_decoder g_hs_dec;
 
-// Compress data with heatshrink. Returns compressed size, or 0 on failure.
 static uint16_t hs_compress(const uint8_t *in, uint16_t in_len,
                             uint8_t *out, uint16_t out_max) {
     heatshrink_encoder_reset(&g_hs_enc);
     size_t sunk = 0, polled = 0, total_out = 0;
-
-    // Sink all input
     while (sunk < in_len) {
         size_t n = 0;
         heatshrink_encoder_sink(&g_hs_enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
         sunk += n;
     }
     heatshrink_encoder_finish(&g_hs_enc);
-
-    // Poll all output
     HSE_poll_res pr;
     do {
         pr = heatshrink_encoder_poll(&g_hs_enc, &out[total_out],
@@ -519,21 +518,17 @@ static uint16_t hs_compress(const uint8_t *in, uint16_t in_len,
         total_out += polled;
         if (total_out > out_max) return 0;
     } while (pr == HSER_POLL_MORE);
-
     return (uint16_t)total_out;
 }
 
-// Decompress data with heatshrink. Returns decompressed size, or 0 on failure.
 static uint16_t hs_decompress(const uint8_t *in, uint16_t in_len,
                               uint8_t *out, uint16_t out_max) {
     heatshrink_decoder_reset(&g_hs_dec);
     size_t sunk = 0, polled = 0, total_out = 0;
-
     while (sunk < in_len) {
         size_t n = 0;
         heatshrink_decoder_sink(&g_hs_dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
         sunk += n;
-
         HSD_poll_res pr;
         do {
             pr = heatshrink_decoder_poll(&g_hs_dec, &out[total_out],
@@ -543,82 +538,131 @@ static uint16_t hs_decompress(const uint8_t *in, uint16_t in_len,
         } while (pr == HSDR_POLL_MORE);
     }
     heatshrink_decoder_finish(&g_hs_dec);
-
-    // Final poll after finish
     HSD_poll_res pr;
     do {
         pr = heatshrink_decoder_poll(&g_hs_dec, &out[total_out],
                                       out_max - total_out, &polled);
         total_out += polled;
     } while (pr == HSDR_POLL_MORE);
-
     return (uint16_t)total_out;
 }
 
-static uint32_t slot_to_block(uint32_t slot) {
-    return g_sb.data_start + slot / 2;
+static uint32_t blk_addr(uint32_t blk_num) {
+    return g_sb.data_start + blk_num;
 }
 
-static uint32_t slot_sub_index(uint32_t slot) {
-    return slot & 1;
+// Read a packed block from SD. Returns false if read fails or header invalid.
+static bool packed_read(uint32_t blk_num, uint8_t *buf) {
+    if (!sd_read_block(blk_addr(blk_num), buf)) return false;
+    const packed_blk_hdr_t *hdr = (const packed_blk_hdr_t *)buf;
+    if (hdr->used > 512 || hdr->count > 60) {
+        // Corrupt — treat as empty
+        memset(buf, 0, 512);
+        packed_blk_hdr_t *h = (packed_blk_hdr_t *)buf;
+        h->used = PACKED_BLK_HDR;
+    }
+    return true;
 }
 
-// Read a card from a sub-slot. Decompresses into buf (up to KVSD_MAX_PAYLOAD).
-// Returns raw payload length, or 0 on failure. *out_key set to stored key.
-static uint16_t read_subslot(uint32_t slot, uint8_t *buf, uint32_t *out_key) {
+// Find a card entry within a packed block. Returns offset or 0 if not found.
+static uint16_t packed_find(const uint8_t *blk, uint32_t key) {
+    const packed_blk_hdr_t *hdr = (const packed_blk_hdr_t *)blk;
+    uint16_t off = PACKED_BLK_HDR;
+    for (uint8_t i = 0; i < hdr->count; i++) {
+        if (off + PACKED_ENTRY_HDR > hdr->used) break;
+        const packed_entry_hdr_t *e = (const packed_entry_hdr_t *)(blk + off);
+        if (e->key == key) return off;
+        off += PACKED_ENTRY_HDR + e->comp_len;
+    }
+    return 0;
+}
+
+// Read and decompress a card from a packed block.
+// Returns raw length, or 0 on failure.
+static uint16_t packed_read_card(uint32_t blk_num, uint32_t key,
+                                  uint8_t *out, uint16_t out_max) {
     uint8_t blk[512];
-    if (!sd_read_block(slot_to_block(slot), blk)) return 0;
-    uint32_t sub = slot_sub_index(slot);
-    uint8_t *base = blk + sub * 256;
-    const subslot_hdr_t *hdr = (const subslot_hdr_t *)base;
-    if (hdr->comp_len == 0 || hdr->comp_len == 0xFFFF) return 0;
-    if (out_key) *out_key = hdr->key;
-
-    uint16_t max_data = (sub == 0 && hdr->comp_len > SUBSLOT_DATA_MAX)
-                        ? FULLSLOT_DATA_MAX : SUBSLOT_DATA_MAX;
-    if (hdr->comp_len > max_data) return 0;
-
-    uint16_t raw = hs_decompress(base + SUBSLOT_HDR_SIZE, hdr->comp_len,
-                                  buf, KVSD_MAX_PAYLOAD);
-    return raw;
+    if (!packed_read(blk_num, blk)) return 0;
+    uint16_t off = packed_find(blk, key);
+    if (off == 0) return 0;
+    const packed_entry_hdr_t *e = (const packed_entry_hdr_t *)(blk + off);
+    if (off + PACKED_ENTRY_HDR + e->comp_len > 512) return 0;
+    return hs_decompress(blk + off + PACKED_ENTRY_HDR, e->comp_len, out, out_max);
 }
 
-// Write a card to a sub-slot. Compresses payload, picks sub-slot or full-slot.
-// Returns the slot actually used, or -1 on failure.
-// If compressed ≤ 248 bytes: uses the given sub-slot (half block).
-// If compressed > 248 bytes: uses an even-numbered slot (full block).
-static bool write_subslot(uint32_t slot, uint32_t key,
-                          const uint8_t *value, uint16_t len) {
-    uint8_t comp[FULLSLOT_DATA_MAX];
-    uint16_t clen = hs_compress(value, len, comp, FULLSLOT_DATA_MAX);
-    if (clen == 0) return false;
-
+// Remove a card from a packed block. Compacts remaining entries.
+// Returns true if found and removed. Frees block in bitmap if now empty.
+static bool packed_remove_card(uint32_t blk_num, uint32_t key) {
     uint8_t blk[512];
-    uint32_t sub = slot_sub_index(slot);
+    if (!packed_read(blk_num, blk)) return false;
+    uint16_t off = packed_find(blk, key);
+    if (off == 0) return false;
+    packed_blk_hdr_t *hdr = (packed_blk_hdr_t *)blk;
+    const packed_entry_hdr_t *e = (const packed_entry_hdr_t *)(blk + off);
+    uint16_t entry_size = PACKED_ENTRY_HDR + e->comp_len;
+    uint16_t tail = hdr->used - off - entry_size;
+    if (tail > 0) memmove(blk + off, blk + off + entry_size, tail);
+    memset(blk + hdr->used - entry_size, 0, entry_size);
+    hdr->used -= entry_size;
+    hdr->count--;
 
-    if (clen <= SUBSLOT_DATA_MAX) {
-        // Half-slot: read existing block, update our sub-slot only
-        if (!sd_read_block(slot_to_block(slot), blk)) {
-            memset(blk, 0, 512);
+    sd_write_block(blk_addr(blk_num), blk);
+
+    // Free block if completely empty
+    if (hdr->count == 0) {
+        bitmap_set(blk_num, false);
+        // If this was the open block, reset it
+        if (blk_num == g_sb.open_block) {
+            g_sb.open_used = PACKED_BLK_HDR;
+            g_sb.open_count = 0;
         }
-        uint8_t *base = blk + sub * 256;
-        memset(base, 0, 256);
-        subslot_hdr_t *hdr = (subslot_hdr_t *)base;
-        hdr->comp_len = clen;
-        hdr->raw_len = len;
-        hdr->key = key;
-        memcpy(base + SUBSLOT_HDR_SIZE, comp, clen);
+    }
+    return true;
+}
+
+// Append a compressed card to the open block. If it doesn't fit,
+// allocate a new block. Returns the block number, or UINT32_MAX on failure.
+static uint32_t packed_append(uint32_t key, const uint8_t *comp, uint16_t clen,
+                               uint16_t raw_len) {
+    uint16_t entry_size = PACKED_ENTRY_HDR + clen;
+    if (entry_size > PACKED_DATA_MAX) return UINT32_MAX;  // card too large
+
+    // Check if open block has space
+    uint8_t blk[512];
+    if (g_sb.open_used + entry_size <= 512 && g_sb.open_count < 60) {
+        // Fits in current open block
+        if (!packed_read(g_sb.open_block, blk)) {
+            memset(blk, 0, 512);
+            packed_blk_hdr_t *h = (packed_blk_hdr_t *)blk;
+            h->used = PACKED_BLK_HDR;
+        }
     } else {
-        // Full-slot: takes entire block (sub must be 0, slot must be even)
+        // Open block full — allocate a new one
+        int32_t new_blk = alloc_slot();
+        if (new_blk < 0) return UINT32_MAX;
+        bitmap_set((uint32_t)new_blk, true);
+        g_sb.open_block = (uint32_t)new_blk;
+        g_sb.open_used = PACKED_BLK_HDR;
+        g_sb.open_count = 0;
         memset(blk, 0, 512);
-        subslot_hdr_t *hdr = (subslot_hdr_t *)blk;
-        hdr->comp_len = clen;
-        hdr->raw_len = len;
-        hdr->key = key;
-        memcpy(blk + SUBSLOT_HDR_SIZE, comp, clen);
+        packed_blk_hdr_t *h = (packed_blk_hdr_t *)blk;
+        h->used = PACKED_BLK_HDR;
     }
 
-    return sd_write_block(slot_to_block(slot), blk);
+    // Append entry
+    packed_blk_hdr_t *hdr = (packed_blk_hdr_t *)blk;
+    packed_entry_hdr_t *e = (packed_entry_hdr_t *)(blk + hdr->used);
+    e->key = key;
+    e->comp_len = clen;
+    e->raw_len = raw_len;
+    memcpy(blk + hdr->used + PACKED_ENTRY_HDR, comp, clen);
+    hdr->used += entry_size;
+    hdr->count++;
+    g_sb.open_used = hdr->used;
+    g_sb.open_count = hdr->count;
+
+    sd_write_block(blk_addr(g_sb.open_block), blk);
+    return g_sb.open_block;
 }
 
 // ============================================================
@@ -643,13 +687,14 @@ static void format_sd(uint32_t total_blocks) {
     uint32_t index_total = available * 15 / 100;
     uint32_t data_total = available - index_total;
 
-    uint32_t max_cards = data_total * 2;  // 2 sub-slots per SD block
+    // Bitmap tracks data blocks (1 bit per block).
+    // max_cards is the block count — actual card capacity is higher with packing.
+    uint32_t max_cards = data_total;  // 1 bitmap bit per data block
     uint32_t bitmap_blks = (max_cards + 4095) / 4096;
 
-    // Hash table: one block per bucket, ~50% load factor with 2-choice hashing.
-    // Each bucket holds 63 entries → target ~32 avg entries per bucket.
-    // num_buckets = max_cards / 32, clamped to available index space.
-    uint32_t ht_blks = (max_cards + 31) / 32;
+    // Hash table sized for estimated total cards (assume avg 4 cards/block).
+    uint32_t est_total_cards = data_total * 4;
+    uint32_t ht_blks = (est_total_cards + 31) / 32;
     uint32_t ht_max = index_total - bitmap_blks;
     if (ht_blks > ht_max) ht_blks = ht_max;
 
@@ -663,12 +708,18 @@ static void format_sd(uint32_t total_blocks) {
     g_sb._reserved_blocks = 0;
     g_sb.data_start = reserved + index_total;
     g_sb.data_blocks = data_total;
-    g_sb.max_cards = max_cards;
+    g_sb.max_cards = max_cards;  // bitmap capacity = data block count
     g_sb.next_free_hint = 0;
     g_sb.dirty = 0;
+    g_sb.open_block = 0;
+    g_sb.open_used = PACKED_BLK_HDR;
+    g_sb.open_count = 0;
 
-    web_log("[kvsd] fmt v3: %lu blks, %lu subslots, %lu ht buckets\n",
-            (unsigned long)usable, (unsigned long)max_cards, (unsigned long)ht_blks);
+    // Allocate block 0 as the initial open block
+    bitmap_set(0, true);
+
+    web_log("[kvsd] fmt v4: %lu data blks, ~%lux capacity, %lu ht buckets\n",
+            (unsigned long)data_total, (unsigned long)4, (unsigned long)ht_blks);
 
     sb_write();
 }
@@ -720,18 +771,21 @@ void kvsd_init(void) {
                     if (!buf[by]) continue;
                     for (uint8_t bi = 0; bi < 8; bi++) {
                         if (!(buf[by] & (1u<<bi))) continue;
-                        uint32_t slot = base + by*8 + bi;
-                        uint8_t hdr[512];
-                        if (!sd_read_block(slot_to_block(slot), hdr)) continue;
-                        // Read key from subslot header
-                        uint32_t sub = slot_sub_index(slot);
-                        const subslot_hdr_t *sh = (const subslot_hdr_t *)(hdr + sub * 256);
-                        if (sh->comp_len == 0 || sh->comp_len == 0xFFFF) continue;
-                        uint32_t key = sh->key;
-                        if (key == 0 || key == 0xFFFFFFFF) continue;
-                        g_index[g_index_count] = key;
-                        g_slots[g_index_count] = slot;
-                        g_index_count++;
+                        uint32_t blk_num = base + by*8 + bi;
+                        uint8_t blk[512];
+                        if (!packed_read(blk_num, blk)) continue;
+                        const packed_blk_hdr_t *ph = (const packed_blk_hdr_t *)blk;
+                        uint16_t off = PACKED_BLK_HDR;
+                        for (uint8_t ei = 0; ei < ph->count && g_index_count < KVSD_INDEX_MAX; ei++) {
+                            if (off + PACKED_ENTRY_HDR > ph->used) break;
+                            const packed_entry_hdr_t *pe = (const packed_entry_hdr_t *)(blk + off);
+                            if (pe->key != 0 && pe->key != 0xFFFFFFFF) {
+                                g_index[g_index_count] = pe->key;
+                                g_slots[g_index_count] = blk_num;
+                                g_index_count++;
+                            }
+                            off += PACKED_ENTRY_HDR + pe->comp_len;
+                        }
                     }
                 }
             }
@@ -747,7 +801,7 @@ void kvsd_init(void) {
             web_log("[kvsd] bitmap scan: %lu keys\n", (unsigned long)g_index_count);
         }
     } else {
-        web_log("[kvsd] no superblock, formatting v2\n");
+        web_log("[kvsd] no superblock, formatting v4\n");
         format_sd(info.block_count);
     }
 
@@ -836,69 +890,27 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     if (len >= 2 && (value[0] != KVSD_MAGIC_LO || value[1] != KVSD_MAGIC_HI))
         return false;
 
-    int32_t old_slot = find_slot_for_key(key);
+    int32_t old_blk = find_slot_for_key(key);
 
-    // Try compress to determine if we need a half-slot or full-slot
-    uint8_t comp[FULLSLOT_DATA_MAX];
-    uint16_t clen = hs_compress(value, len, comp, FULLSLOT_DATA_MAX);
-    bool needs_full = (clen == 0 || clen > SUBSLOT_DATA_MAX);
+    // Compress
+    uint8_t comp[PACKED_DATA_MAX];
+    uint16_t clen = hs_compress(value, len, comp, PACKED_DATA_MAX);
+    if (clen == 0) return false;
 
-    // COW: always allocate a new slot
-    uint32_t new_slot;
-    if (needs_full) {
-        // Full slot: need an even-numbered slot (sub-slot 0 of a block)
-        // AND the companion odd slot must also be free
-        int32_t s = alloc_slot();
-        if (s < 0) return false;
-        new_slot = (uint32_t)s;
-        // Ensure even alignment — if odd, try to grab the even companion
-        if (new_slot & 1) {
-            // Mark this one used, try the next
-            bitmap_set(new_slot, true);
-            int32_t s2 = alloc_slot();
-            if (s2 < 0) { bitmap_set(new_slot, false); return false; }
-            bitmap_set(new_slot, false);  // release the odd one
-            new_slot = (uint32_t)s2;
-            if (new_slot & 1) {
-                // Still odd — just use it, waste the companion sub-slot
-                // (acceptable edge case — bitmap will prevent double use)
-            }
-        }
-    } else {
-        // Half-slot: any free sub-slot works
-        int32_t s = alloc_slot();
-        if (s < 0) return false;
-        new_slot = (uint32_t)s;
-    }
+    // Append to open block (allocates new block if needed)
+    uint32_t new_blk = packed_append(key, comp, clen, len);
+    if (new_blk == UINT32_MAX) return false;
 
-    if (!write_subslot(new_slot, key, value, len)) return false;
+    // Update hash table: key → block_number
+    ht_insert(key, new_blk);
 
-    // Crash-safe ordering: bitmap → hash → SRAM → free old
-    if (!bitmap_set(new_slot, true)) return false;
-    if (needs_full && !(new_slot & 1)) {
-        // Mark companion sub-slot as used too (full-slot occupies both)
-        bitmap_set(new_slot + 1, true);
-    }
+    bool is_new = (old_blk < 0);
+    index_insert(key, new_blk);
+    g_fidx_count = 0;
 
-    ht_insert(key, new_slot);
-
-    bool is_new = (old_slot < 0);
-    index_insert(key, new_slot);
-    g_fidx_count = 0;  // invalidate flash index cache
-
-    if (!is_new && (uint32_t)old_slot != new_slot) {
-        bitmap_set((uint32_t)old_slot, false);
-        // If old was a full-slot, free companion too
-        if (!((uint32_t)old_slot & 1)) {
-            // Check if companion was used by this card (read block to verify)
-            uint8_t blk[512];
-            if (sd_read_block(slot_to_block((uint32_t)old_slot), blk)) {
-                const subslot_hdr_t *hdr0 = (const subslot_hdr_t *)blk;
-                if (hdr0->comp_len > SUBSLOT_DATA_MAX) {
-                    bitmap_set((uint32_t)old_slot + 1, false);
-                }
-            }
-        }
+    // Remove from old block if COW update (different block)
+    if (!is_new && (uint32_t)old_blk != new_blk) {
+        packed_remove_card((uint32_t)old_blk, key);
     }
     if (is_new) g_sb.total_cards++;
     g_sb.dirty = 1;
@@ -906,15 +918,14 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
 }
 
 // ============================================================
-// Get — decompress from sub-slot
+// Get — decompress from packed block
 // ============================================================
 
 const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
     if (!g_ready) return NULL;
-    int32_t slot = find_slot_for_key(key);
-    if (slot < 0) return NULL;
-    uint32_t stored_key = 0;
-    uint16_t raw_len = read_subslot((uint32_t)slot, g_card_buf, &stored_key);
+    int32_t blk = find_slot_for_key(key);
+    if (blk < 0) return NULL;
+    uint16_t raw_len = packed_read_card((uint32_t)blk, key, g_card_buf, KVSD_MAX_PAYLOAD);
     if (raw_len == 0) return NULL;
     if (g_card_buf[0] != KVSD_MAGIC_LO || g_card_buf[1] != KVSD_MAGIC_HI) return NULL;
     if (len) *len = raw_len;
@@ -923,10 +934,9 @@ const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
 
 bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version) {
     if (!g_ready) return false;
-    int32_t slot = find_slot_for_key(key);
-    if (slot < 0) return false;
-    uint32_t stored_key = 0;
-    uint16_t raw_len = read_subslot((uint32_t)slot, out, &stored_key);
+    int32_t blk = find_slot_for_key(key);
+    if (blk < 0) return false;
+    uint16_t raw_len = packed_read_card((uint32_t)blk, key, out, KVSD_MAX_PAYLOAD);
     if (raw_len == 0) return false;
     if (out[0] != KVSD_MAGIC_LO || out[1] != KVSD_MAGIC_HI) return false;
     if (*len < raw_len) return false;
@@ -936,35 +946,23 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
 }
 
 // ============================================================
-// Delete
+// Delete — remove entry from packed block, compact
 // ============================================================
 
 bool kvsd_delete(uint32_t key) {
     if (!g_ready) return false;
-    int32_t slot = find_slot_for_key(key);
-    if (slot < 0) return false;
+    int32_t blk = find_slot_for_key(key);
+    if (blk < 0) return false;
 
-    // Clear the sub-slot on SD
-    uint8_t blk[512];
-    if (sd_read_block(slot_to_block((uint32_t)slot), blk)) {
-        uint32_t sub = slot_sub_index((uint32_t)slot);
-        const subslot_hdr_t *hdr = (const subslot_hdr_t *)(blk + sub * 256);
-        bool was_full = (sub == 0 && hdr->comp_len > SUBSLOT_DATA_MAX);
-        memset(blk + sub * 256, 0, 256);
-        sd_write_block(slot_to_block((uint32_t)slot), blk);
-        // Free companion if was full-slot
-        if (was_full) bitmap_set((uint32_t)slot + 1, false);
-    }
-
+    packed_remove_card((uint32_t)blk, key);
     ht_remove(key);
-    bitmap_set((uint32_t)slot, false);
     if (index_remove(key)) { g_sb.total_cards--; g_sb.dirty = 1; }
     return true;
 }
 
 bool kvsd_exists(uint32_t key) {
     if (!g_ready) return false;
-    return find_slot_for_key(key) >= 0;  // checks SRAM + flash + hash table
+    return find_slot_for_key(key) >= 0;
 }
 
 // ============================================================
