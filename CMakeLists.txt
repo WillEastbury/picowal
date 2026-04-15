@@ -54,7 +54,6 @@ target_link_libraries(${PROJECT_NAME}
     pico_rand
     pico_mbedtls
     lcd_driver
-    touch_driver
     sd_driver
 )
 

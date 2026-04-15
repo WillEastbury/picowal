@@ -5,7 +5,6 @@
 #include "kv_flash.h"
 #include "kv_sd.h"
 #include "ili9488.h"
-#include "xpt2046.h"
 #include "httpd/web_server.h"
 #include "udp_wal.h"
 

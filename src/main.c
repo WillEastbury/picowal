@@ -3,7 +3,6 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "ili9488.h"
-#include "xpt2046.h"
 #include "wal_defs.h"
 #include "wal_dma.h"
 #include "kv_flash.h"
@@ -36,7 +35,6 @@ int main(void) {
     web_log("[boot] start\n");
 
     lcd_init();
-    touch_init();
     lcd_clear(COLOR_BLACK);
     lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
     lcd_draw_string(40, 70, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
