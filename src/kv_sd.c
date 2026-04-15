@@ -466,12 +466,12 @@ static bool ht_remove(uint32_t key) {
 
 static uint32_t slot_to_block(uint32_t slot) { return g_sb.data_start + slot * KVSD_CARD_BLOCKS; }
 
-static bool read_card(uint32_t key, uint8_t *buf) {
-    return sd_read_blocks(slot_to_block(key), buf, KVSD_CARD_BLOCKS);
+static bool read_card(uint32_t slot, uint8_t *buf) {
+    return sd_read_block(slot_to_block(slot), buf);
 }
 
-static bool write_card(uint32_t key, const uint8_t *buf) {
-    return sd_write_blocks(slot_to_block(key), buf, KVSD_CARD_BLOCKS);
+static bool write_card(uint32_t slot, const uint8_t *buf) {
+    return sd_write_block(slot_to_block(slot), buf);
 }
 
 // ============================================================
@@ -481,7 +481,7 @@ static bool write_card(uint32_t key, const uint8_t *buf) {
 static void format_sd(uint32_t total_blocks) {
     memset(&g_sb, 0, sizeof(g_sb));
     memcpy(g_sb.magic, SD_MAGIC, 8);
-    g_sb.version = 2;  // v2: on-disk hash table replaces keylist+bloom
+    g_sb.version = KVSD_SB_VERSION;  // v3: 1-block cards + hash table
     g_sb.total_cards = 0;
 
     // Reserve last 256 blocks for SD ring buffer (UDP overflow WAL)
@@ -543,9 +543,10 @@ void kvsd_init(void) {
     fidx_count_entries();
 
     if (sb_read()) {
-        // Version check: v2 = on-disk hash table. v1 = legacy keylist (needs wipe).
-        if (g_sb.version < 2) {
-            web_log("[kvsd] v1 superblock — reformatting for v2 hash table\n");
+        // Version check: v3 = 1-block cards + hash table. Older versions need reformat.
+        if (g_sb.version < KVSD_SB_VERSION) {
+            web_log("[kvsd] v%lu superblock — reformatting for v%d\n",
+                    (unsigned long)g_sb.version, KVSD_SB_VERSION);
             format_sd(info.block_count);
         }
 
@@ -575,8 +576,8 @@ void kvsd_init(void) {
                         uint32_t slot = base + by*8 + bi;
                         uint8_t hdr[512];
                         if (!sd_read_block(slot_to_block(slot), hdr)) continue;
-                        uint32_t key = hdr[508] | ((uint32_t)hdr[509]<<8) |
-                                       ((uint32_t)hdr[510]<<16) | ((uint32_t)hdr[511]<<24);
+                        uint32_t key = hdr[KVSD_KEY_OFFSET] | ((uint32_t)hdr[KVSD_KEY_OFFSET+1]<<8) |
+                                       ((uint32_t)hdr[KVSD_KEY_OFFSET+2]<<16) | ((uint32_t)hdr[KVSD_KEY_OFFSET+3]<<24);
                         if (key == 0 || key == 0xFFFFFFFF) continue;
                         g_index[g_index_count] = key;
                         g_slots[g_index_count] = slot;
@@ -681,7 +682,7 @@ static int32_t find_slot_for_key(uint32_t key) {
 // ============================================================
 
 bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
-    if (!g_ready || len > KVSD_CARD_SIZE - 4) return false;
+    if (!g_ready || len > KVSD_MAX_PAYLOAD) return false;
 
     int32_t old_slot = find_slot_for_key(key);
 
@@ -702,10 +703,10 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
     memset(card, 0, KVSD_CARD_SIZE);
     memcpy(card, value, len);
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    card[508] = (uint8_t)(key);
-    card[509] = (uint8_t)(key >> 8);
-    card[510] = (uint8_t)(key >> 16);
-    card[511] = (uint8_t)(key >> 24);
+    card[KVSD_KEY_OFFSET]     = (uint8_t)(key);
+    card[KVSD_KEY_OFFSET + 1] = (uint8_t)(key >> 8);
+    card[KVSD_KEY_OFFSET + 2] = (uint8_t)(key >> 16);
+    card[KVSD_KEY_OFFSET + 3] = (uint8_t)(key >> 24);
 
     if (!write_card(new_slot, card)) return false;
 
@@ -742,10 +743,10 @@ const uint8_t *kvsd_get(uint32_t key, uint16_t *len) {
     if (!g_ready) return NULL;
     int32_t slot = find_slot_for_key(key);
     if (slot < 0) return NULL;
-    if (!sd_read_blocks(slot_to_block((uint32_t)slot), g_card_buf, KVSD_CARD_BLOCKS)) return NULL;
+    if (!sd_read_block(slot_to_block((uint32_t)slot), g_card_buf)) return NULL;
     if (g_card_buf[0] != KVSD_MAGIC_LO || g_card_buf[1] != KVSD_MAGIC_HI) return NULL;
-    // Trim trailing zeros up to byte 508 (key footer at 508-511)
-    uint16_t l = 508;
+    // Trim trailing zeros up to key footer
+    uint16_t l = KVSD_KEY_OFFSET;
     while (l > 4 && g_card_buf[l-1] == 0) l--;
     if (len) *len = l;
     return g_card_buf;
@@ -756,9 +757,9 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
     int32_t slot = find_slot_for_key(key);
     if (slot < 0) return false;
     uint8_t card[KVSD_CARD_SIZE];
-    if (!sd_read_blocks(slot_to_block((uint32_t)slot), card, KVSD_CARD_BLOCKS)) return false;
+    if (!sd_read_block(slot_to_block((uint32_t)slot), card)) return false;
     if (card[0] != KVSD_MAGIC_LO || card[1] != KVSD_MAGIC_HI) return false;
-    uint16_t l = 508;
+    uint16_t l = KVSD_KEY_OFFSET;
     while (l > 4 && card[l-1] == 0) l--;
     if (*len < l) return false;
     memcpy(out, card, l);

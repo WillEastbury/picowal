@@ -38,8 +38,10 @@ extern uint32_t kvf_range(uint32_t prefix, uint32_t mask, uint32_t *out_keys, ui
 extern uint32_t kvf_record_count(void);
 
 static inline bool kv_store_put(uint32_t key, const uint8_t *value, uint16_t len) {
-    if (kv_use_sd(key))
+    if (kv_use_sd(key)) {
+        if (len > KVSD_MAX_PAYLOAD) return false;
         return kvsd_put(key, value, len);
+    }
     return kvf_put(key, value, len);
 }
 

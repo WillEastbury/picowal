@@ -51,7 +51,7 @@
 
 #define KV_LEN_QUANTUM       4u // packed length/offset units
 
-#define KV_INDEX_CAPACITY    512u   // flash KV: packs 0-1 only (schemas + users)
+#define KV_INDEX_CAPACITY    4096u   // flash KV: 1024 schemas (pack 0) + 3072 users (pack 1)
 
 // Dead log (append-only pages)
 #define KV_DEADLOG_MAGIC     0x444C4731u // DLG1

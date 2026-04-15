@@ -16,10 +16,13 @@
 // Magic: 31415926 + "Pico"
 // ============================================================
 
-#define KVSD_CARD_BLOCKS    4
-#define KVSD_CARD_SIZE      (KVSD_CARD_BLOCKS * 512)
+#define KVSD_CARD_BLOCKS    1       // 1 SD block per card (was 4)
+#define KVSD_CARD_SIZE      512     // bytes per card = 1 block
+#define KVSD_KEY_OFFSET     508     // key footer at bytes 508-511
+#define KVSD_MAX_PAYLOAD    508     // usable payload per card
 #define KVSD_MAGIC_LO       0x7D   // card data magic
 #define KVSD_MAGIC_HI       0xCA
+#define KVSD_SB_VERSION     3       // v3: 1-block cards (was v2: 4-block)
 
 // Superblock layout (block 0)
 typedef struct __attribute__((packed)) {
