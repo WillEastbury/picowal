@@ -39,7 +39,7 @@
 #define KV_FREE            0xFFFFFFFF
 #define KV_DEAD            0x00000000
 
-#define KV_MAX_VALUE       4000
+#define KV_MAX_VALUE       508     // unified with KVSD_MAX_PAYLOAD
 #define KV_VERSION_ANY     0xFFFF
 
 typedef struct __attribute__((packed)) {

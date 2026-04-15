@@ -455,7 +455,7 @@ static uint32_t search_pack_field(const pack_schema_t *ps, uint8_t field_idx,
     set_cardinality((uint16_t)ps->ord, count);
     uint32_t found = 0;
     for (uint32_t i = 0; i < count && found < max; i++) {
-        uint8_t card[2048]; uint16_t clen = sizeof(card);
+        uint8_t card[512]; uint16_t clen = sizeof(card);
         if (!kv_get_copy(keys[i], card, &clen, NULL)) continue;
         char actual[64] = "";
         extract_field_str(card, clen, ps->field_ords[field_idx],
@@ -707,7 +707,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         int n = 0;
         int result_count = 0;
         for (uint32_t ci = 0; ci < card_count && result_count < QUERY_MAX_RESULTS; ci++) {
-            uint8_t card[2048]; uint16_t clen = sizeof(card);
+            uint8_t card[512]; uint16_t clen = sizeof(card);
             if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
 
             bool pass = true;
@@ -735,7 +735,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                         extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
                         uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
                         uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
-                        uint8_t ref_card[2048]; uint16_t rclen = sizeof(ref_card);
+                        uint8_t ref_card[512]; uint16_t rclen = sizeof(ref_card);
                         if (kv_get_copy(ref_key, ref_card, &rclen, NULL)) {
                             char val[64] = "";
                             extract_field_str(ref_card, rclen, s_ords[si], s_types[si], val, sizeof(val));
@@ -754,13 +754,13 @@ int query_execute(const query_t *q, char *buf, int buf_size,
 
     // ---- Aggregation path ----
     // Collect values per field for all matching rows
-    #define AGG_MAX_ROWS 256
-    #define AGG_MAX_GROUPS 64
-    char row_vals[AGG_MAX_ROWS][QUERY_MAX_SELECT][32];
+    #define AGG_MAX_ROWS 32
+    #define AGG_MAX_GROUPS 16
+    static char row_vals[AGG_MAX_ROWS][QUERY_MAX_SELECT][32];
     int row_count = 0;
 
     for (uint32_t ci = 0; ci < card_count && row_count < AGG_MAX_ROWS; ci++) {
-        uint8_t card[2048]; uint16_t clen = sizeof(card);
+        uint8_t card[512]; uint16_t clen = sizeof(card);
         if (!kv_get_copy(card_keys[ci], card, &clen, NULL)) continue;
 
         bool pass = true;
@@ -786,7 +786,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                     extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
                     uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
                     uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
-                    uint8_t ref_card[2048]; uint16_t rclen = sizeof(ref_card);
+                    uint8_t ref_card[512]; uint16_t rclen = sizeof(ref_card);
                     if (kv_get_copy(ref_key, ref_card, &rclen, NULL))
                         extract_field_str(ref_card, rclen, s_ords[si], s_types[si], row_vals[row_count][si], 32);
                 }
@@ -797,10 +797,10 @@ int query_execute(const query_t *q, char *buf, int buf_size,
 
     // Group by non-aggregate fields, compute aggregates
     // Group key = concatenation of all QAGG_NONE field values
-    char group_keys[AGG_MAX_GROUPS][128];
-    long  agg_vals[AGG_MAX_GROUPS][QUERY_MAX_SELECT]; // running aggregates
+    static char group_keys[AGG_MAX_GROUPS][128];
+    static long agg_vals[AGG_MAX_GROUPS][QUERY_MAX_SELECT];
     int   agg_counts[AGG_MAX_GROUPS];
-    char  agg_first[AGG_MAX_GROUPS][QUERY_MAX_SELECT][32]; // FIRST values
+    static char agg_first[AGG_MAX_GROUPS][QUERY_MAX_SELECT][32];
     int   group_count = 0;
 
     for (int ri = 0; ri < row_count; ri++) {

@@ -182,6 +182,10 @@ static uint32_t g_index_count = 0;
 static bool g_ready = false;
 static uint8_t g_card_buf[KVSD_CARD_SIZE];
 
+// Cached open block — avoids SD re-read on every append
+static uint8_t g_open_blk[512];
+static bool g_open_cached = false;
+
 // Forward declarations
 static int32_t alloc_slot(void);
 
@@ -693,13 +697,16 @@ static bool packed_remove_card(uint32_t blk_num, uint32_t key) {
 
     sd_write_block(blk_addr(blk_num), blk);
 
+    // Invalidate open block cache if we modified it
+    if (blk_num == g_sb.open_block) g_open_cached = false;
+
     // Free block if completely empty
     if (hdr->count == 0) {
         bitmap_set(blk_num, false);
-        // If this was the open block, reset it
         if (blk_num == g_sb.open_block) {
             g_sb.open_used = PACKED_BLK_HDR;
             g_sb.open_count = 0;
+            g_open_cached = false;
         }
     }
     return true;
@@ -710,43 +717,45 @@ static bool packed_remove_card(uint32_t blk_num, uint32_t key) {
 static uint32_t packed_append(uint32_t key, const uint8_t *comp, uint16_t clen,
                                uint16_t raw_len) {
     uint16_t entry_size = PACKED_ENTRY_HDR + clen;
-    if (entry_size > PACKED_DATA_MAX) return UINT32_MAX;  // card too large
+    if (entry_size > PACKED_DATA_MAX) return UINT32_MAX;
 
-    // Check if open block has space
-    uint8_t blk[512];
     if (g_sb.open_used + entry_size <= 512 && g_sb.open_count < 60) {
-        // Fits in current open block
-        if (!packed_read(g_sb.open_block, blk)) {
-            memset(blk, 0, 512);
-            packed_blk_hdr_t *h = (packed_blk_hdr_t *)blk;
-            h->used = PACKED_BLK_HDR;
+        // Fits in current open block — use cached copy
+        if (!g_open_cached) {
+            if (!packed_read(g_sb.open_block, g_open_blk)) {
+                memset(g_open_blk, 0, 512);
+                packed_blk_hdr_t *h = (packed_blk_hdr_t *)g_open_blk;
+                h->used = PACKED_BLK_HDR;
+            }
+            g_open_cached = true;
         }
     } else {
-        // Open block full — allocate a new one
+        // Open block full — flush cache, allocate new
         int32_t new_blk = alloc_slot();
         if (new_blk < 0) return UINT32_MAX;
         bitmap_set((uint32_t)new_blk, true);
         g_sb.open_block = (uint32_t)new_blk;
         g_sb.open_used = PACKED_BLK_HDR;
         g_sb.open_count = 0;
-        memset(blk, 0, 512);
-        packed_blk_hdr_t *h = (packed_blk_hdr_t *)blk;
+        memset(g_open_blk, 0, 512);
+        packed_blk_hdr_t *h = (packed_blk_hdr_t *)g_open_blk;
         h->used = PACKED_BLK_HDR;
+        g_open_cached = true;
     }
 
-    // Append entry
-    packed_blk_hdr_t *hdr = (packed_blk_hdr_t *)blk;
-    packed_entry_hdr_t *e = (packed_entry_hdr_t *)(blk + hdr->used);
+    // Append entry to cached block
+    packed_blk_hdr_t *hdr = (packed_blk_hdr_t *)g_open_blk;
+    packed_entry_hdr_t *e = (packed_entry_hdr_t *)(g_open_blk + hdr->used);
     e->key = key;
     e->comp_len = clen;
     e->raw_len = raw_len;
-    memcpy(blk + hdr->used + PACKED_ENTRY_HDR, comp, clen);
+    memcpy(g_open_blk + hdr->used + PACKED_ENTRY_HDR, comp, clen);
     hdr->used += entry_size;
     hdr->count++;
     g_sb.open_used = hdr->used;
     g_sb.open_count = hdr->count;
 
-    sd_write_block(blk_addr(g_sb.open_block), blk);
+    sd_write_block(blk_addr(g_sb.open_block), g_open_blk);
     return g_sb.open_block;
 }
 
@@ -816,6 +825,7 @@ static void format_sd(uint32_t total_blocks) {
 void kvsd_init(void) {
     g_index_count    = 0;
     g_ready          = false;
+    g_open_cached    = false;
     g_fidx_count     = 0;
     g_fidx_sequence  = 0;
 

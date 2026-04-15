@@ -101,7 +101,7 @@ typedef struct __attribute__((packed)) {
 
 // SRAM index — key + slot parallel arrays (COW support)
 // 18K entries × 8 bytes = 144KB (same footprint as 36K keys-only)
-#define KVSD_INDEX_MAX      18000
+#define KVSD_INDEX_MAX      512     // SRAM hot cache (L1) — hash table is L3 for cold keys
 
 // ============================================================
 // Flash index tier (tier 2) — XIP-readable sorted (key,slot) pages
