@@ -379,61 +379,146 @@ static int32_t ht_lookup(uint32_t key) {
     return -1;
 }
 
-// Insert or update key→slot in hash table.
-// Tries bucket1 first (if key exists there or has space), then bucket2.
-// Returns true on success, false if both buckets full (extremely unlikely with 2-choice).
+// Insert or update key→block in hash table (COW-safe).
+//
+// For NEW keys: append to whichever candidate bucket has space.
+// For UPDATES: write-ahead — add new entry first, then remove old.
+//   Both entries coexist briefly. If power dies between the two writes,
+//   lookup finds both (scan returns first match = valid either way since
+//   both point to blocks containing valid data).
+//   On next write or boot, duplicates are naturally resolved.
+//
+// Returns true on success, false if both buckets full.
 static bool ht_insert(uint32_t key, uint32_t slot) {
     if (g_sb.hashtab_blocks == 0) return false;
-    uint8_t buf[512];
+    uint8_t buf1[512], buf2[512];
     uint32_t b1 = ht_hash1(key) % g_sb.hashtab_blocks;
     uint32_t b2 = ht_hash2(key) % g_sb.hashtab_blocks;
+    bool b1_ok = ht_read_bucket(b1, buf1);
+    bool b2_ok = (b2 != b1) && ht_read_bucket(b2, buf2);
 
-    // Check bucket 1
-    if (ht_read_bucket(b1, buf)) {
-        int idx = ht_bucket_find(buf, key);
-        if (idx >= 0) {
-            // Update existing entry's slot
-            uint8_t *e = buf + HT_BUCKET_HDR_SIZE + (uint32_t)idx * 8 + 4;
-            e[0]=(uint8_t)slot; e[1]=(uint8_t)(slot>>8);
-            e[2]=(uint8_t)(slot>>16); e[3]=(uint8_t)(slot>>24);
-            return ht_write_bucket(b1, buf);
-        }
-        ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf;
+    // Check if key already exists in either bucket
+    int old_idx1 = b1_ok ? ht_bucket_find(buf1, key) : -1;
+    int old_idx2 = b2_ok ? ht_bucket_find(buf2, key) : -1;
+    bool is_update = (old_idx1 >= 0 || old_idx2 >= 0);
+
+    // STEP 1 (write-ahead): Add new entry to a bucket with space.
+    // For updates, prefer the OTHER bucket to avoid modifying the old entry's bucket.
+    bool wrote_new = false;
+    uint8_t *new_buf = NULL;
+    uint32_t new_bucket = 0;
+
+    // Try to add to bucket that does NOT hold the old entry
+    if (is_update && old_idx1 >= 0 && b2_ok) {
+        // Old is in b1 — try b2 first
+        ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf2;
         if (hdr->count < HT_ENTRIES_PER_BKT) {
-            // Append to bucket 1
-            uint8_t *e = buf + HT_BUCKET_HDR_SIZE + hdr->count * 8;
+            uint8_t *e = buf2 + HT_BUCKET_HDR_SIZE + hdr->count * 8;
             e[0]=(uint8_t)key; e[1]=(uint8_t)(key>>8);
             e[2]=(uint8_t)(key>>16); e[3]=(uint8_t)(key>>24);
             e[4]=(uint8_t)slot; e[5]=(uint8_t)(slot>>8);
             e[6]=(uint8_t)(slot>>16); e[7]=(uint8_t)(slot>>24);
             hdr->count++;
-            return ht_write_bucket(b1, buf);
+            ht_write_bucket(b2, buf2);
+            new_buf = buf2; new_bucket = b2; wrote_new = true;
         }
     }
-
-    // Bucket 1 full — try bucket 2
-    if (b2 == b1) return false;
-    if (ht_read_bucket(b2, buf)) {
-        int idx = ht_bucket_find(buf, key);
-        if (idx >= 0) {
-            uint8_t *e = buf + HT_BUCKET_HDR_SIZE + (uint32_t)idx * 8 + 4;
-            e[0]=(uint8_t)slot; e[1]=(uint8_t)(slot>>8);
-            e[2]=(uint8_t)(slot>>16); e[3]=(uint8_t)(slot>>24);
-            return ht_write_bucket(b2, buf);
-        }
-        ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf;
+    if (is_update && old_idx2 >= 0 && b1_ok && !wrote_new) {
+        // Old is in b2 — try b1 first
+        ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf1;
         if (hdr->count < HT_ENTRIES_PER_BKT) {
-            uint8_t *e = buf + HT_BUCKET_HDR_SIZE + hdr->count * 8;
+            uint8_t *e = buf1 + HT_BUCKET_HDR_SIZE + hdr->count * 8;
             e[0]=(uint8_t)key; e[1]=(uint8_t)(key>>8);
             e[2]=(uint8_t)(key>>16); e[3]=(uint8_t)(key>>24);
             e[4]=(uint8_t)slot; e[5]=(uint8_t)(slot>>8);
             e[6]=(uint8_t)(slot>>16); e[7]=(uint8_t)(slot>>24);
             hdr->count++;
-            return ht_write_bucket(b2, buf);
+            ht_write_bucket(b1, buf1);
+            new_buf = buf1; new_bucket = b1; wrote_new = true;
         }
     }
 
-    return false;  // both buckets full — astronomically unlikely with 2-choice
+    if (!wrote_new) {
+        // Either a new insert, or both candidate buckets are in the same bucket,
+        // or the preferred bucket was full. Fall back: write to any bucket with space.
+        if (b1_ok) {
+            // If key already in b1, update in-place (same bucket, unavoidable)
+            if (old_idx1 >= 0) {
+                uint8_t *e = buf1 + HT_BUCKET_HDR_SIZE + (uint32_t)old_idx1 * 8 + 4;
+                e[0]=(uint8_t)slot; e[1]=(uint8_t)(slot>>8);
+                e[2]=(uint8_t)(slot>>16); e[3]=(uint8_t)(slot>>24);
+                return ht_write_bucket(b1, buf1);
+            }
+            ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf1;
+            if (hdr->count < HT_ENTRIES_PER_BKT) {
+                uint8_t *e = buf1 + HT_BUCKET_HDR_SIZE + hdr->count * 8;
+                e[0]=(uint8_t)key; e[1]=(uint8_t)(key>>8);
+                e[2]=(uint8_t)(key>>16); e[3]=(uint8_t)(key>>24);
+                e[4]=(uint8_t)slot; e[5]=(uint8_t)(slot>>8);
+                e[6]=(uint8_t)(slot>>16); e[7]=(uint8_t)(slot>>24);
+                hdr->count++;
+                ht_write_bucket(b1, buf1);
+                new_buf = buf1; new_bucket = b1; wrote_new = true;
+            }
+        }
+        if (!wrote_new && b2_ok) {
+            if (old_idx2 >= 0) {
+                uint8_t *e = buf2 + HT_BUCKET_HDR_SIZE + (uint32_t)old_idx2 * 8 + 4;
+                e[0]=(uint8_t)slot; e[1]=(uint8_t)(slot>>8);
+                e[2]=(uint8_t)(slot>>16); e[3]=(uint8_t)(slot>>24);
+                return ht_write_bucket(b2, buf2);
+            }
+            ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf2;
+            if (hdr->count < HT_ENTRIES_PER_BKT) {
+                uint8_t *e = buf2 + HT_BUCKET_HDR_SIZE + hdr->count * 8;
+                e[0]=(uint8_t)key; e[1]=(uint8_t)(key>>8);
+                e[2]=(uint8_t)(key>>16); e[3]=(uint8_t)(key>>24);
+                e[4]=(uint8_t)slot; e[5]=(uint8_t)(slot>>8);
+                e[6]=(uint8_t)(slot>>16); e[7]=(uint8_t)(slot>>24);
+                hdr->count++;
+                ht_write_bucket(b2, buf2);
+                new_buf = buf2; new_bucket = b2; wrote_new = true;
+            }
+        }
+    }
+    if (!wrote_new) return false;
+
+    // STEP 2: Remove old entry (only if update and old was in a DIFFERENT bucket)
+    if (old_idx1 >= 0 && new_bucket != b1) {
+        // Re-read b1 (we may have modified it above)
+        if (ht_read_bucket(b1, buf1)) {
+            int idx = ht_bucket_find(buf1, key);
+            if (idx >= 0) {
+                ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf1;
+                if ((uint16_t)idx < hdr->count - 1) {
+                    uint8_t *dst = buf1 + HT_BUCKET_HDR_SIZE + (uint32_t)idx * 8;
+                    uint8_t *src = buf1 + HT_BUCKET_HDR_SIZE + (hdr->count - 1) * 8;
+                    memcpy(dst, src, 8);
+                }
+                memset(buf1 + HT_BUCKET_HDR_SIZE + (hdr->count - 1) * 8, 0, 8);
+                hdr->count--;
+                ht_write_bucket(b1, buf1);
+            }
+        }
+    }
+    if (old_idx2 >= 0 && new_bucket != b2) {
+        if (ht_read_bucket(b2, buf2)) {
+            int idx = ht_bucket_find(buf2, key);
+            if (idx >= 0) {
+                ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf2;
+                if ((uint16_t)idx < hdr->count - 1) {
+                    uint8_t *dst = buf2 + HT_BUCKET_HDR_SIZE + (uint32_t)idx * 8;
+                    uint8_t *src = buf2 + HT_BUCKET_HDR_SIZE + (hdr->count - 1) * 8;
+                    memcpy(dst, src, 8);
+                }
+                memset(buf2 + HT_BUCKET_HDR_SIZE + (hdr->count - 1) * 8, 0, 8);
+                hdr->count--;
+                ht_write_bucket(b2, buf2);
+            }
+        }
+    }
+
+    return true;
 }
 
 // Remove key from hash table. Swap-with-last for O(1) removal.
