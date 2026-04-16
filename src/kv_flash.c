@@ -116,6 +116,11 @@ static uint16_t g_versions[KV_INDEX_CAPACITY];
 static uint8_t g_flags[KV_INDEX_CAPACITY];
 static uint32_t g_count = 0;
 
+// Per-page live reference count — incremented when a loc pointing to that
+// page enters the index, decremented when it leaves.  Allows page_has_live_refs()
+// to be O(1) instead of scanning the full index.
+static uint16_t g_page_ref_count[1u << KV_LOC_PAGE_BITS];
+
 // Page allocation sequence: incremented each time a new page is prepared.
 // Loaded from the highest valid page header on recovery so that new pages
 // always get a strictly higher sequence number.
@@ -305,9 +310,13 @@ static int idx_find_linear(uint32_t key) {
 static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags) {
     int f = idx_find_linear(key);
     if (f >= 0) {
+        uint16_t old_page; unpack_loc(g_locs[(uint32_t)f], &old_page, NULL, NULL);
+        if (g_page_ref_count[old_page] > 0) g_page_ref_count[old_page]--;
         g_locs[(uint32_t)f] = loc;
         g_versions[(uint32_t)f] = version;
         g_flags[(uint32_t)f] = flags;
+        uint16_t new_page; unpack_loc(loc, &new_page, NULL, NULL);
+        g_page_ref_count[new_page]++;
         return true;
     }
     if (g_count >= KV_INDEX_CAPACITY) return false;
@@ -323,6 +332,8 @@ static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags)
     g_versions[pos] = version;
     g_flags[pos] = flags;
     g_count++;
+    uint16_t new_page; unpack_loc(loc, &new_page, NULL, NULL);
+    g_page_ref_count[new_page]++;
     return true;
 }
 
@@ -330,6 +341,8 @@ static void idx_remove(uint32_t key) {
     int f = idx_find_linear(key);
     if (f < 0) return;
     uint32_t i = (uint32_t)f;
+    uint16_t old_page; unpack_loc(g_locs[i], &old_page, NULL, NULL);
+    if (g_page_ref_count[old_page] > 0) g_page_ref_count[old_page]--;
     if (i + 1u < g_count) {
         memmove(&g_keys[i], &g_keys[i + 1], (g_count - i - 1u) * sizeof(uint32_t));
         memmove(&g_locs[i], &g_locs[i + 1], (g_count - i - 1u) * sizeof(uint32_t));
@@ -482,12 +495,7 @@ static bool __no_inline_not_in_flash_func(deadlog_append)(uint16_t page_idx) {
 }
 
 static bool page_has_live_refs(uint16_t page_idx) {
-    for (uint32_t i = 0; i < g_count; i++) {
-        uint16_t p = 0;
-        unpack_loc(g_locs[i], &p, NULL, NULL);
-        if (p == page_idx) return true;
-    }
-    return false;
+    return g_page_ref_count[page_idx] > 0;
 }
 
 // append_record: write a data record followed immediately by its commit marker.
@@ -609,6 +617,7 @@ void __no_inline_not_in_flash_func(kv_wipe)(void) {
     g_write_off = sizeof(kv_page_hdr_t);
     g_page_sequence   = 0;
     g_mutation_group  = 0;
+    memset(g_page_ref_count, 0, sizeof(g_page_ref_count));
 }
 
 // kv_init: deterministic recovery routine.
@@ -632,6 +641,7 @@ void kv_init(void) {
     g_write_off      = sizeof(kv_page_hdr_t);
     g_page_sequence  = 0;
     g_mutation_group = 0;
+    memset(g_page_ref_count, 0, sizeof(g_page_ref_count));
 
     uint16_t last_page = 0;
     uint16_t last_off  = sizeof(kv_page_hdr_t);

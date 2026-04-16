@@ -131,6 +131,41 @@ void metadata_reload_cache(void) {
     }
 }
 
+// Targeted single-entry cache updaters — called after each mutation so only
+// the modified entry is reloaded instead of rebuilding all three caches.
+static void cache_upsert_type(uint16_t ordinal) {
+    for (uint32_t i = 0; i < g_type_count; i++) {
+        if (g_type_cache[i].ordinal == ordinal) {
+            load_type_from_store(ordinal, &g_type_cache[i]);
+            return;
+        }
+    }
+    if (g_type_count < META_MAX_ITEMS)
+        if (load_type_from_store(ordinal, &g_type_cache[g_type_count])) g_type_count++;
+}
+
+static void cache_upsert_field(uint16_t ordinal) {
+    for (uint32_t i = 0; i < g_field_count; i++) {
+        if (g_field_cache[i].ordinal == ordinal) {
+            load_field_from_store(ordinal, &g_field_cache[i]);
+            return;
+        }
+    }
+    if (g_field_count < META_MAX_ITEMS)
+        if (load_field_from_store(ordinal, &g_field_cache[g_field_count])) g_field_count++;
+}
+
+static void cache_upsert_schema(uint16_t type_ordinal) {
+    for (uint32_t i = 0; i < g_schema_count; i++) {
+        if (g_schema_cache[i].type_ordinal == type_ordinal) {
+            load_schema_from_store(type_ordinal, &g_schema_cache[i]);
+            return;
+        }
+    }
+    if (g_schema_count < META_MAX_ITEMS)
+        if (load_schema_from_store(type_ordinal, &g_schema_cache[g_schema_count])) g_schema_count++;
+}
+
 const char *metadata_field_type_name(uint8_t field_type) {
     if (field_type >= (sizeof(g_field_type_names) / sizeof(g_field_type_names[0]))) return "unknown";
     return g_field_type_names[field_type];
@@ -160,7 +195,7 @@ bool metadata_set_type(uint16_t ordinal, const char *name) {
     memset(buf, 0, sizeof(buf));
     memcpy(buf, name, strlen(name));
     if (!kv_put(metadata_key(META_TYPE_RECORD_TYPE, ordinal), (const uint8_t *)buf, sizeof(buf))) return false;
-    metadata_reload_cache();
+    cache_upsert_type(ordinal);
     return true;
 }
 
@@ -199,7 +234,7 @@ bool metadata_set_field(uint16_t ordinal, const char *name, uint8_t field_type, 
     rec.max_len = max_len;
     memcpy(rec.name, name, strlen(name));
     if (!kv_put(metadata_key(META_FIELD_RECORD_TYPE, ordinal), (const uint8_t *)&rec, sizeof(rec))) return false;
-    metadata_reload_cache();
+    cache_upsert_field(ordinal);
     return true;
 }
 
@@ -238,7 +273,7 @@ bool metadata_set_schema(uint16_t type_ordinal, const uint16_t *field_ordinals, 
         buf[2 + i * 2] = (uint8_t)(field_ordinals[i] >> 8);
     }
     if (!kv_put(metadata_key(META_SCHEMA_RECORD_TYPE, type_ordinal), buf, (uint16_t)(1 + field_count * sizeof(uint16_t)))) return false;
-    metadata_reload_cache();
+    cache_upsert_schema(type_ordinal);
     return true;
 }
 
