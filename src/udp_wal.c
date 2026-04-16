@@ -269,7 +269,7 @@ typedef struct {
     pending_card_t cards[UDP_WAL_MAX_BATCH];
 } deferred_batch_t;
 
-#define DEFERRED_QUEUE_SIZE 24
+#define DEFERRED_QUEUE_SIZE 32
 static deferred_batch_t g_deferred[DEFERRED_QUEUE_SIZE];
 
 // ============================================================
@@ -480,18 +480,20 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
 // ============================================================
 
 void udp_wal_poll(void) {
-    // Process ONE card from the first active deferred batch.
-    // One SD write per poll keeps cyw43_arch_poll() responsive.
-    for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
+    // Process up to 4 cards from active deferred batches per poll.
+    // Balances throughput against cyw43_arch_poll() responsiveness.
+    uint8_t cards_done = 0;
+    for (int i = 0; i < DEFERRED_QUEUE_SIZE && cards_done < 4; i++) {
         deferred_batch_t *db = &g_deferred[i];
         if (!db->active) continue;
 
-        if (db->next < db->count) {
+        while (db->next < db->count && cards_done < 4) {
             pending_card_t *c = &db->cards[db->next];
             if (direct_put(c->key, c->data, c->len)) {
                 db->bitmap |= (1u << db->next);
             }
             db->next++;
+            cards_done++;
         }
 
         if (db->next >= db->count) {
@@ -512,8 +514,8 @@ void udp_wal_poll(void) {
             }
             db->active = false;
         }
-        return;  // one card per poll
     }
+    if (cards_done > 0) return;
 
     // No deferred work — drain one raw ring entry
     if (g_raw_read != g_raw_write) {

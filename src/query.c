@@ -369,7 +369,25 @@ typedef struct {
     char     name[32];
 } pack_schema_t;
 
+// Resolved pack schema cache — avoids re-reading all pack 0 cards per query
+#define PACK_CACHE_SIZE 8
+static pack_schema_t g_pack_cache[PACK_CACHE_SIZE];
+static uint8_t g_pack_cache_count = 0;
+
 static bool resolve_pack(const char *name, pack_schema_t *ps) {
+    // Check cache first
+    for (uint8_t ci = 0; ci < g_pack_cache_count; ci++) {
+        bool match = (strlen(g_pack_cache[ci].name) == strlen(name));
+        for (int k = 0; match && g_pack_cache[ci].name[k]; k++) {
+            char a = g_pack_cache[ci].name[k], b = name[k];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) match = false;
+        }
+        if (match) { *ps = g_pack_cache[ci]; return true; }
+    }
+
+    // Cache miss — scan pack 0 schemas
     uint32_t keys[64];
     uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 64);
     for (uint32_t i = 0; i < count; i++) {
@@ -421,6 +439,9 @@ static bool resolve_pack(const char *name, pack_schema_t *ps) {
             ps->ord = (int16_t)(keys[i] & 0x3FFFFF);
             ps->field_count = fc;
             strncpy(ps->name, pname, 31);
+            // Insert into cache
+            if (g_pack_cache_count < PACK_CACHE_SIZE)
+                g_pack_cache[g_pack_cache_count++] = *ps;
             return true;
         }
     }
@@ -450,8 +471,8 @@ static int8_t find_lookup_to(const pack_schema_t *from, const pack_schema_t *to)
 static uint32_t search_pack_field(const pack_schema_t *ps, uint8_t field_idx,
                                    const char *value, query_op_t op,
                                    uint32_t *out_ids, uint32_t max) {
-    uint32_t keys[256];
-    uint32_t count = kv_range(((uint32_t)ps->ord << 22), 0xFFC00000u, keys, NULL, 256);
+    uint32_t keys[1024];
+    uint32_t count = kv_range(((uint32_t)ps->ord << 22), 0xFFC00000u, keys, NULL, 1024);
     set_cardinality((uint16_t)ps->ord, count);
     uint32_t found = 0;
     for (uint32_t i = 0; i < count && found < max; i++) {

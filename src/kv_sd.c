@@ -322,25 +322,76 @@ static uint32_t ht_hash2(uint32_t key) {
 
 // Read a hash bucket from SD, validate CRC. Returns false if read fails or CRC bad.
 // On CRC failure, zeros the buffer (empty bucket) — self-healing on corruption.
+// Uses a 16-slot LRU cache to avoid repeated SD reads for hot buckets.
+#define HT_CACHE_SLOTS 16
+static struct {
+    uint32_t bucket_idx;
+    uint8_t  data[512];
+    uint8_t  age;           // LRU counter (lower = more recent)
+    bool     valid;
+} g_ht_cache[HT_CACHE_SLOTS];
+
+static void ht_cache_touch(int slot) {
+    uint8_t old_age = g_ht_cache[slot].age;
+    for (int i = 0; i < HT_CACHE_SLOTS; i++) {
+        if (g_ht_cache[i].valid && g_ht_cache[i].age < old_age)
+            g_ht_cache[i].age++;
+    }
+    g_ht_cache[slot].age = 0;
+}
+
 static bool ht_read_bucket(uint32_t bucket_idx, uint8_t *buf) {
     if (bucket_idx >= g_sb.hashtab_blocks) return false;
+
+    // Check cache first
+    for (int i = 0; i < HT_CACHE_SLOTS; i++) {
+        if (g_ht_cache[i].valid && g_ht_cache[i].bucket_idx == bucket_idx) {
+            memcpy(buf, g_ht_cache[i].data, 512);
+            ht_cache_touch(i);
+            return true;
+        }
+    }
+
     if (!sd_read_block(g_sb.hashtab_start + bucket_idx, buf)) return false;
     ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf;
     uint16_t expected = ht_crc16(buf + 2, 510);
     if (hdr->crc16 != expected || hdr->count > HT_ENTRIES_PER_BKT) {
-        // Corrupt or blank bucket — treat as empty (self-heal)
         memset(buf, 0, 512);
         return true;
     }
+
+    // Insert into cache (evict oldest)
+    int evict = 0;
+    uint8_t max_age = 0;
+    for (int i = 0; i < HT_CACHE_SLOTS; i++) {
+        if (!g_ht_cache[i].valid) { evict = i; break; }
+        if (g_ht_cache[i].age > max_age) { max_age = g_ht_cache[i].age; evict = i; }
+    }
+    g_ht_cache[evict].bucket_idx = bucket_idx;
+    memcpy(g_ht_cache[evict].data, buf, 512);
+    g_ht_cache[evict].valid = true;
+    ht_cache_touch(evict);
+
     return true;
 }
 
 // Write a hash bucket to SD, computing CRC before write.
+// Also updates the cache entry if present.
 static bool ht_write_bucket(uint32_t bucket_idx, uint8_t *buf) {
     if (bucket_idx >= g_sb.hashtab_blocks) return false;
     ht_bucket_hdr_t *hdr = (ht_bucket_hdr_t *)buf;
     hdr->crc16 = ht_crc16(buf + 2, 510);
-    return sd_write_block(g_sb.hashtab_start + bucket_idx, buf);
+    if (!sd_write_block(g_sb.hashtab_start + bucket_idx, buf)) return false;
+
+    // Update cache
+    for (int i = 0; i < HT_CACHE_SLOTS; i++) {
+        if (g_ht_cache[i].valid && g_ht_cache[i].bucket_idx == bucket_idx) {
+            memcpy(g_ht_cache[i].data, buf, 512);
+            ht_cache_touch(i);
+            return true;
+        }
+    }
+    return true;
 }
 
 // Search a bucket buffer for a key. Returns entry index (0..count-1) or -1.

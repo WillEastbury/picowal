@@ -41,7 +41,7 @@
 
 #define HTTP_PORT 80
 #define HTTP_BUF_SIZE 4096  // max request size (headers + body up to 4KB value)
-#define HTTP_CONN_COUNT 6
+#define HTTP_CONN_COUNT 8
 
 static wal_state_t *g_wal;
 static volatile uint32_t g_http_last_activity_ms = 0;
