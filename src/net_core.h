@@ -3,9 +3,9 @@
 
 #include "wal_defs.h"
 
+#include "wifi_config.h"
+
 // WiFi config
-#define WIFI_SSID       "Bussy5G"
-#define WIFI_PASSWORD   "Whatever1"
 #define WIFI_TIMEOUT_MS 15000
 
 // TCP server config — Pico listens on this port

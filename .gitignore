@@ -11,3 +11,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local WiFi credentials — never commit
+src/wifi_config.h

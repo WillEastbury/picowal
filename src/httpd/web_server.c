@@ -565,7 +565,7 @@ static uint16_t http_respond(struct tcp_pcb *pcb, const char *status,
     char hdr[256];
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
-        "Access-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n",
+        "Connection: keep-alive\r\n\r\n",
         status, ctype, blen);
     if (n <= 0 || n >= (int)sizeof(hdr)) return 0;
     if (tcp_write(pcb, hdr, (uint16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
@@ -586,7 +586,7 @@ static uint16_t http_respond_with_headers(struct tcp_pcb *pcb, const char *statu
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
         "%s"
-        "Access-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n",
+        "Connection: keep-alive\r\n\r\n",
         status, ctype, blen, extra_hdrs ? extra_hdrs : "");
     if (n <= 0 || n >= (int)sizeof(hdr)) return 0;
     if (tcp_write(pcb, hdr, (uint16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK) return 0;
@@ -819,7 +819,7 @@ static void http_page_req(struct tcp_pcb *pcb, const char *req,
     char hdr[256];
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %lu\r\n"
-        "Access-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n",
+        "Connection: keep-alive\r\n\r\n",
         (unsigned long)total);
     if (n <= 0) return;
     tcp_write(pcb, hdr, (uint16_t)n, TCP_WRITE_FLAG_COPY);
