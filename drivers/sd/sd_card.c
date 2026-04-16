@@ -2,6 +2,7 @@
 
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
+#include "hardware/dma.h"
 #include "hardware/timer.h"
 #include "pico/stdlib.h"
 #include "httpd/web_server.h"
@@ -18,6 +19,11 @@ static bool g_sd_ready = false;
 static bool g_sd_sdhc = false;
 static uint32_t g_sd_blocks = 0;
 static char g_sd_debug[128] = "not initialized";
+
+// DMA channels for bulk SPI transfers
+static int g_dma_tx = -1;
+static int g_dma_rx = -1;
+static const uint8_t g_dma_ff = 0xFF; // constant TX byte for reads
 
 #define CMD0    0
 #define CMD8    8
@@ -57,11 +63,54 @@ static uint8_t __no_inline_not_in_flash_func(spi_transfer)(uint8_t tx) {
 }
 
 static void __no_inline_not_in_flash_func(spi_write)(const uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) spi_transfer(data[i]);
+    if (g_dma_tx < 0 || g_dma_rx < 0 || len < 16) {
+        for (uint32_t i = 0; i < len; i++) spi_transfer(data[i]);
+        return;
+    }
+    // TX: send actual data; RX: discard into a dummy byte
+    static uint8_t rx_junk;
+    dma_channel_config tc = dma_channel_get_default_config((uint)g_dma_tx);
+    channel_config_set_transfer_data_size(&tc, DMA_SIZE_8);
+    channel_config_set_dreq(&tc, spi_get_dreq(SD_SPI, true));
+    channel_config_set_read_increment(&tc, true);
+    channel_config_set_write_increment(&tc, false);
+    dma_channel_configure((uint)g_dma_tx, &tc, &spi_get_hw(SD_SPI)->dr, data, len, false);
+
+    dma_channel_config rc = dma_channel_get_default_config((uint)g_dma_rx);
+    channel_config_set_transfer_data_size(&rc, DMA_SIZE_8);
+    channel_config_set_dreq(&rc, spi_get_dreq(SD_SPI, false));
+    channel_config_set_read_increment(&rc, false);
+    channel_config_set_write_increment(&rc, false);
+    dma_channel_configure((uint)g_dma_rx, &rc, &rx_junk, &spi_get_hw(SD_SPI)->dr, len, false);
+
+    dma_channel_start((uint)g_dma_rx);
+    dma_channel_start((uint)g_dma_tx);
+    dma_channel_wait_for_finish_blocking((uint)g_dma_rx);
 }
 
 static void __no_inline_not_in_flash_func(spi_read)(uint8_t *data, uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) data[i] = spi_transfer(0xFF);
+    if (g_dma_tx < 0 || g_dma_rx < 0 || len < 16) {
+        for (uint32_t i = 0; i < len; i++) data[i] = spi_transfer(0xFF);
+        return;
+    }
+    // TX: send 0xFF repeatedly (no increment); RX: read into buffer
+    dma_channel_config tc = dma_channel_get_default_config((uint)g_dma_tx);
+    channel_config_set_transfer_data_size(&tc, DMA_SIZE_8);
+    channel_config_set_dreq(&tc, spi_get_dreq(SD_SPI, true));
+    channel_config_set_read_increment(&tc, false);
+    channel_config_set_write_increment(&tc, false);
+    dma_channel_configure((uint)g_dma_tx, &tc, &spi_get_hw(SD_SPI)->dr, &g_dma_ff, len, false);
+
+    dma_channel_config rc = dma_channel_get_default_config((uint)g_dma_rx);
+    channel_config_set_transfer_data_size(&rc, DMA_SIZE_8);
+    channel_config_set_dreq(&rc, spi_get_dreq(SD_SPI, false));
+    channel_config_set_read_increment(&rc, false);
+    channel_config_set_write_increment(&rc, true);
+    dma_channel_configure((uint)g_dma_rx, &rc, data, &spi_get_hw(SD_SPI)->dr, len, false);
+
+    dma_channel_start((uint)g_dma_rx);
+    dma_channel_start((uint)g_dma_tx);
+    dma_channel_wait_for_finish_blocking((uint)g_dma_rx);
 }
 
 static uint8_t __no_inline_not_in_flash_func(sd_cmd)(uint8_t cmd, uint32_t arg) {
@@ -204,6 +253,10 @@ bool sd_init(void) {
     if (!g_sd_sdhc) sd_cmd_end(CMD16, 512);
 
     spi_set_baudrate(SD_SPI, 50000000);
+
+    // Claim DMA channels for bulk SPI transfers
+    if (g_dma_tx < 0) g_dma_tx = (int)dma_claim_unused_channel(false);
+    if (g_dma_rx < 0) g_dma_rx = (int)dma_claim_unused_channel(false);
 
     // CSD: read capacity
     r1 = sd_cmd(CMD9, 0);
