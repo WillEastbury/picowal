@@ -479,9 +479,10 @@ static bool tcp_start_listen(net_ctx_t *ctx) {
 #define DASH_LINES 4
 #define DASH_LINE_MAX 48
 
-static uint32_t g_lcd_last_ms = 0;
-static char g_dash_prev[DASH_LINES][DASH_LINE_MAX];
-static bool g_dash_first = true;
+// Core 0 LCD state — Scratch X for contention-free dashboard updates
+static uint32_t __scratch_x("lcd") g_lcd_last_ms = 0;
+static char __scratch_x("lcd") g_dash_prev[DASH_LINES][DASH_LINE_MAX];
+static bool __scratch_x("lcd") g_dash_first = true;
 
 // Draw a dashboard line only if the text changed since last refresh.
 static void dash_line(int idx, uint16_t x, uint16_t y, const char *text,

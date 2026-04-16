@@ -44,7 +44,10 @@
 #define HTTP_CONN_COUNT 8
 
 static wal_state_t *g_wal;
-static volatile uint32_t g_http_last_activity_ms = 0;
+
+// Core 0 hot state — placed in Scratch X (bank 8) to avoid
+// contention with Core 1's striped-SRAM index writes.
+static volatile uint32_t __scratch_x("http") g_http_last_activity_ms = 0;
 
 // Shared query result buffer in BSS — avoids a 4KB+ stack allocation in the
 // HTTP dispatch path (Core 0 stack is only 8KB). HTTP has one active dispatch

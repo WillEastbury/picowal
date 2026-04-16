@@ -1,8 +1,12 @@
 #include "ili9488.h"
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
+#include "hardware/dma.h"
 #include "hardware/pwm.h"
 #include <string.h>
+
+// DMA channel for LCD SPI TX (claimed in lcd_init)
+static int g_lcd_dma = -1;
 
 // Basic 5x7 font (ASCII 32-90)
 static const uint8_t font5x7[][5] = {
@@ -85,6 +89,23 @@ static void lcd_data8(uint8_t data) {
     gpio_put(LCD_CS_PIN, 1);
 }
 
+// DMA-accelerated SPI TX — frees Core 0 during bulk pixel/char writes.
+// Falls back to blocking SPI for small transfers or if DMA unavailable.
+static void lcd_spi_write_dma(const uint8_t *data, uint32_t len) {
+    if (g_lcd_dma < 0 || len < 32) {
+        spi_write_blocking(LCD_SPI_PORT, data, len);
+        return;
+    }
+    dma_channel_config c = dma_channel_get_default_config((uint)g_lcd_dma);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    channel_config_set_dreq(&c, spi_get_dreq(LCD_SPI_PORT, true));
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    dma_channel_configure((uint)g_lcd_dma, &c,
+                          &spi_get_hw(LCD_SPI_PORT)->dr, data, len, true);
+    dma_channel_wait_for_finish_blocking((uint)g_lcd_dma);
+}
+
 // Bulk pixel write: 3 bytes per pixel (RGB666), buffered
 static void lcd_write_pixels(uint16_t color, uint32_t count) {
     uint8_t r = (color >> 11) & 0x1F;
@@ -107,7 +128,7 @@ static void lcd_write_pixels(uint16_t color, uint32_t count) {
     gpio_put(LCD_DC_PIN, 1);
     while (count > 0) {
         uint32_t chunk = (count < 160) ? count : 160;
-        spi_write_blocking(LCD_SPI_PORT, buf, chunk * 3);
+        lcd_spi_write_dma(buf, chunk * 3);
         count -= chunk;
     }
     gpio_put(LCD_CS_PIN, 1);
@@ -179,6 +200,9 @@ void lcd_init(void) {
     lcd_cmd(0x11);  // Sleep Out
     sleep_ms(120);
     lcd_cmd(0x29);  // Display On
+
+    // Claim DMA channel for LCD SPI bulk writes
+    g_lcd_dma = (int)dma_claim_unused_channel(false);
 }
 
 void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
@@ -261,7 +285,7 @@ void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uin
     lcd_set_window(x, y, x + w - 1, y + h - 1);
     gpio_put(LCD_CS_PIN, 0);
     gpio_put(LCD_DC_PIN, 1);
-    spi_write_blocking(LCD_SPI_PORT, buf, n);
+    lcd_spi_write_dma(buf, n);
     gpio_put(LCD_CS_PIN, 1);
 }
 

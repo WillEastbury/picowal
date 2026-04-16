@@ -124,18 +124,12 @@ static uint32_t g_count = 0;
 // uint8_t saturates at 255 — a page with 255+ refs is conservatively never reclaimed.
 static uint8_t g_page_ref_count[KV_SECTOR_COUNT];
 
-// Page allocation sequence: incremented each time a new page is prepared.
-// Loaded from the highest valid page header on recovery so that new pages
-// always get a strictly higher sequence number.
-static uint32_t g_page_sequence = 0;
-
-// Mutation group counter: incremented for each kv_put / kv_delete call.
-// Each data record and its commit marker share the same group ID, enabling
-// the recovery scanner to detect and discard uncommitted partial writes.
-static uint32_t g_mutation_group = 0;
-
-static uint16_t g_write_page = 0;
-static uint16_t g_write_off = sizeof(kv_page_hdr_t);
+// Core 1 hot write state — placed in Scratch Y (bank 9) to avoid
+// contention with Core 0's striped-SRAM accesses during HTTP/WiFi work.
+static uint32_t __scratch_y("kv") g_page_sequence = 0;
+static uint32_t __scratch_y("kv") g_mutation_group = 0;
+static uint16_t __scratch_y("kv") g_write_page = 0;
+static uint16_t __scratch_y("kv") g_write_off = sizeof(kv_page_hdr_t);
 
 static uint16_t g_deadlog_write_page = 0;
 static uint16_t g_deadlog_write_off = sizeof(deadlog_hdr_t);
