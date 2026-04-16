@@ -186,6 +186,47 @@ static uint8_t g_card_buf[KVSD_CARD_SIZE];
 static uint8_t g_open_blk[512];
 static bool g_open_cached = false;
 
+// Data block read cache — 4 slots to avoid re-reading hot packed blocks
+#define DATA_CACHE_SLOTS 4
+static struct {
+    uint32_t blk_num;
+    uint8_t  data[512];
+    uint8_t  age;
+    bool     valid;
+} g_data_cache[DATA_CACHE_SLOTS];
+
+static bool data_cache_read(uint32_t blk_num, uint8_t *buf) {
+    for (int i = 0; i < DATA_CACHE_SLOTS; i++) {
+        if (g_data_cache[i].valid && g_data_cache[i].blk_num == blk_num) {
+            memcpy(buf, g_data_cache[i].data, 512);
+            uint8_t old = g_data_cache[i].age;
+            for (int j = 0; j < DATA_CACHE_SLOTS; j++)
+                if (g_data_cache[j].valid && g_data_cache[j].age < old) g_data_cache[j].age++;
+            g_data_cache[i].age = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void data_cache_insert(uint32_t blk_num, const uint8_t *buf) {
+    int evict = 0; uint8_t max_age = 0;
+    for (int i = 0; i < DATA_CACHE_SLOTS; i++) {
+        if (!g_data_cache[i].valid) { evict = i; break; }
+        if (g_data_cache[i].age > max_age) { max_age = g_data_cache[i].age; evict = i; }
+    }
+    g_data_cache[evict].blk_num = blk_num;
+    memcpy(g_data_cache[evict].data, buf, 512);
+    g_data_cache[evict].valid = true;
+    g_data_cache[evict].age = 0;
+}
+
+static void data_cache_invalidate(uint32_t blk_num) {
+    for (int i = 0; i < DATA_CACHE_SLOTS; i++)
+        if (g_data_cache[i].valid && g_data_cache[i].blk_num == blk_num)
+            g_data_cache[i].valid = false;
+}
+
 // Forward declarations
 static int32_t alloc_slot(void);
 
@@ -695,14 +736,15 @@ static uint32_t blk_addr(uint32_t blk_num) {
 
 // Read a packed block from SD. Returns false if read fails or header invalid.
 static bool packed_read(uint32_t blk_num, uint8_t *buf) {
+    if (data_cache_read(blk_num, buf)) return true;
     if (!sd_read_block(blk_addr(blk_num), buf)) return false;
     const packed_blk_hdr_t *hdr = (const packed_blk_hdr_t *)buf;
     if (hdr->used > 512 || hdr->count > 60) {
-        // Corrupt — treat as empty
         memset(buf, 0, 512);
         packed_blk_hdr_t *h = (packed_blk_hdr_t *)buf;
         h->used = PACKED_BLK_HDR;
     }
+    data_cache_insert(blk_num, buf);
     return true;
 }
 
@@ -749,6 +791,7 @@ static bool packed_remove_card(uint32_t blk_num, uint32_t key) {
     hdr->count--;
 
     sd_write_block(blk_addr(blk_num), blk);
+    data_cache_invalidate(blk_num);
 
     // Invalidate open block cache if we modified it
     if (blk_num == g_sb.open_block) g_open_cached = false;
@@ -809,6 +852,7 @@ static uint32_t packed_append(uint32_t key, const uint8_t *comp, uint16_t clen,
     g_sb.open_count = hdr->count;
 
     sd_write_block(blk_addr(g_sb.open_block), g_open_blk);
+    data_cache_invalidate(g_sb.open_block);
     return g_sb.open_block;
 }
 

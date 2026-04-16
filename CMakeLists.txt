@@ -55,6 +55,11 @@ target_link_libraries(${PROJECT_NAME}
     sd_driver
 )
 
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    PICO_STACK_SIZE=0x2000
+    PICO_CORE1_STACK_SIZE=0x1000
+)
+
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
 pico_enable_stdio_uart(${PROJECT_NAME} 0)
 
