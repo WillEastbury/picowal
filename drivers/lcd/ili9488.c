@@ -253,16 +253,29 @@ void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uin
     uint16_t h = 7u * size;
     if (x + w > LCD_WIDTH || y + h > LCD_HEIGHT) return;
 
-    // Max: size=3 → 18×21 = 378 pixels × 3 = 1134 bytes
-    uint8_t buf[1134];
+    // Fast path: size ≤ 2 fits in a 504-byte stack buffer (common case).
+    // Size 3+ falls back to fill_rect per scaled pixel (boot splash only).
+    uint8_t buf[504];
     uint16_t n = render_char_rgb(c, fg, bg, size, buf, sizeof(buf));
-    if (n == 0) return;
+    if (n > 0) {
+        lcd_set_window(x, y, x + w - 1, y + h - 1);
+        gpio_put(LCD_CS_PIN, 0);
+        gpio_put(LCD_DC_PIN, 1);
+        spi_write_blocking(LCD_SPI_PORT, buf, n);
+        gpio_put(LCD_CS_PIN, 1);
+        return;
+    }
 
-    lcd_set_window(x, y, x + w - 1, y + h - 1);
-    gpio_put(LCD_CS_PIN, 0);
-    gpio_put(LCD_DC_PIN, 1);
-    spi_write_blocking(LCD_SPI_PORT, buf, n);
-    gpio_put(LCD_CS_PIN, 1);
+    // Fallback for large sizes: per-pixel (rare)
+    if (c < ' ' || c > 'Z') c = ' ';
+    int idx = c - ' ';
+    for (uint8_t col = 0; col < 6; col++) {
+        uint8_t line = (col < 5) ? font5x7[idx][col] : 0;
+        for (uint8_t row = 0; row < 7; row++) {
+            uint16_t color = (line & (1 << row)) ? fg : bg;
+            lcd_fill_rect(x + col * size, y + row * size, size, size, color);
+        }
+    }
 }
 
 void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t size) {
