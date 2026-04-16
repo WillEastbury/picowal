@@ -341,7 +341,10 @@ static void process_pbuf_data(net_ctx_t *ctx, struct pbuf *p) {
             }
 
             case RX_APPEND_DATA: {
-                // Incremental copy: data spans multiple pbufs, DMA to slot
+                // Incremental copy: data spans multiple pbufs.
+                // DMA for bulk (>64B), memcpy for small fragments.
+                // This path is rare: TCP segments are 1460B, values max 508B,
+                // so most appends take the zero-copy pbuf path above.
                 uint16_t need = ctx->cur_value_len - ctx->cur_written;
                 uint16_t avail = remaining - pos;
                 uint16_t copy = (avail < need) ? avail : need;
