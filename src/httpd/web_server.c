@@ -1462,6 +1462,32 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         body_len = req_len - (uint16_t)(body - (const uint8_t *)req);
     }
 
+    // Route dispatch — ordered by path[1] prefix for fast skipping.
+    // The switch jumps directly to the matching prefix group;
+    // unmatched prefixes go straight to 404.
+    if (path[0] != '/') goto route_404;
+    switch (path[1]) {
+    case '\0': goto route_home;
+    case '0':  goto route_0;
+    case 'a':  goto route_a;
+    case 'b':  goto route_b;
+    case 'f':  goto route_f;
+    case 'g':  goto route_g;
+    case 'i':  goto route_home; // /index.html
+    case 'l':  goto route_l;
+    case 'm':  goto route_m;
+    case 'n':  goto route_n;
+    case 'p':  goto route_p;
+    case 'q':  goto route_q;
+    case 's':  goto route_s;
+    case 'u':  goto route_u;
+    case 'w':  goto route_w;
+    case 'I':  goto route_I;
+    default:   goto route_404;
+    }
+
+    // ---- Prefix '0': /0/stats/0, /0/1/{id}/_passwd, /0/{type}/{id} ----
+route_0:
     if (verb == VERB_GET && strcmp(path, "/0/stats/0") == 0) {
         kv_stats_t stats = kv_stats();
         char json[96];
@@ -1479,6 +1505,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'a': /app.js, /admin/* ----
+route_a:
     if (verb == VERB_GET && strcmp(path, "/app.js") == 0) {
         uint16_t blen = sizeof(APP_JS) - 1;
         char hdr[160];
@@ -1494,6 +1522,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'f': /favicon.* ----
+route_f:
     // Favicon — return 204 with long cache to stop browser re-requesting
     if (verb == VERB_GET && (strcmp(path, "/favicon.ico") == 0 || strcmp(path, "/favicon.png") == 0)) {
         (void)http_respond_with_headers(pcb, "204 No Content", "image/x-icon",
@@ -1502,6 +1532,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'g': /gui ----
+route_g:
     if (verb == VERB_GET && strcmp(path, "/gui") == 0) {
         (void)http_respond_with_headers(pcb, "302 Found", "text/plain",
                                         "Location: /\r\n",
@@ -1509,6 +1541,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'w': /w/... redirects ----
+route_w:
     if (verb == VERB_GET && strncmp(path, "/w/0/", 5) == 0) {
         (void)http_respond_with_headers(pcb, "302 Found", "text/plain",
                                         "Location: /admin\r\n",
@@ -1516,18 +1550,23 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'm': /meta/types, /meta/fields ----
+route_m:
     if ((strncmp(path, "/meta/types", 11) == 0 || strncmp(path, "/meta/fields", 12) == 0) &&
         (verb == VERB_GET || verb == VERB_POST)) {
         handle_metadata(pcb, verb, path, body, body_len, req);
         return;
     }
 
+    // ---- Prefix 's': /status ----
+route_s:
     if (verb == VERB_GET && strcmp(path, "/status") == 0) {
         http_status_page(pcb, req);
         return;
     }
 
-    // ---- Route: GET / — SSR home: login form or pack links ----
+    // ---- Prefix '/' and 'i': GET / and /index.html — SSR home ----
+route_home:
     if (verb == VERB_GET && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
         user_session_t session;
         char *pg = g_page_buf;
@@ -1591,6 +1630,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'p': /pack/{n}, /pack/{n}/{card} ----
+route_p:
     // ---- Route: GET /pack/{n} — SSR card list ----
     if (verb == VERB_GET && strncmp(path, "/pack/", 6) == 0) {
         user_session_t session;
@@ -2657,6 +2698,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'b': /batch ----
+route_b:
     // ---- Route: POST /batch — atomic multi-card write ----
     // Binary: 0xBA 0x7C count(u16) then [pack(u16) card(u32) len(u16) data[len]]...
     if (verb == VERB_POST && strcmp(path, "/batch") == 0) {
@@ -2813,6 +2856,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'l': /login, /logout ----
+route_l:
     // ---- Route: POST /login ----
     if (verb == VERB_POST && strcmp(path, "/login") == 0) {
         if (!body || body_len < 64) {
@@ -2971,6 +3016,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         }
     }
 
+    // ---- Prefix 'I': /Ids/{type}/... ----
+route_I:
     if (verb == VERB_GET && path[0] == '/' && path[1] == 'I' && path[2] == 'd' && path[3] == 's' && path[4] == '/') {
         user_session_t session;
         if (!check_auth_session(req, &session)) {
@@ -3326,6 +3373,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'u': /update, /update/begin, /update/chunk, /update/commit ----
+route_u:
     // ---- OTA: POST /update/begin — prepare SD staging ----
     if (verb == VERB_POST && strcmp(path, "/update/begin") == 0) {
         user_session_t session;
@@ -3483,6 +3532,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'q': /query ----
+route_q:
     // ---- Route: POST /query — execute a query ----
     if (verb == VERB_POST && strcmp(path, "/query") == 0) {
         user_session_t session;
@@ -3586,6 +3637,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+    // ---- Prefix 'n': /notes/{pack}/{card} ----
+route_n:
     // ---- Route: GET /notes/{pack}/{card}?writenotes={text} — anonymous notes ----
     // No auth required. ONLY pack 99 allowed (anonymous notes sentinel).
     if (verb == VERB_GET && strncmp(path, "/notes/", 7) == 0) {
@@ -3652,6 +3705,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         return;
     }
 
+route_404:
     http_json(pcb, "404 Not Found", "{\"error\":\"unknown route\"}");
 }
 
