@@ -52,6 +52,11 @@ static volatile uint32_t g_http_last_activity_ms = 0;
 #define QUERY_RESULT_BUF 4096
 static char g_query_result[QUERY_RESULT_BUF];
 
+// Shared HTML page buffer for route handlers — moved off the stack.
+// 8KB covers the largest page (card editor with child grids).
+#define PAGE_BUF_SIZE 8192
+static char g_page_buf[PAGE_BUF_SIZE];
+
 // ============================================================
 // Debug log ring buffer — accessible via GET /admin/log
 // ============================================================
@@ -1522,12 +1527,12 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
     // ---- Route: GET / — SSR home: login form or pack links ----
     if (verb == VERB_GET && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
         user_session_t session;
-        char pg[4096];
+        char *pg = g_page_buf;
         int n = 0;
 
         if (!check_auth_session(req, &session)) {
             // Login form
-            n = snprintf(pg, sizeof(pg),
+            n = snprintf(pg, PAGE_BUF_SIZE,
                 "<div style='max-width:300px;margin:80px auto'>"
                 "<h1 style='color:#e94560'>&#x1F5C3; PicoWAL</h1>"
                 "<p style='color:#888'>Hardware KV Storage</p>"
@@ -1540,14 +1545,14 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 "<script src=/app.js></script>");
         } else {
             // Home — list available packs
-            n = snprintf(pg, sizeof(pg),
+            n = snprintf(pg, PAGE_BUF_SIZE,
                 "<h2>Welcome</h2>"
                 "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px'>");
 
             // Scan Pack 0 for schema cards
             uint32_t keys[32];
             uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 32);
-            for (uint32_t i = 0; i < count && n < (int)sizeof(pg) - 200; i++) {
+            for (uint32_t i = 0; i < count && n < (int)PAGE_BUF_SIZE - 200; i++) {
                 uint32_t pack_ord = keys[i] & 0x3FFFFF;
                 if (pack_ord == 0) continue; // skip Pack 0 itself
                 uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
@@ -1559,7 +1564,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 // Count cards in this pack
                 uint32_t ckeys[2]; uint32_t cc = kv_range(((uint32_t)pack_ord << 22), 0xFFC00000u, ckeys, NULL, 2);
 
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<a href='/pack/%lu' style='text-decoration:none'>"
                     "<div class=card style='margin:0'>"
                     "<div style='font-size:11px;color:#888'>Pack %lu</div>"
@@ -1569,7 +1574,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     (unsigned long)pack_ord, (unsigned long)pack_ord,
                     pname, (unsigned int)fc, (unsigned long)cc);
             }
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "</div>"
                 "<div style='margin-top:16px'>"
                 "<button id=logoutBtn class=btn-sm>Logout</button>%s</div>"
@@ -1636,46 +1641,46 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             for (uint8_t i = 0; i < fc; i++) ftypes_by_ord[ords[i]] = ftypes[i];
             if (exists) parse_card_values(dbuf, dlen, vals, ftypes_by_ord, 32);
 
-            char pg[8192]; int n = 0;
+            char *pg = g_page_buf; int n = 0;
 
             // Breadcrumb
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<div class=crumb><a href='/'>Home</a> &rsaquo; "
                 "<a href='/pack/%u'>%s</a> &rsaquo; Card %u</div>",
                 pack_ord, pname, card_ord);
 
             // Card navigation
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<div class=card-nav>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<div class=card-nav>");
             if (prev_card >= 0)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<a href='/pack/%u/%ld'>&larr; Card %ld</a>",
                     pack_ord, (long)prev_card, (long)prev_card);
             else
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<span></span>");
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<span></span>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<span style='color:#0ff;font-weight:bold'>Card %u%s</span>",
                 card_ord, exists ? "" : " <span class=badge>NEW</span>");
             if (next_card >= 0)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<a href='/pack/%u/%ld'>Card %ld &rarr;</a>",
                     pack_ord, (long)next_card, (long)next_card);
             else
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<span></span>");
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</div>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<span></span>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</div>");
 
             // Card form inside styled container
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<div class=card><form id=cardForm data-pack='%u' data-card='%u'>",
                 pack_ord, card_ord);
 
-            for (uint8_t i = 0; i < fc && n < (int)sizeof(pg) - 500; i++) {
+            for (uint8_t i = 0; i < fc && n < (int)PAGE_BUF_SIZE - 500; i++) {
                 const char *tn = type_name(ftypes[i]);
                 // Skip password_hash and salt for display (ords 1,2 in pack 1)
                 if (pack_ord == 1 && (ords[i] == 1 || ords[i] == 2)) continue;
 
                 char plabel[32];
                 pretty_name(plabel, sizeof(plabel), names[i]);
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<div class=fg><label>%s <span style='font-weight:400;color:#505868;font-size:11px'>%s</span></label>",
                     plabel, type_friendly(ftypes[i]));
 
@@ -1683,7 +1688,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 if (tc == 0x07) {
                     // bool — dropdown
                     bool checked = vals[ords[i]][0] == 't' || vals[ords[i]][0] == '1';
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<select data-ord='%u' data-ftype='bool'>"
                         "<option value='false'%s>No</option>"
                         "<option value='true'%s>Yes</option></select>",
@@ -1694,7 +1699,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     uint32_t cur_val = 0;
                     if (vals[ords[i]][0]) cur_val = (uint32_t)strtoul(vals[ords[i]], NULL, 10);
 
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<select data-ord='%u' data-ftype='lookup'>"
                         "<option value='0'>— select —</option>",
                         (unsigned)ords[i]);
@@ -1702,7 +1707,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     uint32_t lkeys[16];
                     uint32_t lcount = kv_range(((uint32_t)(target_pack & 0x3FFu) << 22),
                                                0xFFC00000u, lkeys, NULL, 16);
-                    for (uint32_t li = 0; li < lcount && n < (int)sizeof(pg) - 300; li++) {
+                    for (uint32_t li = 0; li < lcount && n < (int)PAGE_BUF_SIZE - 300; li++) {
                         uint32_t lid = lkeys[li] & 0x3FFFFF;
                         char lname[32] = "";
                         uint8_t lbuf[256]; uint16_t llen = sizeof(lbuf);
@@ -1721,27 +1726,27 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                                 }
                             }
                         }
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<option value='%lu'%s>%s</option>",
                             (unsigned long)lid, lid == cur_val ? " selected" : "",
                             lname[0] ? lname : "?");
                     }
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</select>");
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</select>");
                 } else if (tc == 0x11) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input data-ord='%u' data-ftype='blob' value='%s' readonly "
                         "title='Blob fields are read-only' style='opacity:.6'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0A) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input type=date data-ord='%u' data-ftype='isodate' value='%s'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0B) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input type=time data-ord='%u' data-ftype='isotime' value='%s' step=1>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x0C) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input type=datetime-local data-ord='%u' data-ftype='isodatetime' value='%s' step=1>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else if (tc == 0x01 || tc == 0x02 || tc == 0x03 || tc == 0x04 || tc == 0x05 || tc == 0x06) {
@@ -1750,30 +1755,30 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     else if (tc == 0x04) minmax = " min=-128 max=127";
                     else if (tc == 0x02) minmax = " min=0 max=65535";
                     else if (tc == 0x05) minmax = " min=-32768 max=32767";
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input type=number data-ord='%u' data-ftype='%s' value='%s'%s>",
                         (unsigned)ords[i], tn, vals[ords[i]], minmax);
                 } else if (tc == 0x08 || tc == 0x09) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input data-ord='%u' data-ftype='%s' value='%s' maxlength='%u'"
                         " placeholder='Up to %u characters'>",
                         (unsigned)ords[i], tn, vals[ords[i]], (unsigned)maxlens[i],
                         (unsigned)maxlens[i]);
                 } else if (tc == 0x10) {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input data-ord='%u' data-ftype='array_u16' value='%s' "
                         "placeholder='comma-separated numbers'>",
                         (unsigned)ords[i], vals[ords[i]]);
                 } else {
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<input data-ord='%u' data-ftype='%s' value='%s'>",
                         (unsigned)ords[i], tn, vals[ords[i]]);
                 }
 
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</div>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</div>");
             }
 
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<div class=actions>"
                 "<button type=submit class=btn-ok>&#x1F4BE; Save</button>"
                 "%s"
@@ -1786,7 +1791,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 pack_ord);
 
             // ---- Master-Child: inline grid editor for child packs ----
-            for (uint8_t ci = 0; ci < child_count && exists && n < (int)sizeof(pg) - 400; ci++) {
+            for (uint8_t ci = 0; ci < child_count && exists && n < (int)PAGE_BUF_SIZE - 400; ci++) {
                 uint8_t cp = child_packs[ci];
                 uint8_t csb[256]; uint16_t csl = sizeof(csb);
                 char cpname[32] = "?";
@@ -1848,7 +1853,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 }
 
                 char plabel[32]; pretty_name(plabel, sizeof(plabel), cpname);
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<div class=card style='margin-top:8px'>"
                     "<div style='display:flex;justify-content:space-between;align-items:center'>"
                     "<h2 style='margin:0;font-size:16px'>%s</h2>"
@@ -1859,18 +1864,18 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     plabel, (unsigned)cp, (unsigned)link_ord, card_ord,
                     (unsigned)cp, (unsigned)link_ord, card_ord);
 
-                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 80; d++) {
+                for (uint8_t d = 0; d < ndc && n < (int)PAGE_BUF_SIZE - 80; d++) {
                     char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<th>%s</th>", ph);
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<th>%s</th>", ph);
                 }
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<th style='width:30px'></th></tr></thead><tbody>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<th style='width:30px'></th></tr></thead><tbody>");
 
                 // Scan matching child cards
                 uint32_t ckeys[64];
                 uint32_t ccount = kv_range(((uint32_t)(cp & 0x3FFu) << 22), 0xFFC00000u, ckeys, NULL, 64);
                 uint16_t shown = 0;
                 uint32_t max_cid = 0;
-                for (uint32_t ri = 0; ri < ccount && shown < 15 && n < (int)sizeof(pg) - 400; ri++) {
+                for (uint32_t ri = 0; ri < ccount && shown < 15 && n < (int)PAGE_BUF_SIZE - 400; ri++) {
                     uint32_t child_cid = ckeys[ri] & 0x3FFFFF;
                     if (child_cid > max_cid) max_cid = child_cid;
                     uint8_t rb[256]; uint16_t rl = sizeof(rb);
@@ -1892,9 +1897,9 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     if (!match) continue;
 
                     // Render editable row
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<tr data-cid='%lu'>", (unsigned long)child_cid);
-                    for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 200; d++) {
+                    for (uint8_t d = 0; d < ndc && n < (int)PAGE_BUF_SIZE - 200; d++) {
                         char fv[48] = "";
                         uint16_t fo = 4;
                         while (fo + 1 < rl) {
@@ -1909,18 +1914,18 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                         if (dtc == 0x12 && !lk_is_search[d]) {
                             // Lookup with <=16 options: select dropdown
                             uint32_t cur = fv[0] ? (uint32_t)strtoul(fv, NULL, 10) : 0;
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                                 "<td><select data-ord='%u' data-ftype='lookup'>"
                                 "<option value='0'>—</option>",
                                 (unsigned)cords[dcols[d]]);
-                            for (uint8_t li = 0; li < lk_counts[d] && n < (int)sizeof(pg) - 80; li++) {
-                                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                            for (uint8_t li = 0; li < lk_counts[d] && n < (int)PAGE_BUF_SIZE - 80; li++) {
+                                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                                     "<option value='%lu'%s>%s</option>",
                                     (unsigned long)lk_opts[d][li].id,
                                     lk_opts[d][li].id == cur ? " selected" : "",
                                     lk_opts[d][li].name);
                             }
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</select></td>");
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</select></td>");
                         } else if (dtc == 0x12 && lk_is_search[d]) {
                             // Lookup with >16 options: search input
                             char resolved[24] = "";
@@ -1937,21 +1942,21 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                                     }
                                 }
                             }
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                                 "<td><input data-ord='%u' data-ftype='lookup' value='%s'"
                                 " data-lid='%s' placeholder='Search...' list='lk%u_%u'></td>",
                                 (unsigned)cords[dcols[d]], fv, resolved, (unsigned)cp, (unsigned)cords[dcols[d]]);
                         } else {
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                                 "<td><input data-ord='%u' data-ftype='%s' value='%s'",
                                 (unsigned)cords[dcols[d]], dtn, fv);
-                            if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=number");
-                            else if (dtc == 0x07) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=number min=0 max=1");
-                            else if (dtc == 0x0A) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=date");
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "></td>");
+                            if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=number");
+                            else if (dtc == 0x07) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=number min=0 max=1");
+                            else if (dtc == 0x0A) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=date");
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "></td>");
                         }
                     }
-                    n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                    n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                         "<td><a href='#' onclick='this.closest(\"tr\").remove();return false' "
                         "style='color:#b04050;font-size:14px' title='Remove'>&#x2715;</a></td></tr>");
                     shown++;
@@ -1959,48 +1964,48 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
 
                 // Empty row for adding new child
                 uint32_t next_id = max_cid + 1;
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<tr data-cid='%lu' class='new-row' style='opacity:.6'>",
                     (unsigned long)next_id);
-                for (uint8_t d = 0; d < ndc && n < (int)sizeof(pg) - 150; d++) {
+                for (uint8_t d = 0; d < ndc && n < (int)PAGE_BUF_SIZE - 150; d++) {
                     uint8_t dtc = ctypes[dcols[d]];
                     const char *dtn = type_name(dtc);
                     char ph[32]; pretty_name(ph, sizeof(ph), cnames[dcols[d]]);
                     if (dtc == 0x12 && !lk_is_search[d]) {
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<td><select data-ord='%u' data-ftype='lookup'>"
                             "<option value='0'>—</option>",
                             (unsigned)cords[dcols[d]]);
-                        for (uint8_t li = 0; li < lk_counts[d] && n < (int)sizeof(pg) - 80; li++) {
-                            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        for (uint8_t li = 0; li < lk_counts[d] && n < (int)PAGE_BUF_SIZE - 80; li++) {
+                            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                                 "<option value='%lu'>%s</option>",
                                 (unsigned long)lk_opts[d][li].id, lk_opts[d][li].name);
                         }
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</select></td>");
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</select></td>");
                     } else if (dtc == 0x12 && lk_is_search[d]) {
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<td><input data-ord='%u' data-ftype='lookup' value='' "
                             "placeholder='Search %s...' list='lk%u_%u'></td>",
                             (unsigned)cords[dcols[d]], ph, (unsigned)cp, (unsigned)cords[dcols[d]]);
                     } else {
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<td><input data-ord='%u' data-ftype='%s' value='' placeholder='%s'",
                             (unsigned)cords[dcols[d]], dtn, ph);
-                        if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=number");
-                        else if (dtc == 0x07) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=number min=0 max=1");
-                        else if (dtc == 0x0A) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " type=date");
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "></td>");
+                        if (dtc == 0x02 || dtc == 0x03) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=number");
+                        else if (dtc == 0x07) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=number min=0 max=1");
+                        else if (dtc == 0x0A) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " type=date");
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "></td>");
                     }
                 }
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<td></td></tr>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<td></td></tr>");
 
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "</tbody></table>"
                     "<div id='gridMsg%u' style='margin-top:4px;font-size:13px'></div></div>",
                     (unsigned)cp);
             }
 
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<script src=/app.js></script>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<script src=/app.js></script>");
 
             http_page_req(pcb, req, pg, (uint16_t)n);
             return;
@@ -2045,15 +2050,15 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             uint32_t end = start + per_page;
             if (end > total) end = total;
 
-            char pg[4096]; int n = 0;
+            char *pg = g_page_buf; int n = 0;
 
             // Header with count
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<h2>%s <span style='color:#556;font-size:14px'>Pack %u &middot; %lu cards</span></h2>",
                 pname, pack_ord, (unsigned long)total);
 
             // Search bar
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<div class=search-box>"
                 "<input id=qSearch placeholder='S:* F:%s W:%s|==|...' value=''>"
                 "<button onclick=\"location.href='/query?q='+encodeURIComponent(document.getElementById('qSearch').value)\" class=btn-ghost>"
@@ -2061,16 +2066,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 pname, fc > 0 ? names[0] : "field");
 
             // Table header with multiple columns
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<table><thead><tr><th style='width:50px'>#</th>");
-            for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 200; c++) {
+            for (uint8_t c = 0; c < ncols && n < (int)PAGE_BUF_SIZE - 200; c++) {
                 char ph[32]; pretty_name(ph, sizeof(ph), names[c]);
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<th>%s</th>", ph);
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<th>%s</th>", ph);
             }
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</tr></thead><tbody>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</tr></thead><tbody>");
 
             // Render rows for this page
-            for (uint32_t i = start; i < end && n < (int)sizeof(pg) - 400; i++) {
+            for (uint32_t i = start; i < end && n < (int)PAGE_BUF_SIZE - 400; i++) {
                 uint32_t cid = keys[i] & 0x3FFFFF;
                 // Decode all visible fields
                 char fvals[4][48];
@@ -2110,40 +2115,40 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                     }
                 }
 
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<tr><td><a href='/pack/%u/%lu'>%lu</a></td>",
                     pack_ord, (unsigned long)cid, (unsigned long)cid);
-                for (uint8_t c = 0; c < ncols && n < (int)sizeof(pg) - 100; c++) {
+                for (uint8_t c = 0; c < ncols && n < (int)PAGE_BUF_SIZE - 100; c++) {
                     if (c == 0)
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<td><a href='/pack/%u/%lu' style='color:#e0e0e0'>%s</a></td>",
                             pack_ord, (unsigned long)cid, fvals[c][0] ? fvals[c] : "-");
                     else
-                        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                             "<td>%s</td>", fvals[c][0] ? fvals[c] : "-");
                 }
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</tr>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</tr>");
             }
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</tbody></table>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</tbody></table>");
 
             // Pagination bar
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<div class=pager>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<div class=pager>");
             if (page > 0)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<a href='/pack/%u?p=%u'>&larr; Prev</a>", pack_ord, page - 1);
             else
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<span></span>");
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<span></span>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<span>Page %u of %lu</span>", page + 1, (unsigned long)total_pages);
             if (page + 1 < total_pages)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                     "<a href='/pack/%u?p=%u'>Next &rarr;</a>", pack_ord, page + 1);
             else
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<span></span>");
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</div>");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<span></span>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</div>");
 
             // New card button
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<div style='margin-top:8px'>"
                 "<a href='/pack/%u/%lu' style='text-decoration:none'>"
                 "<button type=button>+ New Card</button></a></div>",
@@ -2162,14 +2167,14 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             return;
         }
 
-        char pg[4096]; int n = 0;
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        char *pg = g_page_buf; int n = 0;
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2>Users</h2>"
             "<table><thead><tr><th>Card</th><th>Username</th><th>Read</th><th>Write</th><th>Delete</th></tr></thead><tbody>");
 
         uint32_t keys[64];
         uint32_t count = kv_range(((uint32_t)1 << 22), 0xFFC00000u, keys, NULL, 64);
-        for (uint32_t i = 0; i < count && n < (int)sizeof(pg) - 300; i++) {
+        for (uint32_t i = 0; i < count && n < (int)PAGE_BUF_SIZE - 300; i++) {
             uint32_t cid = keys[i] & 0x3FFFFF;
             uint8_t cbuf[512]; uint16_t clen = sizeof(cbuf);
             if (!kv_get_copy(keys[i], cbuf, &clen, NULL)) continue;
@@ -2179,7 +2184,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             ftbo[0] = 14; ftbo[3] = 5; ftbo[5] = 0x10; ftbo[6] = 0x10; ftbo[7] = 0x10;
             parse_card_values(cbuf, clen, vals, ftbo, 32);
 
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<tr><td>%lu</td><td><a href='/pack/1/%lu'>%s</a>%s</td>"
                 "<td>%s</td><td>%s</td><td>%s</td></tr>",
                 (unsigned long)cid, (unsigned long)cid,
@@ -2188,7 +2193,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 vals[5], vals[6], vals[7]);
         }
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "</tbody></table>"
             "<div class=card><h2>Create User</h2>"
             "<form id=userForm>"
@@ -2225,14 +2230,14 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             return;
         }
 
-        char pg[4096]; int n = 0;
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        char *pg = g_page_buf; int n = 0;
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2>Schema Editor</h2>"
             "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px'>");
 
         uint32_t keys[32];
         uint32_t count = kv_range(0, 0xFFC00000u, keys, NULL, 32);
-        for (uint32_t i = 0; i < count && n < (int)sizeof(pg) - 300; i++) {
+        for (uint32_t i = 0; i < count && n < (int)PAGE_BUF_SIZE - 300; i++) {
             uint32_t pack_ord = keys[i] & 0x3FFFFF;
             uint8_t sbuf[256]; uint16_t slen = sizeof(sbuf);
             if (!kv_get_copy(keys[i], sbuf, &slen, NULL)) continue;
@@ -2240,7 +2245,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             uint8_t ords[32], types[32], maxlens[32]; char names[32][32];
             uint8_t fc = parse_schema(sbuf, slen, names, types, maxlens, ords, pname, 32);
 
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<a href='/admin/meta/%lu' style='text-decoration:none'>"
                 "<div class=card style='margin:0'>"
                 "<div style='font-size:11px;color:#888'>Pack %lu</div>"
@@ -2250,7 +2255,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 (unsigned long)pack_ord, (unsigned long)pack_ord, pname, (unsigned int)fc);
         }
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "</div>"
             "<div class=card style='margin-top:16px'><h2>+ New Pack</h2>"
             "<form id=packForm><div class=row>"
@@ -2285,28 +2290,28 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             fc = parse_schema_full(sbuf, slen, names, ftypes, maxlens, ords,
                                    pname, 32, pmodule, child_packs, &child_count);
 
-        char pg[4096]; int n = 0;
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        char *pg = g_page_buf; int n = 0;
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2><a href='/admin/meta' style='color:#7eb8f0'>&laquo; Schema</a> / Pack %u: %s",
             pack_ord, pname);
         if (pmodule[0])
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 " <span style='font-size:13px;color:#6a7080'>(%s)</span>", pmodule);
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</h2>"
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</h2>"
             "<table><thead><tr><th>#</th><th>Field</th><th>Type</th><th>Max</th></tr></thead><tbody>");
 
-        for (uint8_t i = 0; i < fc && n < (int)sizeof(pg) - 200; i++) {
+        for (uint8_t i = 0; i < fc && n < (int)PAGE_BUF_SIZE - 200; i++) {
             const char *tn = type_name(ftypes[i]);
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<tr><td>%u</td><td>%s</td><td>%s%s</td><td>%u</td></tr>",
                 (unsigned int)ords[i], names[i], tn,
                 ftypes[i] == 18 ? " &rarr; pack" : "",
                 (unsigned int)maxlens[i]);
         }
-        if (fc == 0) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        if (fc == 0) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<tr><td colspan=4 style='color:#888'>No fields yet</td></tr>");
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "</tbody></table>"
             "<div class=card><h2>Add / Edit Field</h2>"
             "<form id=fieldForm data-pack='%u'><div class=row>"
@@ -2321,13 +2326,13 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             "bool","ascii","utf8","date","time","datetime",
             "array_u16","blob","lookup"
         };
-        for (int i = 0; i < 15 && n < (int)sizeof(pg) - 100; i++) {
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        for (int i = 0; i < 15 && n < (int)PAGE_BUF_SIZE - 100; i++) {
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
                 "<option value='%s'%s>%s</option>",
                 ft_names[i], strcmp(ft_names[i],"utf8")==0 ? " selected" : "", ft_names[i]);
         }
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "</select></div></div>"
             "<div class=row>"
             "<div><label>Max Length</label><input id=fm type=number value=32 min=1 max=255></div>"
@@ -2352,23 +2357,23 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                         }
                     }
                 }
-                if (ci > 0) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), ", ");
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<b>%s</b> (%u)", cpn, (unsigned)child_packs[ci]);
+                if (ci > 0) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), ", ");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<b>%s</b> (%u)", cpn, (unsigned)child_packs[ci]);
             }
         } else {
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "<i style='color:#6a7080'>None</i>");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "<i style='color:#6a7080'>None</i>");
         }
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "</div>"
             "<div class=row>"
             "<div><label>Child Pack IDs</label>"
             "<input id=cpInput placeholder='e.g. 6,8' value='");
         // Pre-fill current children
         for (uint8_t ci = 0; ci < child_count; ci++) {
-            if (ci > 0) n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), ",");
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "%u", (unsigned)child_packs[ci]);
+            if (ci > 0) n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), ",");
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "%u", (unsigned)child_packs[ci]);
         }
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "'></div>"
             "<div style='align-self:end'>"
             "<button onclick=\"fetch('/admin/children/%u',{method:'POST',credentials:'same-origin',"
@@ -2379,7 +2384,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             "<h2 style='color:#e06070'>Danger Zone</h2>",
             pack_ord);
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<p>Delete this pack and all its cards.</p>"
             "<button onclick=\"if(confirm('Delete pack %u and ALL its cards?'))fetch('/admin/meta/%u',{method:'DELETE',credentials:'same-origin'}).then(function(r){if(r.ok)location.href='/admin/meta';else alert('Failed')})\" "
             "style='background:#c0392b'>Delete Pack %u</button></div>"
@@ -3019,17 +3024,17 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
                 return;
             }
 
-            char body[4096];
-            int n = snprintf(body, sizeof(body), "COUNT=%lu\n", (unsigned long)count);
-            if (n < 0 || n >= (int)sizeof(body)) {
+            char *body = g_page_buf;
+            int n = snprintf(body, PAGE_BUF_SIZE, "COUNT=%lu\n", (unsigned long)count);
+            if (n < 0 || n >= (int)PAGE_BUF_SIZE) {
                 http_json(pcb, "500 Internal Server Error", "{\"error\":\"instance list overflow\"}");
                 return;
             }
 
             for (uint32_t i = 0; i < count; i++) {
                 uint32_t id_val = keys[i] & 0x3FFFFFu;
-                int wrote = snprintf(body + n, sizeof(body) - (size_t)n, "%lu\n", (unsigned long)id_val);
-                if (wrote < 0 || wrote >= (int)(sizeof(body) - (size_t)n)) {
+                int wrote = snprintf(body + n, PAGE_BUF_SIZE - (size_t)n, "%lu\n", (unsigned long)id_val);
+                if (wrote < 0 || wrote >= (int)(PAGE_BUF_SIZE - (size_t)n)) {
                     http_json(pcb, "500 Internal Server Error", "{\"error\":\"instance list overflow\"}");
                     return;
                 }
@@ -3103,7 +3108,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
         }
 
         char pg[LOG_BUF_SIZE + 512];
-        int n = snprintf(pg, sizeof(pg),
+        int n = snprintf(pg, PAGE_BUF_SIZE,
             "<h2>Debug Log</h2>"
             "<div class=card>"
             "<div style='display:flex;gap:8px;margin-bottom:8px'>"
@@ -3207,8 +3212,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             return;
         }
 
-        char pg[4096]; int n = 0;
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        char *pg = g_page_buf; int n = 0;
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2>Flash Inspector</h2>"
             "<div class=card>"
             "<form method=GET><div class=row>"
@@ -3220,11 +3225,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             (unsigned long)addr, (unsigned long)rlen);
 
         const uint8_t *mem = (const uint8_t *)addr;
-        for (uint32_t i = 0; i < rlen && n < (int)sizeof(pg) - 80; i += 16) {
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "%08lx: ", (unsigned long)(addr + i));
+        for (uint32_t i = 0; i < rlen && n < (int)PAGE_BUF_SIZE - 80; i += 16) {
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "%08lx: ", (unsigned long)(addr + i));
             for (uint32_t j = 0; j < 16 && i + j < rlen; j++)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "%02x ", mem[i + j]);
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " ");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "%02x ", mem[i + j]);
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " ");
             for (uint32_t j = 0; j < 16 && i + j < rlen; j++) {
                 uint8_t c = mem[i + j];
                 pg[n++] = (c >= 0x20 && c < 0x7F) ? c : '.';
@@ -3232,7 +3237,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             pg[n++] = '\n';
         }
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</pre></div>");
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</pre></div>");
         http_page_req(pcb, req, pg, (uint16_t)n);
         return;
     }
@@ -3264,8 +3269,8 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             return;
         }
 
-        char pg[4096]; int n = 0;
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        char *pg = g_page_buf; int n = 0;
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2>RAM Inspector</h2>"
             "<div class=card>"
             "<form method=GET><div class=row>"
@@ -3277,11 +3282,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             (unsigned long)addr, (unsigned long)rlen);
 
         const uint8_t *mem = (const uint8_t *)addr;
-        for (uint32_t i = 0; i < rlen && n < (int)sizeof(pg) - 80; i += 16) {
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "%08lx: ", (unsigned long)(addr + i));
+        for (uint32_t i = 0; i < rlen && n < (int)PAGE_BUF_SIZE - 80; i += 16) {
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "%08lx: ", (unsigned long)(addr + i));
             for (uint32_t j = 0; j < 16 && i + j < rlen; j++)
-                n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "%02x ", mem[i + j]);
-            n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), " ");
+                n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "%02x ", mem[i + j]);
+            n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), " ");
             for (uint32_t j = 0; j < 16 && i + j < rlen; j++) {
                 uint8_t c = mem[i + j];
                 pg[n++] = (c >= 0x20 && c < 0x7F) ? c : '.';
@@ -3289,7 +3294,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             pg[n++] = '\n';
         }
 
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u), "</pre></div>");
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u), "</pre></div>");
         http_page_req(pcb, req, pg, (uint16_t)n);
         return;
     }
@@ -3435,7 +3440,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
 
         char pg[2048]; int n = 0;
         bool sd_ok = kvsd_ready();
-        n += snprintf(pg + n, ((n) < (int)sizeof(pg) ? sizeof(pg) - (size_t)(n) : 0u),
+        n += snprintf(pg + n, ((n) < (int)PAGE_BUF_SIZE ? PAGE_BUF_SIZE - (size_t)(n) : 0u),
             "<h2>Firmware Update</h2>"
             "<div class=card>"
             "<p>Staging via <strong>%s</strong>. Flash target: <strong>Slot A</strong> (0x000000).</p>"

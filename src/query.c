@@ -10,6 +10,17 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+// Query debug logging — disabled by default to reduce per-query overhead.
+// Define QUERY_DEBUG=1 at compile time to re-enable.
+#ifndef QUERY_DEBUG
+#define QUERY_DEBUG 0
+#endif
+#if QUERY_DEBUG
+#define qlog(...) web_log(__VA_ARGS__)
+#else
+#define qlog(...) ((void)0)
+#endif
+
 // ============================================================
 // Fanout stats cache — tracks avg children per lookup value
 // Used by the cost estimator to reorder WHERE predicates
@@ -630,9 +641,9 @@ int query_execute(const query_t *q, char *buf, int buf_size,
     for (uint8_t si = 0; si < s_count; si++) {
         if (q->select_fields[si].agg != QAGG_NONE) { has_agg = true; break; }
     }
-    web_log("[query] s_count=%d has_agg=%d\n", s_count, has_agg);
+    qlog("[query] s_count=%d has_agg=%d\n", s_count, has_agg);
     for (uint8_t si = 0; si < s_count; si++) {
-        web_log("[query]  S[%d]: agg=%d field='%s' ord=%d type=0x%02x\n",
+        qlog("[query]  S[%d]: agg=%d field='%s' ord=%d type=0x%02x\n",
                 si, q->select_fields[si].agg, s_names[si], s_ords[si], s_types[si]);
     }
 
@@ -688,7 +699,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         }
         // Log optimizer results
         for (uint8_t wi = 0; wi < w_count; wi++) {
-            web_log("[qopt] W[%d] ord=%d cost=%lu val='%.16s'\n",
+            qlog("[qopt] W[%d] ord=%d cost=%lu val='%.16s'\n",
                     wi, w_ords[wi], (unsigned long)w_cost[wi], w_values[wi]);
         }
     }
@@ -716,7 +727,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
             }
             if (ndistinct > 0) {
                 fanout_update((uint16_t)primary->ord, w_ords[wi], 0, (uint16_t)card_count, ndistinct);
-                web_log("[qopt] fanout pack=%d ord=%d total=%lu distinct=%u avg=%u\n",
+                qlog("[qopt] fanout pack=%d ord=%d total=%lu distinct=%u avg=%u\n",
                         primary->ord, w_ords[wi], (unsigned long)card_count, ndistinct,
                         ndistinct > 0 ? (unsigned)(card_count / ndistinct) : 0);
             }
