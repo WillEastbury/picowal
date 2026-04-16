@@ -121,7 +121,8 @@ static uint32_t g_count = 0;
 // Per-page live reference count — incremented when a loc pointing to that
 // page enters the index, decremented when it leaves.  Allows page_has_live_refs()
 // to be O(1) instead of scanning the full index.
-static uint16_t g_page_ref_count[1u << KV_LOC_PAGE_BITS];
+// uint8_t saturates at 255 — a page with 255+ refs is conservatively never reclaimed.
+static uint8_t g_page_ref_count[KV_SECTOR_COUNT];
 
 // Page allocation sequence: incremented each time a new page is prepared.
 // Loaded from the highest valid page header on recovery so that new pages
@@ -263,12 +264,13 @@ static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags)
     int f = idx_find_linear(key);
     if (f >= 0) {
         uint16_t old_page; unpack_loc(g_locs[(uint32_t)f], &old_page, NULL, NULL);
-        if (g_page_ref_count[old_page] > 0) g_page_ref_count[old_page]--;
+        if (g_page_ref_count[old_page] > 0 && g_page_ref_count[old_page] < 255)
+            g_page_ref_count[old_page]--;
         g_locs[(uint32_t)f] = loc;
         g_versions[(uint32_t)f] = version;
         g_flags[(uint32_t)f] = flags;
         uint16_t new_page; unpack_loc(loc, &new_page, NULL, NULL);
-        g_page_ref_count[new_page]++;
+        if (g_page_ref_count[new_page] < 255) g_page_ref_count[new_page]++;
         return true;
     }
     if (g_count >= KV_INDEX_CAPACITY) return false;
@@ -285,7 +287,7 @@ static bool idx_set(uint32_t key, uint32_t loc, uint16_t version, uint8_t flags)
     g_flags[pos] = flags;
     g_count++;
     uint16_t new_page; unpack_loc(loc, &new_page, NULL, NULL);
-    g_page_ref_count[new_page]++;
+    if (g_page_ref_count[new_page] < 255) g_page_ref_count[new_page]++;
     return true;
 }
 
@@ -294,7 +296,8 @@ static void idx_remove(uint32_t key) {
     if (f < 0) return;
     uint32_t i = (uint32_t)f;
     uint16_t old_page; unpack_loc(g_locs[i], &old_page, NULL, NULL);
-    if (g_page_ref_count[old_page] > 0) g_page_ref_count[old_page]--;
+    if (g_page_ref_count[old_page] > 0 && g_page_ref_count[old_page] < 255)
+        g_page_ref_count[old_page]--;
     if (i + 1u < g_count) {
         memmove(&g_keys[i], &g_keys[i + 1], (g_count - i - 1u) * sizeof(uint32_t));
         memmove(&g_locs[i], &g_locs[i + 1], (g_count - i - 1u) * sizeof(uint32_t));

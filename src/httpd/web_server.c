@@ -49,7 +49,7 @@ static volatile uint32_t g_http_last_activity_ms = 0;
 // Shared query result buffer in BSS — avoids a 4KB+ stack allocation in the
 // HTTP dispatch path (Core 0 stack is only 8KB). HTTP has one active dispatch
 // at a time so this is safe.
-#define QUERY_RESULT_BUF 8192
+#define QUERY_RESULT_BUF 4096
 static char g_query_result[QUERY_RESULT_BUF];
 
 // ============================================================
