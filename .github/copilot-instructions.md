@@ -36,7 +36,7 @@ POST `/admin/wipe` (admin auth required). Needs power cycle after.
 - **Display**: Waveshare Pico-ResTouch-LCD-3.5 (ILI9488, SPI1)
 - **SD Card**: 16GB SDHC on SPI1 (shared with LCD, CS on GP22)
 - **WiFi**: CYW43439 (2.4GHz only, 802.11n)
-- **Current network**: SSID `Bussy5G`, static IP `192.168.0.9/24`, GW `192.168.0.1`
+- **Current network**: WiFi credentials in `src/wifi_config.h` (gitignored; template at `src/wifi_config.h.template`), static IP `192.168.0.9/24`, GW `192.168.0.1`
 
 ## Architecture
 

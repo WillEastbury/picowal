@@ -477,7 +477,7 @@ static bool tcp_start_listen(net_ctx_t *ctx) {
 
 #define LCD_REFRESH_MS 10000u
 #define HTTP_UI_QUIET_MS 150u
-#define DASH_LINES 3
+#define DASH_LINES 4
 #define DASH_LINE_MAX 48
 
 static uint32_t g_lcd_last_ms = 0;
@@ -511,11 +511,14 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
         lcd_clear(COLOR_BLACK);
     }
 
+    snprintf(line, sizeof(line), "WIFI: %s", WIFI_SSID);
+    dash_line(0, 20, 10, line, COLOR_CYAN, COLOR_BLACK, 2);
+
     snprintf(line, sizeof(line), "HTTP: %s:80", ip_text);
-    dash_line(0, 20, 10, line, COLOR_WHITE, COLOR_BLACK, 2);
+    dash_line(1, 20, 40, line, COLOR_WHITE, COLOR_BLACK, 2);
 
     snprintf(line, sizeof(line), "FLASH: %lu PG FREE", (unsigned long)st.free);
-    dash_line(1, 20, 40, line, st.free == 0 ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, 2);
+    dash_line(2, 20, 70, line, st.free == 0 ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, 2);
 
     if (kvsd_ready()) {
         kvsd_stats_t sds = kvsd_stats();
@@ -523,9 +526,9 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
         snprintf(line, sizeof(line), "SD: %lu/%lu (%lu%%)",
                  (unsigned long)sds.active, (unsigned long)sds.max_cards,
                  (unsigned long)used_pct);
-        dash_line(2, 20, 70, line, used_pct > 90 ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, 2);
+        dash_line(3, 20, 100, line, used_pct > 90 ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, 2);
     } else {
-        dash_line(2, 20, 70, "SD: NOT READY", COLOR_RED, COLOR_BLACK, 2);
+        dash_line(3, 20, 100, "SD: NOT READY", COLOR_RED, COLOR_BLACK, 2);
     }
 
     g_dash_first = false;

@@ -16,7 +16,7 @@ Serves a full SSR web UI with user auth, schema management, a query language wit
 - **Server-side rendered** web UI — no client frameworks, ~2KB of JS total
 - **Master-child forms** with inline editable grid
 - **OTA firmware updates** via SD staging (no BOOTSEL needed)
-- **LCD dashboard** showing flash/SD stats, uptime, IP address
+- **LCD dashboard** showing SSID, IP address, flash/SD free space
 
 ## Quick start
 
@@ -79,7 +79,7 @@ W:price|>|1000
 │                                                │
 │  ┌──────────────────────────────────────────┐  │
 │  │ LCD Dashboard (ILI9488, SPI1 shared)     │  │
-│  │ Flash/SD stats, IP, uptime, OTA status   │  │
+│  │ SSID, IP, flash free, SD usage           │  │
 │  └──────────────────────────────────────────┘  │
 └────────────────────────────────────────────────┘
 ```
@@ -232,7 +232,7 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 ## Hardware
 
 - **Raspberry Pi Pico 2W** — RP2350 Cortex-M33, 520KB SRAM, 4MB flash
-- **Waveshare Pico-ResTouch-LCD-3.5** — ILI9488 LCD + XPT2046 touch
+- **Waveshare Pico-ResTouch-LCD-3.5** — ILI9488 LCD (touch not used)
 - **16GB SDHC** — shared SPI1 bus (GP10=SCK, GP11=MOSI, GP12=MISO, GP22=CS)
 - **Static IP**: 192.168.222.223/16, gateway 192.168.0.1
 
@@ -251,7 +251,7 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 | File | Lines | Purpose |
 |------|-------|---------|
 | `src/net_core.c` | 659 | Core 0 main loop: WiFi connect (5× retry with backoff), static IP, HTTP init, UDP WAL init, hardware watchdog (8s), poll loop (cyw43 + TCP drain + UDP + LCD + SD flush). Also contains the raw TCP WAL server (port 8001) with HMAC-SHA256 challenge/response auth. Core 1 heartbeat stall detection. |
-| `src/net_core.h` | 51 | WiFi credentials, PSK, static IP config, WAL port constants. |
+| `src/net_core.h` | 51 | Static IP config, WAL port constants. WiFi credentials loaded from `wifi_config.h` (gitignored). |
 | `src/httpd/web_server.c` | 3464 | **Largest file.** Full SSR HTTP server: connection pool (6 conns), request parser, route dispatcher, HTML templating, CSS generation, app.js serving, cookie auth + PSK fallback, RBAC enforcement. Routes: card CRUD, batch writes, query UI, schema editor, user admin, OTA upload, admin wipe/reboot, debug log, notes. |
 | `src/httpd/web_server.h` | 16 | Exports: `web_server_init()`, `web_server_recent_activity()`, `web_log()`, cardinality helpers. |
 | `src/udp_wal.c` | 491 | UDP WAL protocol server (port 8002). Session management (8 sessions, epoch-based), HELLO/RESUME handshake, batch write (up to 16 cards), single-card read, 4 durability levels, bitmap ACK. Optional ChaCha20-Poly1305 encryption. Deferred queue (16 slots) + raw ring (48 overflow) for backpressure. |
@@ -295,8 +295,6 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 | `src/user_auth.h` | 107 | Auth API: `user_auth_init/login/logout/check/can_read/can_write/can_delete/is_admin/create_user/change_password/seed_schema`. |
 | `src/crypto.c` | 299 | **Standalone crypto** (no mbedTLS for ciphers): ChaCha20 stream cipher, Poly1305 MAC, AEAD encrypt/decrypt, HKDF-SHA256 key derivation. Used by UDP WAL encryption. |
 | `src/crypto.h` | 36 | Crypto primitives API. |
-| `src/key_store.c` | 66 | PSK flash persistence (load/generate/format). Not currently in build target. |
-| `src/key_store.h` | 12 | PSK store API. |
 
 ### Query engine
 
@@ -317,9 +315,9 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `drivers/lcd/ili9488.c` | 212 | ILI9488 480×320 LCD driver over SPI0. Init sequence, pixel/rect/char/string drawing, backlight PWM. Shares bus with nothing (dedicated SPI0). |
+| `drivers/lcd/ili9488.c` | 260 | ILI9488 480×320 LCD driver over SPI1. Init sequence, buffered character rendering (one SPI transaction per glyph), pixel/rect/string drawing, backlight PWM. |
 | `drivers/lcd/ili9488.h` | 33 | LCD API + color constants. |
-| `drivers/sd/sd_card.c` | 276 | SD card SPI driver on SPI1. Bit-bang bus wakeup (required after LCD init), CMD0/CMD8/ACMD41 with timeout, single/multi block read/write. SPI transfer has 50ms timeout guard. All read+write functions `__no_inline_not_in_flash_func` for OTA safety. |
+| `drivers/sd/sd_card.c` | 330 | SD card SPI driver on SPI1. DMA-driven bulk transfers (512-byte blocks), bit-bang bus wakeup (required after LCD init), CMD0/CMD8/ACMD41 with timeout, single/multi block read/write at 50MHz. All read+write functions `__no_inline_not_in_flash_func` for OTA safety. |
 | `drivers/sd/sd_card.h` | 35 | SD API: `sd_init/read_block/read_blocks/write_block/write_blocks/get_info/get_debug`. Pin definitions. |
 | `drivers/touch/xpt2046.c` | 46 | XPT2046 resistive touch over SPI0 (shared with LCD). 3-sample averaging. |
 | `drivers/touch/xpt2046.h` | 16 | Touch API: `touch_init/read`. |
@@ -328,7 +326,7 @@ python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
 
 | Directory | Purpose |
 |-----------|---------|
-| `lib/heatshrink/` | LZSS compression library (encoder + decoder). Used by `storage.c`. |
+| `lib/heatshrink/` | LZSS compression library (encoder + decoder). Used by `kv_flash.c`, `kv_sd.c`, `storage.c`. |
 
 ### Python tools
 
