@@ -208,29 +208,61 @@ void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t colo
     lcd_write_pixels(color, (uint32_t)w * h);
 }
 
-void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t size) {
+// Render RGB666 pixels for a character into buf. Returns byte count written.
+// For size=1: 5×7 pixels + 1-col gap = 6×7 = 42 pixels × 3 = 126 bytes
+// For size>1: (6*size)×(7*size) pixels × 3 bytes
+static uint16_t render_char_rgb(char c, uint16_t fg, uint16_t bg, uint8_t size,
+                                uint8_t *buf, uint16_t buf_size) {
     if (c < ' ' || c > 'Z') c = ' ';
     int idx = c - ' ';
 
-    for (uint8_t col = 0; col < 5; col++) {
-        uint8_t line = font5x7[idx][col];
-        for (uint8_t row = 0; row < 7; row++) {
-            uint16_t color = (line & (1 << row)) ? fg : bg;
-            if (size == 1) {
-                lcd_draw_pixel(x + col, y + row, color);
-            } else {
-                lcd_fill_rect(x + col * size, y + row * size, size, size, color);
+    uint8_t fg_r = (uint8_t)(((fg >> 11) & 0x1F) << 3);
+    uint8_t fg_g = (uint8_t)(((fg >> 5) & 0x3F) << 2);
+    uint8_t fg_b = (uint8_t)((fg & 0x1F) << 3);
+    uint8_t bg_r = (uint8_t)(((bg >> 11) & 0x1F) << 3);
+    uint8_t bg_g = (uint8_t)(((bg >> 5) & 0x3F) << 2);
+    uint8_t bg_b = (uint8_t)((bg & 0x1F) << 3);
+
+    uint16_t char_w = 6u * size;  // 5 cols + 1 gap
+    uint16_t char_h = 7u * size;
+    uint16_t total = (uint16_t)(char_w * char_h * 3u);
+    if (total > buf_size) return 0;
+
+    uint16_t pos = 0;
+    for (uint8_t row = 0; row < 7; row++) {
+        for (uint8_t sy = 0; sy < size; sy++) {
+            for (uint8_t col = 0; col < 6; col++) {
+                bool lit = false;
+                if (col < 5) lit = (font5x7[idx][col] & (1 << row)) != 0;
+                uint8_t r = lit ? fg_r : bg_r;
+                uint8_t g = lit ? fg_g : bg_g;
+                uint8_t b = lit ? fg_b : bg_b;
+                for (uint8_t sx = 0; sx < size; sx++) {
+                    buf[pos++] = r;
+                    buf[pos++] = g;
+                    buf[pos++] = b;
+                }
             }
         }
     }
-    // Gap between chars
-    for (uint8_t row = 0; row < 7; row++) {
-        if (size == 1) {
-            lcd_draw_pixel(x + 5, y + row, bg);
-        } else {
-            lcd_fill_rect(x + 5 * size, y + row * size, size, size, bg);
-        }
-    }
+    return pos;
+}
+
+void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t size) {
+    uint16_t w = 6u * size;
+    uint16_t h = 7u * size;
+    if (x + w > LCD_WIDTH || y + h > LCD_HEIGHT) return;
+
+    // Max: size=3 → 18×21 = 378 pixels × 3 = 1134 bytes
+    uint8_t buf[1134];
+    uint16_t n = render_char_rgb(c, fg, bg, size, buf, sizeof(buf));
+    if (n == 0) return;
+
+    lcd_set_window(x, y, x + w - 1, y + h - 1);
+    gpio_put(LCD_CS_PIN, 0);
+    gpio_put(LCD_DC_PIN, 1);
+    spi_write_blocking(LCD_SPI_PORT, buf, n);
+    gpio_put(LCD_CS_PIN, 1);
 }
 
 void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t size) {

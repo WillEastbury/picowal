@@ -469,8 +469,27 @@ static bool tcp_start_listen(net_ctx_t *ctx) {
 
 #define LCD_REFRESH_MS 10000u
 #define HTTP_UI_QUIET_MS 150u
+#define DASH_LINES 7
+#define DASH_LINE_MAX 48
 
 static uint32_t g_lcd_last_ms = 0;
+static char g_dash_prev[DASH_LINES][DASH_LINE_MAX];
+static bool g_dash_first = true;
+
+// Draw a dashboard line only if the text changed since last refresh.
+static void dash_line(int idx, uint16_t x, uint16_t y, const char *text,
+                      uint16_t fg, uint16_t bg, uint8_t size) {
+    if (!g_dash_first && strcmp(text, g_dash_prev[idx]) == 0) return;
+    // Pad with spaces to overwrite old longer text
+    char padded[DASH_LINE_MAX];
+    int len = 0;
+    while (text[len] && len < DASH_LINE_MAX - 1) { padded[len] = text[len]; len++; }
+    int prev_len = (int)strlen(g_dash_prev[idx]);
+    while (len < prev_len && len < DASH_LINE_MAX - 1) { padded[len++] = ' '; }
+    padded[len] = '\0';
+    lcd_draw_string(x, y, padded, fg, bg, size);
+    memcpy(g_dash_prev[idx], text, strlen(text) + 1);
+}
 
 static void lcd_refresh_dashboard(wal_state_t *wal) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -481,32 +500,34 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
     uint32_t flash_records = kv_record_count();
     const char *ip_text = ip4addr_ntoa(netif_ip4_addr(netif_list));
     char line[64];
-    uint32_t used_pages = st.total - st.free;
     bool out_of_space = (st.free == 0);
 
-    lcd_clear(COLOR_BLACK);
-    lcd_draw_string(20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
+    if (g_dash_first) {
+        lcd_clear(COLOR_BLACK);
+    }
 
-    lcd_draw_string(20, 55, "BOOT: OK", COLOR_GREEN, COLOR_BLACK, 2);
+    dash_line(0, 20, 10, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
+
+    dash_line(1, 20, 55, "BOOT: OK", COLOR_GREEN, COLOR_BLACK, 2);
     snprintf(line, sizeof(line), "HTTP: %s:80", ip_text);
-    lcd_draw_string(20, 80, line, COLOR_WHITE, COLOR_BLACK, 2);
+    dash_line(2, 20, 80, line, COLOR_WHITE, COLOR_BLACK, 2);
 
     // Flash stats
     snprintf(line, sizeof(line), "FLASH: %lu recs  %lu pg free",
              (unsigned long)flash_records, (unsigned long)st.free);
-    lcd_draw_string(20, 110, line, out_of_space ? COLOR_RED : COLOR_WHITE, COLOR_BLACK, 2);
+    dash_line(3, 20, 110, line, out_of_space ? COLOR_RED : COLOR_WHITE, COLOR_BLACK, 2);
 
     // SD card stats
     if (kvsd_ready()) {
         kvsd_stats_t sds = kvsd_stats();
         snprintf(line, sizeof(line), "SD: %lu recs  %lu MB  OTA:OK",
                  (unsigned long)sds.active, (unsigned long)sds.sd_mb);
-        lcd_draw_string(20, 140, line, COLOR_GREEN, COLOR_BLACK, 2);
+        dash_line(4, 20, 140, line, COLOR_GREEN, COLOR_BLACK, 2);
         snprintf(line, sizeof(line), "MAX: %lu cards", (unsigned long)sds.max_cards);
-        lcd_draw_string(20, 165, line, COLOR_YELLOW, COLOR_BLACK, 2);
+        dash_line(5, 20, 165, line, COLOR_YELLOW, COLOR_BLACK, 2);
     } else {
-        lcd_draw_string(20, 140, "SD: NOT READY", COLOR_RED, COLOR_BLACK, 2);
-        lcd_draw_string(20, 165, "OTA: UNAVAILABLE", COLOR_RED, COLOR_BLACK, 2);
+        dash_line(4, 20, 140, "SD: NOT READY", COLOR_RED, COLOR_BLACK, 2);
+        dash_line(5, 20, 165, "OTA: UNAVAILABLE", COLOR_RED, COLOR_BLACK, 2);
     }
 
     // Uptime
@@ -515,7 +536,9 @@ static void lcd_refresh_dashboard(wal_state_t *wal) {
              (unsigned long)(secs / 3600),
              (unsigned long)((secs / 60) % 60),
              (unsigned long)(secs % 60));
-    lcd_draw_string(20, 200, line, COLOR_CYAN, COLOR_BLACK, 2);
+    dash_line(6, 20, 200, line, COLOR_CYAN, COLOR_BLACK, 2);
+
+    g_dash_first = false;
 }
 
 // ============================================================
