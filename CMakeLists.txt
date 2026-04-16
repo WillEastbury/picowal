@@ -63,4 +63,11 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 pico_enable_stdio_usb(${PROJECT_NAME} 1)
 pico_enable_stdio_uart(${PROJECT_NAME} 0)
 
+# Enable Link-Time Optimization if the toolchain supports it
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
+if(_ipo_ok)
+    set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 pico_add_extra_outputs(${PROJECT_NAME})

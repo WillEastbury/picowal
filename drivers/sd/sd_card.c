@@ -146,7 +146,7 @@ bool sd_init(void) {
     for (int i = 0; i < 10; i++) {
         if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
             snprintf(g_sd_debug, sizeof(g_sd_debug), "TIMEOUT CMD0");
-            spi_set_baudrate(SD_SPI, 25000000);
+            spi_set_baudrate(SD_SPI, 50000000);
             return false;
         }
         r1 = sd_cmd_end(CMD0, 0);
@@ -155,7 +155,7 @@ bool sd_init(void) {
     }
     if (r1 != 0x01 && r1 != 0x00) {
         snprintf(g_sd_debug, sizeof(g_sd_debug), "CMD0=0x%02x", r1);
-        spi_set_baudrate(SD_SPI, 25000000);
+        spi_set_baudrate(SD_SPI, 50000000);
         return false;
     }
 
@@ -177,7 +177,7 @@ bool sd_init(void) {
     for (int i = 0; i < 1000; i++) {
         if (absolute_time_diff_us(get_absolute_time(), sd_deadline) < 0) {
             snprintf(g_sd_debug, sizeof(g_sd_debug), "TIMEOUT ACMD41");
-            spi_set_baudrate(SD_SPI, 25000000);
+            spi_set_baudrate(SD_SPI, 50000000);
             return false;
         }
         sd_cmd_end(CMD55, 0);
@@ -187,7 +187,7 @@ bool sd_init(void) {
     }
     if (r1 != 0x00) {
         snprintf(g_sd_debug, sizeof(g_sd_debug), "ACMD41=0x%02x", r1);
-        spi_set_baudrate(SD_SPI, 25000000);
+        spi_set_baudrate(SD_SPI, 50000000);
         return false;
     }
 
@@ -203,7 +203,7 @@ bool sd_init(void) {
     }
     if (!g_sd_sdhc) sd_cmd_end(CMD16, 512);
 
-    spi_set_baudrate(SD_SPI, 25000000);
+    spi_set_baudrate(SD_SPI, 50000000);
 
     // CSD: read capacity
     r1 = sd_cmd(CMD9, 0);

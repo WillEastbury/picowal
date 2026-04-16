@@ -1466,9 +1466,17 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
     }
 
     if (verb == VERB_GET && strcmp(path, "/app.js") == 0) {
-        (void)http_respond_with_headers(pcb, "200 OK", "application/javascript",
-                          "Cache-Control: public, max-age=86400\r\n",
-                          (const uint8_t *)APP_JS, sizeof(APP_JS) - 1);
+        uint16_t blen = sizeof(APP_JS) - 1;
+        char hdr[160];
+        int hn = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n"
+            "Content-Length: %u\r\nCache-Control: public, max-age=86400\r\n"
+            "Connection: keep-alive\r\n\r\n", blen);
+        if (hn > 0 && hn < (int)sizeof(hdr)) {
+            tcp_write(pcb, hdr, (uint16_t)hn, TCP_WRITE_FLAG_COPY);
+            tcp_write(pcb, APP_JS, blen, 0);
+            tcp_output(pcb);
+        }
         return;
     }
 
