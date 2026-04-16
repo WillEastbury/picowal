@@ -56,12 +56,12 @@ static char g_query_result[QUERY_RESULT_BUF];
 // Debug log ring buffer — accessible via GET /admin/log
 // ============================================================
 
-#define LOG_BUF_SIZE 2048
+#define LOG_BUF_SIZE 1024
 static char g_log_buf[LOG_BUF_SIZE];
 static uint16_t g_log_pos = 0;
 
 void web_log(const char *fmt, ...) {
-    char line[128];
+    char line[96];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(line, sizeof(line), fmt, ap);
