@@ -46,6 +46,12 @@
 static wal_state_t *g_wal;
 static volatile uint32_t g_http_last_activity_ms = 0;
 
+// Shared query result buffer in BSS — avoids a 4KB+ stack allocation in the
+// HTTP dispatch path (Core 0 stack is only 8KB). HTTP has one active dispatch
+// at a time so this is safe.
+#define QUERY_RESULT_BUF 8192
+static char g_query_result[QUERY_RESULT_BUF];
+
 // ============================================================
 // Debug log ring buffer — accessible via GET /admin/log
 // ============================================================
@@ -3519,17 +3525,16 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, con
             }
         }
 
-        char result[4096];
         const char *pack_name = "";
         int result_count = 0;
-        int rlen = query_execute(&q, result, sizeof(result), &pack_name, &result_count);
+        int rlen = query_execute(&q, g_query_result, QUERY_RESULT_BUF, &pack_name, &result_count);
 
         // Pack name and count in headers, body is pipe-delimited rows
         char extra_hdrs[128];
         snprintf(extra_hdrs, sizeof(extra_hdrs),
                  "X-Pack: %s\r\nX-Count: %d\r\n", pack_name, result_count);
         http_respond_with_headers(pcb, "200 OK", "text/plain",
-                                  extra_hdrs, (const uint8_t *)result, (uint16_t)rlen);
+                                  extra_hdrs, (const uint8_t *)g_query_result, (uint16_t)rlen);
         return;
     }
 
