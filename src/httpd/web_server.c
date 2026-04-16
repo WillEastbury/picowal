@@ -83,7 +83,7 @@ static uint16_t log_read(char *out, uint16_t max) {
 }
 
 // Forward declarations
-static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len);
+static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, const char *hdr_end);
 
 // ============================================================
 // Minimal client JS — login, save card, delete, logout
@@ -637,13 +637,14 @@ static bool parse_metadata_field_body(const uint8_t *body, uint16_t body_len,
 static bool request_wants_keep_alive(const char *req) {
     const char *line_end = strstr(req, "\r\n");
     if (!line_end) return false;
-    bool http11 = (strstr(req, "HTTP/1.1") != NULL && strstr(req, "HTTP/1.1") < line_end);
+    const char *http11 = strstr(req, "HTTP/1.1");
+    bool is_http11 = (http11 != NULL && http11 < line_end);
     const char *conn = strstr(req, "\r\nConnection:");
     if (!conn) conn = strstr(req, "\r\nconnection:");
     if (conn) {
         return strstr(conn, "keep-alive") != NULL || strstr(conn, "Keep-Alive") != NULL;
     }
-    return http11;
+    return is_http11;
 }
 
 // ============================================================
@@ -1415,7 +1416,7 @@ static void ota_write_chunk_sd(const uint8_t *data, uint16_t len) {
 // Request dispatcher
 // ============================================================
 
-static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
+static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len, const char *hdr_end) {
     // Parse method
     http_verb_t verb = VERB_UNKNOWN;
     const char *path_start;
@@ -1439,8 +1440,7 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
     const char *query = NULL;
     if (*path_start == '?') query = path_start;
 
-    // Find headers end + body
-    const char *hdr_end = strstr(req, "\r\n\r\n");
+    // Find headers end + body — use caller-supplied pointer to avoid re-scanning
     const uint8_t *body = NULL;
     uint16_t body_len = 0;
     if (hdr_end) {
@@ -3770,7 +3770,7 @@ static err_t http_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err
     sscanf((const char *)conn->buf, "%7s %63s", method, path);
     conn->keep_alive = request_wants_keep_alive((const char *)conn->buf);
     uint16_t before = tcp_sndbuf(pcb);
-    dispatch(pcb, (const char *)conn->buf, conn->len);
+    dispatch(pcb, (const char *)conn->buf, conn->len, hdr_end);
     uint16_t after = tcp_sndbuf(pcb);
     conn->bytes_in_flight = (before >= after) ? (before - after) : 0;
     conn->response_pending_close = !conn->keep_alive;
