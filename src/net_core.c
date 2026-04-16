@@ -113,12 +113,17 @@ static int alloc_slot(wal_state_t *wal) {
 static void tcp_send_bytes(struct tcp_pcb *pcb, const uint8_t *data, uint16_t len) {
     if (!pcb) return;
     tcp_write(pcb, data, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(pcb);
+}
+
+// Flush accumulated tcp_write data — call after building a complete response
+static void tcp_flush(struct tcp_pcb *pcb) {
+    if (pcb) tcp_output(pcb);
 }
 
 static void send_error(struct tcp_pcb *pcb, uint8_t code) {
     uint8_t resp[2] = {WIRE_ERROR, code};
     tcp_send_bytes(pcb, resp, 2);
+    tcp_flush(pcb);
 }
 
 // ============================================================
@@ -199,6 +204,7 @@ static void drain_responses(net_ctx_t *ctx) {
             ack[0] = WIRE_ACK_APPEND;
             memcpy(&ack[1], &resp->seq, 4);
             tcp_send_bytes(ctx->pcb, ack, 5);
+            tcp_flush(ctx->pcb);
             // Free the held pbuf now that Core 1 is done reading it
             if (req->zc_pbuf) {
                 pbuf_free((struct pbuf *)req->zc_pbuf);
@@ -215,11 +221,13 @@ static void drain_responses(net_ctx_t *ctx) {
                 tcp_send_bytes(ctx->pcb, ctx->wal->data[resp->result_slot], resp->result_len);
                 ctx->wal->slot_free[resp->result_slot] = 1;
             }
+            tcp_flush(ctx->pcb);  // single flush for header + data
             break;
         }
         case WAL_OP_NOOP: {
             uint8_t ack = WIRE_ACK_NOOP;
             tcp_send_bytes(ctx->pcb, &ack, 1);
+            tcp_flush(ctx->pcb);
             break;
         }
         }

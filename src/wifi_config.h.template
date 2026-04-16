@@ -1,9 +1,0 @@
-// Copy this file to wifi_config.h and fill in your credentials.
-// wifi_config.h is gitignored and must never be committed.
-#ifndef WIFI_CONFIG_H
-#define WIFI_CONFIG_H
-
-#define WIFI_SSID     "your_ssid_here"
-#define WIFI_PASSWORD "your_password_here"
-
-#endif

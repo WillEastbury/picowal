@@ -3,7 +3,16 @@
 
 #include "wal_defs.h"
 
+// WiFi credentials — override by creating src/wifi_config.h (gitignored)
+#if __has_include("wifi_config.h")
 #include "wifi_config.h"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID       "your_ssid_here"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD   "your_password_here"
+#endif
 
 // WiFi config
 #define WIFI_TIMEOUT_MS 15000
