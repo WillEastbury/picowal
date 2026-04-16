@@ -3,6 +3,8 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
+#include "heatshrink_encoder.h"
+#include "heatshrink_decoder.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -154,108 +156,58 @@ static const uint8_t *xip_ptr(uint32_t flash_off) {
     return (const uint8_t *)(XIP_BASE_ADDR + flash_off);
 }
 
-#define KV_LZ_WINDOW      512u
-#define KV_LZ_MIN_MATCH   3u
-#define KV_LZ_MAX_MATCH   18u
 #define KV_COMPRESS_MIN   256u
 
-static bool encode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
-    uint16_t ip = 0;
-    uint16_t op = 0;
-    uint16_t lit_start = 0;
-    uint16_t lit_len = 0;
+// Heatshrink static instance for flash-tier compression (Core 1 only).
+static union {
+    heatshrink_encoder enc;
+    heatshrink_decoder dec;
+} g_hs_flash;
 
-    while (ip < in_len) {
-        uint16_t best_len = 0;
-        uint16_t best_off = 0;
-        uint16_t search = (ip < KV_LZ_WINDOW) ? ip : KV_LZ_WINDOW;
-
-        for (uint16_t off = 1; off <= search; off++) {
-            uint16_t match_len = 0;
-            while (match_len < KV_LZ_MAX_MATCH &&
-                   (uint32_t)ip + match_len < in_len &&
-                   in[ip - off + match_len] == in[ip + match_len]) {
-                match_len++;
-            }
-            if (match_len >= KV_LZ_MIN_MATCH && match_len > best_len) {
-                best_len = match_len;
-                best_off = off;
-                if (best_len == KV_LZ_MAX_MATCH) break;
-            }
-        }
-
-        if (best_len >= KV_LZ_MIN_MATCH) {
-            if (lit_len > 0) {
-                if ((uint32_t)op + 1u + lit_len > *out_len) return false;
-                out[op++] = (uint8_t)(lit_len - 1u);
-                memcpy(out + op, in + lit_start, lit_len);
-                op = (uint16_t)(op + lit_len);
-                lit_len = 0;
-            }
-
-            if ((uint32_t)op + 2u > *out_len) return false;
-            uint16_t offm1 = (uint16_t)(best_off - 1u);
-            out[op++] = (uint8_t)(0x80u | ((uint8_t)(best_len - KV_LZ_MIN_MATCH) << 4) | ((offm1 >> 8) & 0x0Fu));
-            out[op++] = (uint8_t)(offm1 & 0xFFu);
-            ip = (uint16_t)(ip + best_len);
-            lit_start = ip;
-            continue;
-        }
-
-        if (lit_len == 0) lit_start = ip;
-        lit_len++;
-        ip++;
-
-        if (lit_len == 128u) {
-            if ((uint32_t)op + 1u + lit_len > *out_len) return false;
-            out[op++] = (uint8_t)(lit_len - 1u);
-            memcpy(out + op, in + lit_start, lit_len);
-            op = (uint16_t)(op + lit_len);
-            lit_len = 0;
-        }
+static bool encode_heatshrink(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
+    heatshrink_encoder_reset(&g_hs_flash.enc);
+    size_t sunk = 0, polled = 0, total_out = 0;
+    uint16_t cap = *out_len;
+    while (sunk < in_len) {
+        size_t n = 0;
+        heatshrink_encoder_sink(&g_hs_flash.enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
+        sunk += n;
     }
-
-    if (lit_len > 0) {
-        if ((uint32_t)op + 1u + lit_len > *out_len) return false;
-        out[op++] = (uint8_t)(lit_len - 1u);
-        memcpy(out + op, in + lit_start, lit_len);
-        op = (uint16_t)(op + lit_len);
-    }
-
-    *out_len = op;
+    heatshrink_encoder_finish(&g_hs_flash.enc);
+    HSE_poll_res pr;
+    do {
+        pr = heatshrink_encoder_poll(&g_hs_flash.enc, &out[total_out],
+                                      cap - total_out, &polled);
+        total_out += polled;
+        if (total_out > cap) return false;
+    } while (pr == HSER_POLL_MORE);
+    *out_len = (uint16_t)total_out;
     return true;
 }
 
-static bool decode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
-    uint16_t ip = 0;
-    uint16_t op = 0;
-
-    while (ip < in_len) {
-        uint8_t tag = in[ip++];
-        if ((tag & 0x80u) == 0) {
-            uint16_t lit_len = (uint16_t)tag + 1u;
-            if ((uint32_t)ip + lit_len > in_len) return false;
-            if ((uint32_t)op + lit_len > out_len) return false;
-            memcpy(out + op, in + ip, lit_len);
-            ip = (uint16_t)(ip + lit_len);
-            op = (uint16_t)(op + lit_len);
-            continue;
-        }
-
-        if (ip >= in_len) return false;
-        uint16_t match_len = (uint16_t)(((tag >> 4) & 0x07u) + KV_LZ_MIN_MATCH);
-        uint16_t off = (uint16_t)((((uint16_t)tag & 0x0Fu) << 8) | in[ip++]);
-        off = (uint16_t)(off + 1u);
-        if (off == 0 || off > op) return false;
-        if ((uint32_t)op + match_len > out_len) return false;
-
-        for (uint16_t i = 0; i < match_len; i++) {
-            out[op] = out[op - off];
-            op++;
-        }
+static bool decode_heatshrink(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
+    heatshrink_decoder_reset(&g_hs_flash.dec);
+    size_t sunk = 0, polled = 0, total_out = 0;
+    while (sunk < in_len) {
+        size_t n = 0;
+        heatshrink_decoder_sink(&g_hs_flash.dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
+        sunk += n;
+        HSD_poll_res pr;
+        do {
+            pr = heatshrink_decoder_poll(&g_hs_flash.dec, &out[total_out],
+                                          out_len - total_out, &polled);
+            total_out += polled;
+            if (total_out > out_len) return false;
+        } while (pr == HSDR_POLL_MORE);
     }
-
-    return op == out_len;
+    heatshrink_decoder_finish(&g_hs_flash.dec);
+    HSD_poll_res pr;
+    do {
+        pr = heatshrink_decoder_poll(&g_hs_flash.dec, &out[total_out],
+                                      out_len - total_out, &polled);
+        total_out += polled;
+    } while (pr == HSDR_POLL_MORE);
+    return total_out == out_len;
 }
 
 // Page-aligned flash program helper.
@@ -520,7 +472,7 @@ static bool __no_inline_not_in_flash_func(append_record)(uint32_t key, const uin
 
     uint16_t enc_cap = sizeof(enc);
     if (raw_len >= KV_COMPRESS_MIN &&
-        encode_lz_lite(raw, raw_len, enc, &enc_cap) &&
+        encode_heatshrink(raw, raw_len, enc, &enc_cap) &&
         enc_cap < raw_len) {
         stored = enc;
         stored_len = enc_cap;
@@ -594,7 +546,7 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     if (len && *len < rp->hdr.raw_len) return false;
     if (out && len) {
         if (rp->hdr.flags & KV_REC_FLAG_COMP) {
-            if (!decode_lz_lite(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
+            if (!decode_heatshrink(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
         } else if (rp->hdr.raw_len > 0) {
             memcpy(out, stored, rp->hdr.raw_len);
         }
