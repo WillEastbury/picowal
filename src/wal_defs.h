@@ -126,6 +126,7 @@ typedef struct {
 
     // --- OTA: set by Core 0 to park Core 1 during flash writes ---
     volatile bool ota_halt_core1;
+    volatile bool ota_core1_halted;  // set by Core 1 when it enters halt loop
 } wal_state_t;
 
 // ============================================================

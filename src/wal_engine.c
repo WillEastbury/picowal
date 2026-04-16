@@ -386,8 +386,11 @@ void wal_engine_run(wal_state_t *wal) {
     while (true) {
         // OTA halt: spin here until Core 0 finishes flash writes
         while (g_wal->ota_halt_core1) {
+            g_wal->ota_core1_halted = true;
+            __sev();  // signal Core 0 that we've halted
             __wfe();  // wait-for-event, low power
         }
+        g_wal->ota_core1_halted = false;
 
         g_wal->core1_heartbeat++;
 
