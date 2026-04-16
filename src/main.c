@@ -36,8 +36,8 @@ int main(void) {
 
     lcd_init();
     lcd_clear(COLOR_BLACK);
-    lcd_draw_string(20, 30, "STORAGE APPLIANCE", COLOR_CYAN, COLOR_BLACK, 3);
-    lcd_draw_string(40, 70, "STARTING...", COLOR_YELLOW, COLOR_BLACK, 2);
+    lcd_draw_string(20, 30, "PICOWAL STARTING", COLOR_CYAN, COLOR_BLACK, 2);
+    lcd_draw_string(20, 55, "PLEASE WAIT...", COLOR_YELLOW, COLOR_BLACK, 2);
 
     if (sd_init()) {
         web_log("[boot] SD:%s\n", sd_get_debug());
@@ -61,8 +61,8 @@ int main(void) {
     multicore_launch_core1(core1_entry);
     printf("[main] Core 1 engine launched\n");
 
-    lcd_draw_string(40, 95, "CORE1 ENGINE OK", COLOR_GREEN, COLOR_BLACK, 2);
-    lcd_draw_string(40, 120, "LISTENING...", COLOR_YELLOW, COLOR_BLACK, 2);
+    lcd_draw_string(20, 80, "CORE1 OK", COLOR_GREEN, COLOR_BLACK, 2);
+    lcd_draw_string(20, 105, "LISTENING...", COLOR_YELLOW, COLOR_BLACK, 2);
 
     // Core 0: network receiver (never returns)
     net_core_run(&wal);
