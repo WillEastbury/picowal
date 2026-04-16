@@ -556,22 +556,24 @@ void net_core_run(wal_state_t *wal) {
         while (1) tight_loop_contents();
     }
 
-    printf("[net] WiFi OK, IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    printf("[net] WiFi OK, waiting for DHCP...\n");
     cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
 
-    // Static IP: 192.168.0.9/24, gw+dns 192.168.0.1
-    {
-        ip4_addr_t ip, mask, gw;
-        IP4_ADDR(&ip,   192, 168,   0,   9);
-        IP4_ADDR(&mask,  255, 255, 255,   0);
-        IP4_ADDR(&gw,   192, 168,   0,   1);
-        dhcp_stop(netif_list);
-        netif_set_addr(netif_list, &ip, &mask, &gw);
-        ip_addr_t dns;
-        ip_addr_set_ip4_u32(&dns, ip4_addr_get_u32(&gw));
-        dns_setserver(0, &dns);
-        printf("[net] Static IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
+    for (uint32_t w = 0; w < 200; w++) {   // 20s timeout
+        if (dhcp_supplied_address(netif_list) &&
+            !ip4_addr_isany_val(*netif_ip4_addr(netif_list))) break;
+        cyw43_arch_poll();
+        sleep_ms(100);
     }
+    if (!dhcp_supplied_address(netif_list) ||
+        ip4_addr_isany_val(*netif_ip4_addr(netif_list))) {
+        printf("[net] DHCP timeout\n");
+        while (1) {
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); sleep_ms(200);
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); sleep_ms(200);
+        }
+    }
+    printf("[net] DHCP IP: %s\n", ip4addr_ntoa(netif_ip4_addr(netif_list)));
 
     // Start HTTP server on port 80
     web_server_init(g_ctx.wal);

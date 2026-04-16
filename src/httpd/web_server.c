@@ -3134,11 +3134,11 @@ static void dispatch(struct tcp_pcb *pcb, const char *req, uint16_t req_len) {
 
         // Erase flash index tier (768KB–1MB region)
         {
-            uint32_t irq = save_and_disable_interrupts();
             for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
+                uint32_t irq = save_and_disable_interrupts();
                 flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
+                restore_interrupts(irq);
             }
-            restore_interrupts(irq);
         }
         web_log("[admin] Flash index wiped\n");
 

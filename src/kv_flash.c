@@ -9,10 +9,8 @@
 
 #define XIP_BASE_ADDR 0x10000000u
 
-// V1 page magic (legacy, no longer written; skipped on recovery)
-#define KV_PAGE_MAGIC        0x4B565031u // KVP1
-// V2 page magic: includes sequence + header CRC for deterministic recovery
-#define KV_PAGE_MAGIC_V2     0x4B565032u // KVP2
+// Page magic: includes sequence + header CRC for deterministic recovery
+#define KV_PAGE_MAGIC_V2     0x4B565031u // KVP1
 #define KV_PAGE_VERSION_1    0x01u
 
 // Mutation-group commit marker magic, stored at the same offset as hdr.magic
@@ -255,6 +253,23 @@ static bool decode_lz_lite(const uint8_t *in, uint16_t in_len, uint8_t *out, uin
     return op == out_len;
 }
 
+// Page-aligned flash program helper.
+// flash_range_program requires 256-byte aligned offset and length.
+// This helper pads with 0xFF to meet alignment constraints.
+static void __no_inline_not_in_flash_func(flash_program_aligned)(
+        uint32_t flash_off, const uint8_t *data, uint16_t len) {
+    uint32_t page_start = flash_off & ~(uint32_t)(KV_PAGE_SIZE - 1u);
+    uint16_t intra = (uint16_t)(flash_off - page_start);
+    uint16_t prog_len = (uint16_t)(((intra + len) + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
+    static uint8_t pbuf[KV_PAGE_SIZE * 4];  // up to 1KB
+    if (prog_len > sizeof(pbuf)) return;
+    memset(pbuf, 0xFF, prog_len);
+    memcpy(pbuf + intra, data, len);
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(page_start, pbuf, prog_len);
+    restore_interrupts(ints);
+}
+
 static uint32_t pack_loc(uint16_t page, uint16_t off_bytes, uint16_t len_bytes) {
     uint16_t off_q = (uint16_t)(off_bytes / KV_LEN_QUANTUM);
     uint16_t len_q = (uint16_t)((len_bytes + (KV_LEN_QUANTUM - 1u)) / KV_LEN_QUANTUM);
@@ -340,7 +355,7 @@ static bool idx_get(uint32_t key, uint32_t *loc, uint16_t *version, uint8_t *fla
 // a fresh V2 header with an incremented sequence number.
 // Invariant: after this call the sector's header CRC is valid and sequence
 // strictly exceeds all previously seen sequences.
-static bool ensure_page_ready(uint16_t page) {
+static bool __no_inline_not_in_flash_func(ensure_page_ready)(uint16_t page) {
     uint32_t page_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE;
     const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
     if (ph->magic == KV_PAGE_MAGIC_V2 && ph->version == KV_PAGE_VERSION_1) {
@@ -414,14 +429,14 @@ static bool select_append_page(uint16_t need) {
     return true;
 }
 
-static void deadlog_reset_page(uint16_t p) {
+static void __no_inline_not_in_flash_func(deadlog_reset_page)(uint16_t p) {
     uint32_t off = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(off, KV_SECTOR_SIZE);
     restore_interrupts(ints);
 }
 
-static bool deadlog_init_page_if_needed(uint16_t p) {
+static bool __no_inline_not_in_flash_func(deadlog_init_page_if_needed)(uint16_t p) {
     uint32_t off = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;
     const deadlog_hdr_t *h = (const deadlog_hdr_t *)xip_ptr(off);
     if (h->magic == KV_DEADLOG_MAGIC) return true;
@@ -436,7 +451,7 @@ static bool deadlog_init_page_if_needed(uint16_t p) {
     return true;
 }
 
-static bool deadlog_append(uint16_t page_idx) {
+static bool __no_inline_not_in_flash_func(deadlog_append)(uint16_t page_idx) {
     for (uint32_t n = 0; n < KV_DEADLOG_SECTORS; n++) {
         uint16_t p = (uint16_t)((g_deadlog_write_page + n) % KV_DEADLOG_SECTORS);
         if (!deadlog_init_page_if_needed(p)) continue;
@@ -450,9 +465,7 @@ static bool deadlog_append(uint16_t page_idx) {
         }
         if ((uint32_t)off + sizeof(deadlog_entry_t) <= KV_SECTOR_SIZE) {
             deadlog_entry_t e = {.page_idx = page_idx, .reserved = 0};
-            uint32_t ints = save_and_disable_interrupts();
-            flash_range_program(base + off, (const uint8_t *)&e, sizeof(e));
-            restore_interrupts(ints);
+            flash_program_aligned(base + off, (const uint8_t *)&e, sizeof(e));
             g_deadlog_write_page = p;
             g_deadlog_write_off = (uint16_t)(off + sizeof(deadlog_entry_t));
             return true;
@@ -463,9 +476,7 @@ static bool deadlog_append(uint16_t page_idx) {
     if (!deadlog_init_page_if_needed(g_deadlog_write_page)) return false;
     deadlog_entry_t e = {.page_idx = page_idx, .reserved = 0};
     uint32_t base = KV_DEADLOG_START + (uint32_t)g_deadlog_write_page * KV_SECTOR_SIZE;
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_program(base + g_deadlog_write_off, (const uint8_t *)&e, sizeof(e));
-    restore_interrupts(ints);
+    flash_program_aligned(base + g_deadlog_write_off, (const uint8_t *)&e, sizeof(e));
     g_deadlog_write_off = (uint16_t)(g_deadlog_write_off + sizeof(deadlog_entry_t));
     return true;
 }
@@ -492,7 +503,7 @@ static bool page_has_live_refs(uint16_t page_idx) {
 // Recovery (kv_init) only indexes records whose mutation_group has a valid
 // commit marker, so a power-loss between steps 1 and 2 leaves the record
 // effectively invisible on the next boot — it is simply skipped.
-static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, uint16_t version,
+static bool __no_inline_not_in_flash_func(append_record)(uint32_t key, const uint8_t *raw, uint16_t raw_len, uint16_t version,
                           uint8_t flags, uint32_t mutation_group, uint32_t *out_loc) {
     uint8_t enc[KV_MAX_VALUE + 64];
     const uint8_t *stored = raw;
@@ -530,10 +541,10 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
     uint32_t page_off = KV_REGION_START + (uint32_t)g_write_page * KV_SECTOR_SIZE;
     uint32_t rec_off  = page_off + g_write_off;
 
-    // Build the programming buffer: [record][commit_marker][0xFF padding].
-    // The commit marker sits at byte rec_len_aligned within buf.
-    static uint8_t buf[KV_MAX_VALUE + 128];
+    // Build the programming buffer: [record][commit_marker].
+    // The commit marker sits at byte rec_len_aligned.
     uint16_t total = (uint16_t)(rec_len_aligned + KV_COMMIT_ALIGNED);
+    static uint8_t buf[KV_SECTOR_SIZE];
     memset(buf, 0xFF, total);
     memcpy(buf, &rp, sizeof(rp));
     if (stored_len > 0) memcpy(buf + sizeof(rp), stored, stored_len);
@@ -544,16 +555,9 @@ static bool append_record(uint32_t key, const uint8_t *raw, uint16_t raw_len, ui
     cm->mutation_group = mutation_group;
     cm->commit_magic   = KV_COMMIT_MAGIC;
     // CRC covers the 8 bytes: mutation_group || commit_magic.
-    // This detects bit-flip corruption in the commit marker itself.
     cm->crc = crc32((const uint8_t *)&cm->mutation_group, 8u);
 
-    uint16_t prog_len = (uint16_t)((total + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
-    // Initialize full programming region to 0xFF (not just total) to avoid
-    // flashing stale data from previous calls into the padding tail.
-    memset(buf + total, 0xFF, prog_len - total);
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_program(rec_off, buf, prog_len);
-    restore_interrupts(ints);
+    flash_program_aligned(rec_off, buf, total);
 
     if (out_loc) *out_loc = pack_loc(g_write_page, g_write_off, rec_len_aligned);
     g_write_off = (uint16_t)(g_write_off + total);
@@ -594,12 +598,12 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     return true;
 }
 
-void kv_wipe(void) {
-    uint32_t irq = save_and_disable_interrupts();
+void __no_inline_not_in_flash_func(kv_wipe)(void) {
     for (uint32_t off = KV_REGION_START; off < KV_DEADLOG_END; off += KV_SECTOR_SIZE) {
+        uint32_t irq = save_and_disable_interrupts();
         flash_range_erase(off, KV_SECTOR_SIZE);
+        restore_interrupts(irq);
     }
-    restore_interrupts(irq);
     g_count = 0;
     g_write_page = 0;
     g_write_off = sizeof(kv_page_hdr_t);
@@ -609,16 +613,13 @@ void kv_wipe(void) {
 
 // kv_init: deterministic recovery routine.
 //
-// Recovery algorithm (issue requirement §5):
-//   1. Scan all sectors.  Accept only V2 pages (KV_PAGE_MAGIC_V2 + version +
-//      valid header CRC).  Skip V1/legacy pages — they require an admin wipe.
-//   2. Track the highest valid page sequence seen; use it to seed g_page_sequence
-//      so that new pages always receive a strictly higher number.
-//   3. Within each valid page, scan records sequentially using a state-machine:
+// Recovery algorithm:
+//   1. Scan all sectors. Accept pages with valid magic + version + header CRC.
+//   2. Track the highest valid page sequence seen; seed g_page_sequence.
+//   3. Within each valid page, scan records sequentially:
 //      - data record   → hold as "pending"; discard any previous pending
 //      - commit record → if CRC valid and mutation_group matches pending,
-//                        apply the pending record to the SRAM index;
-//                        otherwise discard (uncommitted partial write)
+//                        apply the pending record to the SRAM index
 //      - end sentinel  → exit inner loop
 //      - unknown magic → exit inner loop (corrupt tail)
 //   4. Any pending record at page-end has no commit marker (power-loss window)
@@ -640,12 +641,9 @@ void kv_init(void) {
         uint32_t page_off = KV_REGION_START + (uint32_t)p * KV_SECTOR_SIZE;
         const kv_page_hdr_t *ph = (const kv_page_hdr_t *)xip_ptr(page_off);
 
-        // Require V2 format: magic, version, and valid header CRC.
-        // V1 (KV_PAGE_MAGIC) pages are deliberately skipped — any existing V1
-        // data requires an admin wipe to migrate to the V2 format.
         if (ph->magic != KV_PAGE_MAGIC_V2 || ph->version != KV_PAGE_VERSION_1) continue;
         uint32_t expected_hdr_crc = crc32((const uint8_t *)ph, KV_PAGE_HDR_CRC_OFFSET);
-        if (ph->hdr_crc != expected_hdr_crc) continue;  // header bit-flip — skip page
+        if (ph->hdr_crc != expected_hdr_crc) continue;
 
         // Keep g_page_sequence ahead of all seen sequences so that the next
         // ensure_page_ready() call produces a strictly higher sequence number.
@@ -719,8 +717,6 @@ void kv_init(void) {
                 const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)rptr;
                 uint16_t rec_alen = (uint16_t)((rec_len + 3u) & ~3u);
 
-                if (rp->hdr.raw_len   > KV_MAX_VALUE) break;
-                if (rp->hdr.store_len > KV_MAX_VALUE) break;
                 if (sizeof(kv_rec_prefix_t) + rp->hdr.store_len > rec_len) break;
 
                 const uint8_t *stored = xip_ptr(page_off + off + sizeof(kv_rec_prefix_t));
@@ -868,7 +864,7 @@ bool kv_exists(uint32_t key) {
     return idx_find_linear(key) >= 0;
 }
 
-bool kv_compact_step(void) {
+bool __no_inline_not_in_flash_func(kv_compact_step)(void) {
     for (uint32_t spin = 0; spin < KV_DEADLOG_SECTORS; spin++) {
         uint16_t p = (uint16_t)((g_deadlog_read_page + spin) % KV_DEADLOG_SECTORS);
         uint32_t base = KV_DEADLOG_START + (uint32_t)p * KV_SECTOR_SIZE;

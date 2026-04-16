@@ -21,7 +21,7 @@
 #define KVSD_MAX_PAYLOAD    508     // max uncompressed card payload
 #define KVSD_MAGIC_LO       0x7D   // card data magic
 #define KVSD_MAGIC_HI       0xCA
-#define KVSD_SB_VERSION     4       // v4: variable-density packed blocks
+#define KVSD_SB_VERSION     1       // packed blocks + hash table
 
 // ============================================================
 // Packed block format — multiple compressed cards per SD block
@@ -44,7 +44,7 @@
 // Superblock layout (block 0)
 typedef struct __attribute__((packed)) {
     uint8_t  magic[8];         // 31415926Pico
-    uint32_t version;          // superblock format version (2)
+    uint32_t version;          // superblock format version (1)
     uint32_t total_cards;      // active card count
 
     // Index region

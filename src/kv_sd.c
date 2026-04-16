@@ -768,7 +768,7 @@ static uint32_t packed_append(uint32_t key, const uint8_t *comp, uint16_t clen,
 static void format_sd(uint32_t total_blocks) {
     memset(&g_sb, 0, sizeof(g_sb));
     memcpy(g_sb.magic, SD_MAGIC, 8);
-    g_sb.version = KVSD_SB_VERSION;  // v3: 1-block cards + hash table
+    g_sb.version = KVSD_SB_VERSION;
     g_sb.total_cards = 0;
 
     // Reserve last 256 blocks for SD ring buffer (UDP overflow WAL)
@@ -838,14 +838,13 @@ void kvsd_init(void) {
     fidx_count_entries();
 
     if (sb_read()) {
-        // Version check: v3 = 1-block cards + hash table. Older versions need reformat.
-        if (g_sb.version < KVSD_SB_VERSION) {
-            web_log("[kvsd] v%lu superblock — reformatting for v%d\n",
-                    (unsigned long)g_sb.version, KVSD_SB_VERSION);
+        if (g_sb.version != KVSD_SB_VERSION) {
+            web_log("[kvsd] wrong version %lu, reformatting\n",
+                    (unsigned long)g_sb.version);
             format_sd(info.block_count);
         }
 
-        web_log("[kvsd] v2: %lu cards, max %lu, %lu ht buckets\n",
+        web_log("[kvsd] %lu cards, max %lu, %lu ht buckets\n",
                 (unsigned long)g_sb.total_cards, (unsigned long)g_sb.max_cards,
                 (unsigned long)g_sb.hashtab_blocks);
 
