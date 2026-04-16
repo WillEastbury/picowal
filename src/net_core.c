@@ -15,7 +15,6 @@
 #include "hardware/watchdog.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
-#include "lwip/dns.h"
 #include "lwip/dhcp.h"
 
 #include <string.h>

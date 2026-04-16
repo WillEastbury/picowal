@@ -48,7 +48,6 @@ target_link_libraries(${PROJECT_NAME}
     hardware_gpio
     hardware_dma
     hardware_flash
-    hardware_pio
     pico_rand
     pico_mbedtls
     lcd_driver
