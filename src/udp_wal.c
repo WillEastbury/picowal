@@ -18,6 +18,46 @@
 // (SD ring buffer removed — SRAM-only buffering is more efficient
 //  since the bottleneck is SD write speed, not buffer space)
 
+// Per-device PSK — loaded from flash at init, generated on first boot
+static uint8_t g_psk[UDP_WAL_PSK_LEN];
+static bool g_psk_valid = false;
+
+#define XIP_PSK_BASE (0x10000000u + UDP_WAL_PSK_FLASH_OFFSET)
+
+static void __no_inline_not_in_flash_func(psk_provision)(void) {
+    // Flash sector layout: [magic:4][psk:32][pad:0xFF...]
+    const uint32_t *magic = (const uint32_t *)XIP_PSK_BASE;
+    const uint8_t *stored = (const uint8_t *)(XIP_PSK_BASE + 4);
+
+    if (*magic == UDP_WAL_PSK_MAGIC) {
+        memcpy(g_psk, stored, UDP_WAL_PSK_LEN);
+        g_psk_valid = true;
+        printf("[psk] Loaded from flash\n");
+        return;
+    }
+
+    // First boot — generate random PSK
+    for (int i = 0; i < UDP_WAL_PSK_LEN; i += 4) {
+        uint32_t r = get_rand_32();
+        memcpy(g_psk + i, &r, (i + 4 <= UDP_WAL_PSK_LEN) ? 4 : UDP_WAL_PSK_LEN - i);
+    }
+
+    // Program to flash
+    uint8_t page[256];
+    memset(page, 0xFF, sizeof(page));
+    uint32_t m = UDP_WAL_PSK_MAGIC;
+    memcpy(page, &m, 4);
+    memcpy(page + 4, g_psk, UDP_WAL_PSK_LEN);
+
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(UDP_WAL_PSK_FLASH_OFFSET, 4096);
+    flash_range_program(UDP_WAL_PSK_FLASH_OFFSET, page, 256);
+    restore_interrupts(ints);
+
+    g_psk_valid = true;
+    printf("[psk] Generated and stored in flash\n");
+}
+
 // ============================================================
 // Session table
 // ============================================================
@@ -212,12 +252,11 @@ static void handle_hello(const ip_addr_t *addr, uint16_t port,
 
     // Derive session key: HKDF(PSK, client_random || server_random || epoch)
     {
-        static const uint8_t psk[] = UDP_WAL_PSK;
-        uint8_t ikm[36]; // client_random(16) + server_random(16) + epoch(4)
+        uint8_t ikm[36];
         memcpy(ikm, s->client_random, 16);
         memcpy(ikm + 16, s->server_random, 16);
         wr32(ikm + 32, g_epoch);
-        hkdf_sha256(s->key, 32, ikm, 36, psk, sizeof(psk),
+        hkdf_sha256(s->key, 32, ikm, 36, g_psk, UDP_WAL_PSK_LEN,
                      (const uint8_t *)"picowal-udp", 11);
         s->encrypted = true;
     }
@@ -568,6 +607,9 @@ void udp_wal_init(wal_state_t *wal) {
     g_epoch = now_ms();
     memset(g_sessions, 0, sizeof(g_sessions));
     memset(g_deferred, 0, sizeof(g_deferred));
+
+    // Load or generate per-device PSK (#52)
+    psk_provision();
 
     g_pcb = udp_new();
     if (!g_pcb) {

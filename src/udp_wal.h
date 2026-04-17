@@ -4,13 +4,11 @@
 #include "wal_defs.h"
 
 // Pre-shared key for UDP WAL session key derivation (HKDF-SHA256).
-// Must match the client-side PSK. Used only for ChaCha20-Poly1305 AEAD.
-#define UDP_WAL_PSK { \
-    0x50, 0x69, 0x63, 0x6F, 0x57, 0x41, 0x4C, 0x5F, \
-    0x41, 0x75, 0x74, 0x68, 0x4B, 0x65, 0x79, 0x32, \
-    0x30, 0x32, 0x36, 0x5F, 0x53, 0x65, 0x63, 0x72, \
-    0x65, 0x74, 0x50, 0x53, 0x4B, 0x21, 0x21, 0x21  \
-}
+// Auto-generated on first boot, stored in last flash sector (0x3FF000).
+// Read at boot via udp_wal_load_psk(). Replaces compile-time constant.
+#define UDP_WAL_PSK_FLASH_OFFSET  (4 * 1024 * 1024 - 4096)  // 0x3FF000
+#define UDP_WAL_PSK_LEN           32
+#define UDP_WAL_PSK_MAGIC         0x50534B31u  // "PSK1"
 
 // ============================================================
 // UDP WAL Protocol — port 8002
