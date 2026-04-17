@@ -713,58 +713,20 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(packed_entry_hdr_t) == PACKED_ENTRY_HDR, "packed_entry_hdr_t size");
 
-#include "heatshrink_encoder.h"
-#include "heatshrink_decoder.h"
+#include "picocompress.h"
 
-static union {
-    heatshrink_encoder enc;
-    heatshrink_decoder dec;
-} g_hs;
-
-static uint16_t hs_compress(const uint8_t *in, uint16_t in_len,
-                            uint8_t *out, uint16_t out_max) {
-    heatshrink_encoder_reset(&g_hs.enc);
-    size_t sunk = 0, polled = 0, total_out = 0;
-    while (sunk < in_len) {
-        size_t n = 0;
-        heatshrink_encoder_sink(&g_hs.enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
-        sunk += n;
-    }
-    heatshrink_encoder_finish(&g_hs.enc);
-    HSE_poll_res pr;
-    do {
-        pr = heatshrink_encoder_poll(&g_hs.enc, &out[total_out],
-                                      out_max - total_out, &polled);
-        total_out += polled;
-        if (total_out > out_max) return 0;
-    } while (pr == HSER_POLL_MORE);
-    return (uint16_t)total_out;
+static uint16_t pc_compress_card(const uint8_t *in, uint16_t in_len,
+                                 uint8_t *out, uint16_t out_max) {
+    size_t olen = 0;
+    pc_result r = pc_compress_buffer(in, in_len, out, out_max, &olen);
+    return (r == PC_OK) ? (uint16_t)olen : 0;
 }
 
-static uint16_t hs_decompress(const uint8_t *in, uint16_t in_len,
-                              uint8_t *out, uint16_t out_max) {
-    heatshrink_decoder_reset(&g_hs.dec);
-    size_t sunk = 0, polled = 0, total_out = 0;
-    while (sunk < in_len) {
-        size_t n = 0;
-        heatshrink_decoder_sink(&g_hs.dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
-        sunk += n;
-        HSD_poll_res pr;
-        do {
-            pr = heatshrink_decoder_poll(&g_hs.dec, &out[total_out],
-                                          out_max - total_out, &polled);
-            total_out += polled;
-            if (total_out > out_max) return 0;
-        } while (pr == HSDR_POLL_MORE);
-    }
-    heatshrink_decoder_finish(&g_hs.dec);
-    HSD_poll_res pr;
-    do {
-        pr = heatshrink_decoder_poll(&g_hs.dec, &out[total_out],
-                                      out_max - total_out, &polled);
-        total_out += polled;
-    } while (pr == HSDR_POLL_MORE);
-    return (uint16_t)total_out;
+static uint16_t pc_decompress_card(const uint8_t *in, uint16_t in_len,
+                                   uint8_t *out, uint16_t out_max) {
+    size_t olen = 0;
+    pc_result r = pc_decompress_buffer(in, in_len, out, out_max, &olen);
+    return (r == PC_OK) ? (uint16_t)olen : 0;
 }
 
 static uint32_t blk_addr(uint32_t blk_num) {
@@ -808,7 +770,7 @@ static uint16_t packed_read_card(uint32_t blk_num, uint32_t key,
     if (off == 0) return 0;
     const packed_entry_hdr_t *e = (const packed_entry_hdr_t *)(blk + off);
     if (off + PACKED_ENTRY_HDR + e->comp_len > 512) return 0;
-    return hs_decompress(blk + off + PACKED_ENTRY_HDR, e->comp_len, out, out_max);
+    return pc_decompress_card(blk + off + PACKED_ENTRY_HDR, e->comp_len, out, out_max);
 }
 
 // Remove a card from a packed block. Compacts remaining entries.
@@ -1168,7 +1130,7 @@ bool kvsd_put(uint32_t key, const uint8_t *value, uint16_t len) {
 
     // Compress
     uint8_t comp[PACKED_DATA_MAX];
-    uint16_t clen = hs_compress(value, len, comp, PACKED_DATA_MAX);
+    uint16_t clen = pc_compress_card(value, len, comp, PACKED_DATA_MAX);
     if (clen == 0) return false;
 
     // Always COW: append new version to open block, then remove old.

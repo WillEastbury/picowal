@@ -3,8 +3,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
-#include "heatshrink_encoder.h"
-#include "heatshrink_decoder.h"
+#include "picocompress.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -183,58 +182,20 @@ static const uint8_t *xip_ptr(uint32_t flash_off) {
     return (const uint8_t *)(XIP_BASE_ADDR + flash_off);
 }
 
-#define KV_COMPRESS_MIN   256u
+#define KV_COMPRESS_MIN   64u
 
-// Heatshrink static instance for flash-tier compression (Core 1 only).
-static union {
-    heatshrink_encoder enc;
-    heatshrink_decoder dec;
-} g_hs_flash;
-
-static bool encode_heatshrink(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
-    heatshrink_encoder_reset(&g_hs_flash.enc);
-    size_t sunk = 0, polled = 0, total_out = 0;
-    uint16_t cap = *out_len;
-    while (sunk < in_len) {
-        size_t n = 0;
-        heatshrink_encoder_sink(&g_hs_flash.enc, (uint8_t *)&in[sunk], in_len - sunk, &n);
-        sunk += n;
-    }
-    heatshrink_encoder_finish(&g_hs_flash.enc);
-    HSE_poll_res pr;
-    do {
-        pr = heatshrink_encoder_poll(&g_hs_flash.enc, &out[total_out],
-                                      cap - total_out, &polled);
-        total_out += polled;
-        if (total_out > cap) return false;
-    } while (pr == HSER_POLL_MORE);
-    *out_len = (uint16_t)total_out;
+static bool encode_picocompress(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t *out_len) {
+    size_t olen = 0;
+    pc_result r = pc_compress_buffer(in, in_len, out, *out_len, &olen);
+    if (r != PC_OK) return false;
+    *out_len = (uint16_t)olen;
     return true;
 }
 
-static bool decode_heatshrink(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
-    heatshrink_decoder_reset(&g_hs_flash.dec);
-    size_t sunk = 0, polled = 0, total_out = 0;
-    while (sunk < in_len) {
-        size_t n = 0;
-        heatshrink_decoder_sink(&g_hs_flash.dec, (uint8_t *)&in[sunk], in_len - sunk, &n);
-        sunk += n;
-        HSD_poll_res pr;
-        do {
-            pr = heatshrink_decoder_poll(&g_hs_flash.dec, &out[total_out],
-                                          out_len - total_out, &polled);
-            total_out += polled;
-            if (total_out > out_len) return false;
-        } while (pr == HSDR_POLL_MORE);
-    }
-    heatshrink_decoder_finish(&g_hs_flash.dec);
-    HSD_poll_res pr;
-    do {
-        pr = heatshrink_decoder_poll(&g_hs_flash.dec, &out[total_out],
-                                      out_len - total_out, &polled);
-        total_out += polled;
-    } while (pr == HSDR_POLL_MORE);
-    return total_out == out_len;
+static bool decode_picocompress(const uint8_t *in, uint16_t in_len, uint8_t *out, uint16_t out_len) {
+    size_t olen = 0;
+    pc_result r = pc_decompress_buffer(in, in_len, out, out_len, &olen);
+    return r == PC_OK && olen == out_len;
 }
 
 // Page-aligned flash program helper.
@@ -501,7 +462,7 @@ static bool __no_inline_not_in_flash_func(append_record)(uint32_t key, const uin
 
     uint16_t enc_cap = sizeof(enc);
     if (raw_len >= KV_COMPRESS_MIN &&
-        encode_heatshrink(raw, raw_len, enc, &enc_cap) &&
+        encode_picocompress(raw, raw_len, enc, &enc_cap) &&
         enc_cap < raw_len) {
         stored = enc;
         stored_len = enc_cap;
@@ -575,7 +536,7 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     if (len && *len < rp->hdr.raw_len) return false;
     if (out && len) {
         if (rp->hdr.flags & KV_REC_FLAG_COMP) {
-            if (!decode_heatshrink(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
+            if (!decode_picocompress(stored, rp->hdr.store_len, out, rp->hdr.raw_len)) return false;
         } else if (rp->hdr.raw_len > 0) {
             memcpy(out, stored, rp->hdr.raw_len);
         }
