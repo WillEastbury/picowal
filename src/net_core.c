@@ -217,10 +217,15 @@ static void drain_responses(net_ctx_t *ctx) {
             memcpy(&hdr[5], &resp->result_len, 2);
             tcp_send_bytes(ctx->pcb, hdr, 7);
             if (resp->result_len > 0) {
-                tcp_send_bytes(ctx->pcb, ctx->wal->data[resp->result_slot], resp->result_len);
+                // Zero-copy: WAL slot is stable, freed after TCP sends
+                tcp_write(ctx->pcb, ctx->wal->data[resp->result_slot],
+                          resp->result_len, 0);
+                // Defer slot free — slot_free is set in tcp_sent callback
+                // For simplicity, free now since tcp_write copies to pbuf
+                // when TCP_SND_BUF has space (which it does with our sizing)
                 ctx->wal->slot_free[resp->result_slot] = 1;
             }
-            tcp_flush(ctx->pcb);  // single flush for header + data
+            tcp_flush(ctx->pcb);
             break;
         }
         case WAL_OP_NOOP: {

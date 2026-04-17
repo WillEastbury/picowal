@@ -992,25 +992,71 @@ void kvsd_init(void) {
                 bool all_zero = true;
                 for (int i = 0; i < 512; i++) { if (buf[i]) { all_zero = false; break; } }
                 if (all_zero) continue;
+
+                // Collect runs of set bits and batch-read them
                 uint32_t base = bm * 4096;
+                uint32_t run_start = 0;
+                uint32_t run_len = 0;
+                static uint8_t multi_buf[512 * 8]; // read up to 8 blocks at once
+
                 for (uint32_t by = 0; by < 512 && g_index_count < KVSD_INDEX_MAX; by++) {
-                    if (!buf[by]) continue;
+                    if (!buf[by]) { run_len = 0; continue; }
                     for (uint8_t bi = 0; bi < 8; bi++) {
-                        if (!(buf[by] & (1u<<bi))) continue;
                         uint32_t blk_num = base + by*8 + bi;
-                        uint8_t blk[512];
-                        if (!packed_read(blk_num, blk)) continue;
-                        const packed_blk_hdr_t *ph = (const packed_blk_hdr_t *)blk;
-                        uint16_t off = PACKED_BLK_HDR;
-                        for (uint8_t ei = 0; ei < ph->count && g_index_count < KVSD_INDEX_MAX; ei++) {
-                            if (off + PACKED_ENTRY_HDR > ph->used) break;
-                            const packed_entry_hdr_t *pe = (const packed_entry_hdr_t *)(blk + off);
-                            if (pe->key != 0 && pe->key != 0xFFFFFFFF) {
-                                g_index[g_index_count] = pe->key;
-                                g_slots[g_index_count] = blk_num;
-                                g_index_count++;
+                        if (buf[by] & (1u<<bi)) {
+                            if (run_len == 0) run_start = blk_num;
+                            run_len++;
+                            // Flush batch when full or at byte boundary end
+                            if (run_len >= 8 || (bi == 7)) {
+                                if (run_len > 1) {
+                                    sd_read_blocks(blk_addr(run_start), multi_buf, run_len);
+                                } else {
+                                    sd_read_block(blk_addr(run_start), multi_buf);
+                                }
+                                for (uint32_t ri = 0; ri < run_len && g_index_count < KVSD_INDEX_MAX; ri++) {
+                                    uint8_t *blk = multi_buf + ri * 512;
+                                    const packed_blk_hdr_t *ph = (const packed_blk_hdr_t *)blk;
+                                    if (ph->used > 512 || ph->count > 60) continue;
+                                    uint16_t off = PACKED_BLK_HDR;
+                                    for (uint8_t ei = 0; ei < ph->count && g_index_count < KVSD_INDEX_MAX; ei++) {
+                                        if (off + PACKED_ENTRY_HDR > ph->used) break;
+                                        const packed_entry_hdr_t *pe = (const packed_entry_hdr_t *)(blk + off);
+                                        if (pe->key != 0 && pe->key != 0xFFFFFFFF) {
+                                            g_index[g_index_count] = pe->key;
+                                            g_slots[g_index_count] = run_start + ri;
+                                            g_index_count++;
+                                        }
+                                        off += PACKED_ENTRY_HDR + pe->comp_len;
+                                    }
+                                }
+                                run_len = 0;
                             }
-                            off += PACKED_ENTRY_HDR + pe->comp_len;
+                        } else {
+                            // Gap — flush any pending run
+                            if (run_len > 0) {
+                                if (run_len > 1) {
+                                    sd_read_blocks(blk_addr(run_start), multi_buf, run_len);
+                                } else {
+                                    sd_read_block(blk_addr(run_start), multi_buf);
+                                }
+                                for (uint32_t ri = 0; ri < run_len && g_index_count < KVSD_INDEX_MAX; ri++) {
+                                    uint8_t *blk = multi_buf + ri * 512;
+                                    const packed_blk_hdr_t *ph = (const packed_blk_hdr_t *)blk;
+                                    if (ph->used > 512 || ph->count > 60) continue;
+                                    uint16_t off = PACKED_BLK_HDR;
+                                    for (uint8_t ei = 0; ei < ph->count && g_index_count < KVSD_INDEX_MAX; ei++) {
+                                        if (off + PACKED_ENTRY_HDR > ph->used) break;
+                                        const packed_entry_hdr_t *pe = (const packed_entry_hdr_t *)(blk + off);
+                                        if (pe->key != 0 && pe->key != 0xFFFFFFFF) {
+                                            g_index[g_index_count] = pe->key;
+                                            g_slots[g_index_count] = run_start + ri;
+                                            g_index_count++;
+                                        }
+                                        off += PACKED_ENTRY_HDR + pe->comp_len;
+                                    }
+                                }
+                                run_len = 0;
+                            }
                         }
                     }
                 }
