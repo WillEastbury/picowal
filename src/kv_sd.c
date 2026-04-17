@@ -157,14 +157,14 @@ static void fidx_count_entries(void) {
 static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t count) {
     if (count > FIDX_MAX_ENTRIES) count = FIDX_MAX_ENTRIES;
 
-    uint32_t irq = save_and_disable_interrupts();
-
-    // Step 1: erase all sectors (this also clears any previous header).
+    // Step 1: erase sectors one at a time, re-enabling interrupts between (#73)
     for (uint32_t s = 0; s < FIDX_SECTORS; s++) {
+        uint32_t irq = save_and_disable_interrupts();
         flash_range_erase(FIDX_FLASH_OFFSET + s * FIDX_SECTOR_SIZE, FIDX_SECTOR_SIZE);
+        restore_interrupts(irq);
     }
 
-    // Step 2: write entries starting at FIDX_ENTRY_OFFSET (32 entries per 256-byte page).
+    // Step 2: write entries (32 per 256-byte page)
     uint8_t page[256];
     for (uint32_t i = 0; i < count; i += 32) {
         memset(page, 0xFF, 256);
@@ -178,13 +178,12 @@ static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t
             page[off+4]=(uint8_t)sl;   page[off+5]=(uint8_t)(sl>>8);
             page[off+6]=(uint8_t)(sl>>16); page[off+7]=(uint8_t)(sl>>24);
         }
+        uint32_t irq = save_and_disable_interrupts();
         flash_range_program(FIDX_FLASH_OFFSET + FIDX_ENTRY_OFFSET + i * 8, page, 256);
+        restore_interrupts(irq);
     }
 
     // Step 3: seal with header (sequence + entry_count + CRC).
-    // Only after this write is the flash index considered authoritative on boot.
-    // CRC is computed over the XIP-mapped entry bytes using the shared crc32_range()
-    // helper — same polynomial and byte layout as what was just written to flash.
     const uint8_t *written = (const uint8_t *)(FIDX_XIP_BASE + FIDX_ENTRY_OFFSET);
     uint32_t crc = crc32_range(written, count * FIDX_ENTRY_SIZE);
 
@@ -194,13 +193,16 @@ static void fidx_write_all(const uint32_t *keys, const uint32_t *slots, uint32_t
     hdr->magic       = FIDX_MAGIC;
     hdr->version     = FIDX_VERSION;
     memset(hdr->_pad, 0, sizeof(hdr->_pad));
-    hdr->sequence    = ++g_fidx_sequence;  // strictly increasing across flushes
+    hdr->sequence    = ++g_fidx_sequence;
     hdr->entry_count = count;
     hdr->crc32       = crc;
     memset(hdr->_reserved, 0xFF, sizeof(hdr->_reserved));
-    flash_range_program(FIDX_FLASH_OFFSET, hdr_buf, 256);
+    {
+        uint32_t irq = save_and_disable_interrupts();
+        flash_range_program(FIDX_FLASH_OFFSET, hdr_buf, 256);
+        restore_interrupts(irq);
+    }
 
-    restore_interrupts(irq);
     g_fidx_count = count;
 }
 

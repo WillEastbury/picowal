@@ -245,7 +245,7 @@ static void __no_inline_not_in_flash_func(flash_program_aligned)(
     uint32_t page_start = flash_off & ~(uint32_t)(KV_PAGE_SIZE - 1u);
     uint16_t intra = (uint16_t)(flash_off - page_start);
     uint16_t prog_len = (uint16_t)(((intra + len) + (KV_PAGE_SIZE - 1u)) & ~(KV_PAGE_SIZE - 1u));
-    static uint8_t pbuf[KV_PAGE_SIZE * 4];  // up to 1KB
+    static uint8_t pbuf[KV_PAGE_SIZE * 3];  // 768B — fits max record + commit + alignment
     if (prog_len > sizeof(pbuf)) return;
     memset(pbuf, 0xFF, prog_len);
     memcpy(pbuf + intra, data, len);
