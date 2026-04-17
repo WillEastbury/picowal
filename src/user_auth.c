@@ -859,7 +859,13 @@ bool user_auth_parse_cookie(const char *headers,
     if (!p) p = strstr(headers, "cookie:");
     if (!p) return false;
 
-    const char *sid = strstr(p, "sid=");
+    // Find "sid=" as a standalone cookie name — must be preceded by
+    // start-of-value, semicolon, or whitespace (#70)
+    const char *sid = p + 7;  // skip "Cookie:"
+    while ((sid = strstr(sid, "sid=")) != NULL) {
+        if (sid == p + 7 || sid[-1] == ';' || sid[-1] == ' ' || sid[-1] == '\t') break;
+        sid += 4;  // skip this match, keep searching
+    }
     if (!sid) return false;
     sid += 4;
 

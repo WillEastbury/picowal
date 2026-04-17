@@ -799,7 +799,7 @@ bool kv_put_if_version(uint32_t key, const uint8_t *value, uint16_t len,
     // the recovery scanner can pair them.
     uint32_t mg = ++g_mutation_group;
 
-    uint16_t next_ver = (uint16_t)(cur_ver + 1u);
+    uint16_t next_ver = (cur_ver >= 0xFFFEu) ? 1u : (uint16_t)(cur_ver + 1u);
     uint32_t new_loc = 0;
     if (!append_record(key, value, len, next_ver, 0, mg, &new_loc)) return false;
     if (!idx_set(key, new_loc, next_ver, 0)) return false;
