@@ -450,6 +450,7 @@ static bool resolve_pack(const char *name, pack_schema_t *ps) {
             ps->ord = (int16_t)(keys[i] & 0x3FFFFF);
             ps->field_count = fc;
             strncpy(ps->name, pname, 31);
+            ps->name[31] = '\0';
             // Insert into cache
             if (g_pack_cache_count < PACK_CACHE_SIZE)
                 g_pack_cache[g_pack_cache_count++] = *ps;
@@ -530,6 +531,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
     pack_schema_t *primary = &packs[0];
     static char s_pname[32];
     strncpy(s_pname, primary->name, 31);
+    s_pname[31] = '\0';
     g_result_pack = s_pname;
     *pack_name = g_result_pack;
 
@@ -553,6 +555,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
             w_types[w_count] = primary->field_types[fi];
             w_ops[w_count] = q->where[wi].op;
             strncpy(w_values[w_count], q->where[wi].value, 63);
+            w_values[w_count][63] = '\0';
             w_count++;
         } else {
             // WHERE on joined pack — resolve via lookup
@@ -593,6 +596,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                 idlen += snprintf(idlist + idlen, sizeof(idlist) - idlen, "%lu", (unsigned long)matched_ids[mi]);
             }
             strncpy(w_values[w_count], idlist, 63);
+            w_values[w_count][63] = '\0';
             w_count++;
         }
     }
@@ -870,6 +874,7 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                 if (q->select_fields[si].agg == QAGG_MIN) agg_vals[gi][si] = 2147483647L;
                 if (q->select_fields[si].agg == QAGG_MAX) agg_vals[gi][si] = -2147483647L;
                 strncpy(agg_first[gi][si], row_vals[ri][si], 31);
+                agg_first[gi][si][31] = '\0';
             }
         }
         if (gi < 0) continue;

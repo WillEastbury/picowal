@@ -31,6 +31,7 @@
 
 #define USER_FLAG_ADMIN     0x01
 #define USER_FLAG_LOCKED    0x02
+#define USER_FLAG_MUST_CHANGE 0x04  // force password change on next login
 
 // Session info returned by check
 typedef struct {

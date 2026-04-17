@@ -560,7 +560,7 @@ void user_auth_init(void) {
     uint16_t clen = build_user_card(card, sizeof(card),
                                      "admin", 5,
                                      hash, salt,
-                                     USER_FLAG_ADMIN, 0,
+                                     USER_FLAG_ADMIN | USER_FLAG_MUST_CHANGE, 0,
                                      &wildcard, 1,
                                      &wildcard, 1,
                                      &wildcard, 1);
@@ -594,7 +594,39 @@ int32_t user_auth_login(const char *username, uint8_t ulen,
 
     uint8_t diff = 0;
     for (int i = 0; i < USER_HASH_LEN; i++) diff |= computed[i] ^ user.hash[i];
-    if (diff != 0) return -1;
+    if (diff != 0) {
+        // #61: Increment fail_count, lock after 10 failures
+        user.fail_count++;
+        uint8_t new_flags = user.flags;
+        if (user.fail_count >= 10) new_flags |= USER_FLAG_LOCKED;
+        uint8_t new_card[256];
+        uint16_t nclen = build_user_card(new_card, sizeof(new_card),
+            user.username, user.ulen, user.hash, user.salt,
+            new_flags, user.fail_count,
+            user.read_data ? (const uint16_t *)user.read_data : NULL,
+            user.read_bytes / 2,
+            user.write_data ? (const uint16_t *)user.write_data : NULL,
+            user.write_bytes / 2,
+            user.del_data ? (const uint16_t *)user.del_data : NULL,
+            user.del_bytes / 2);
+        if (nclen > 0) kv_put(USER_KEY(card_id), new_card, nclen);
+        return -1;
+    }
+
+    // Reset fail_count on successful login
+    if (user.fail_count > 0) {
+        uint8_t new_card[256];
+        uint16_t nclen = build_user_card(new_card, sizeof(new_card),
+            user.username, user.ulen, user.hash, user.salt,
+            user.flags, 0,
+            user.read_data ? (const uint16_t *)user.read_data : NULL,
+            user.read_bytes / 2,
+            user.write_data ? (const uint16_t *)user.write_data : NULL,
+            user.write_bytes / 2,
+            user.del_data ? (const uint16_t *)user.del_data : NULL,
+            user.del_bytes / 2);
+        if (nclen > 0) kv_put(USER_KEY(card_id), new_card, nclen);
+    }
 
     // Find a free session slot (or expire oldest)
     int slot = -1;
@@ -629,8 +661,11 @@ int32_t user_auth_login(const char *username, uint8_t ulen,
 
 void user_auth_logout(const uint8_t token[SESSION_TOKEN_LEN]) {
     for (int i = 0; i < SESSION_MAX; i++) {
-        if (g_sessions[i].active &&
-            memcmp(g_sessions[i].token, token, SESSION_TOKEN_LEN) == 0) {
+        if (!g_sessions[i].active) continue;
+        uint8_t diff = 0;
+        for (int j = 0; j < SESSION_TOKEN_LEN; j++)
+            diff |= g_sessions[i].token[j] ^ token[j];
+        if (diff == 0) {
             g_sessions[i].active = false;
             printf("[auth] Logout: session slot %d\n", i);
             return;
@@ -642,7 +677,10 @@ bool user_auth_check(const uint8_t token[SESSION_TOKEN_LEN],
                      user_session_t *out) {
     for (int i = 0; i < SESSION_MAX; i++) {
         if (!g_sessions[i].active) continue;
-        if (memcmp(g_sessions[i].token, token, SESSION_TOKEN_LEN) != 0) continue;
+        uint8_t diff = 0;
+        for (int j = 0; j < SESSION_TOKEN_LEN; j++)
+            diff |= g_sessions[i].token[j] ^ token[j];
+        if (diff != 0) continue;
 
         // Check timeout
         uint32_t elapsed = now_ms() - g_sessions[i].last_ms;
@@ -824,6 +862,9 @@ bool user_auth_parse_cookie(const char *headers,
     const char *sid = strstr(p, "sid=");
     if (!sid) return false;
     sid += 4;
+
+    // #63: Verify enough chars remain for 32 hex digits
+    if (strlen(sid) < SESSION_TOKEN_LEN * 2) return false;
 
     // Need 32 hex chars
     for (int i = 0; i < SESSION_TOKEN_LEN; i++) {
