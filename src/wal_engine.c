@@ -25,7 +25,7 @@ static int wal_alloc_entry(void) {
 // Find a free buffer slot
 static int wal_alloc_slot(void) {
     for (int i = 0; i < SLOT_COUNT; i++) {
-        if (g_wal->slot_free[i]) return i;
+        if (__atomic_exchange_n(&g_wal->slot_free[i], 0, __ATOMIC_ACQ_REL)) return i;
     }
     return -1;
 }

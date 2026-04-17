@@ -605,7 +605,11 @@ int query_execute(const query_t *q, char *buf, int buf_size,
 
     if (s_count == 0) {
         s_count = primary->field_count;
-        for (uint8_t i = 0; i < s_count && i < QUERY_MAX_SELECT; i++) {
+    }
+    if (s_count > QUERY_MAX_SELECT) s_count = QUERY_MAX_SELECT;  // #57: clamp
+
+    if (q->select_count == 0) {
+        for (uint8_t i = 0; i < s_count; i++) {
             s_ords[i] = primary->field_ords[i];
             s_types[i] = primary->field_types[i];
             s_names[i] = primary->field_names[i];
@@ -843,6 +847,8 @@ int query_execute(const query_t *q, char *buf, int buf_size,
             if (q->select_fields[si].agg == QAGG_NONE) {
                 if (gklen > 0) gk[gklen++] = '|';
                 int sl = (int)strlen(row_vals[ri][si]);
+                if (gklen + sl >= (int)sizeof(gk)) { sl = (int)sizeof(gk) - gklen - 1; }
+                if (sl <= 0) break;
                 memcpy(gk + gklen, row_vals[ri][si], sl);
                 gklen += sl;
             }
@@ -856,7 +862,8 @@ int query_execute(const query_t *q, char *buf, int buf_size,
         }
         if (gi < 0 && group_count < AGG_MAX_GROUPS) {
             gi = group_count++;
-            strcpy(group_keys[gi], gk);
+            strncpy(group_keys[gi], gk, 127);
+            group_keys[gi][127] = '\0';
             agg_counts[gi] = 0;
             for (uint8_t si = 0; si < s_count; si++) {
                 agg_vals[gi][si] = 0;

@@ -100,7 +100,7 @@ static void on_err(void *arg, err_t err);
 
 static int alloc_slot(wal_state_t *wal) {
     for (int i = 0; i < SLOT_COUNT; i++) {
-        if (wal->slot_free[i]) return i;
+        if (__atomic_exchange_n(&wal->slot_free[i], 0, __ATOMIC_ACQ_REL)) return i;
     }
     return -1;
 }

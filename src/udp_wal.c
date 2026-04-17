@@ -118,6 +118,11 @@ static void udp_send_encrypted(udp_session_t *s, uint8_t msg_type,
     }
 
     // Build nonce from session_id(8) + per-session seq(4)
+    if (s->send_seq >= 0xFFFFFFF0u) {
+        // Near wrap — force session rekeying by expiring it
+        s->session_id = 0;
+        return;
+    }
     s->send_seq++;
     uint8_t nonce[12];
     wr64(nonce, s->session_id);
@@ -231,9 +236,27 @@ static void handle_hello(const ip_addr_t *addr, uint16_t port,
 // ============================================================
 
 static void handle_resume(const ip_addr_t *addr, uint16_t port,
-                          uint64_t session_id) {
+                          uint64_t session_id, const uint8_t *payload, uint16_t plen) {
     udp_session_t *s = find_session(session_id);
     if (!s) {
+        udp_send_to(addr, port, session_id, UMSG_RESUME_FAIL, NULL, 0);
+        return;
+    }
+    // Verify MAC: payload must be [mac:16] computed as AEAD tag over session_id
+    if (!s->encrypted || plen < 16) {
+        udp_send_to(addr, port, session_id, UMSG_RESUME_FAIL, NULL, 0);
+        return;
+    }
+    uint8_t nonce[12] = {0};
+    wr64(nonce, session_id);
+    uint8_t expected_tag[16];
+    uint8_t aad[8];
+    wr64(aad, session_id);
+    // Encrypt empty payload with session key to get auth tag
+    aead_encrypt(expected_tag, NULL, 0, aad, 8, s->key, nonce);
+    uint8_t diff = 0;
+    for (int i = 0; i < 16; i++) diff |= payload[i] ^ expected_tag[i];
+    if (diff != 0) {
         udp_send_to(addr, port, session_id, UMSG_RESUME_FAIL, NULL, 0);
         return;
     }
@@ -385,24 +408,17 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     (void)arg; (void)pcb;
     if (!p || p->tot_len < UDP_WAL_HDR_SIZE) { if (p) pbuf_free(p); return; }
 
-    // Overflow: if SRAM deferred queue full and this is a BATCH_WRITE,
-    // parse cards directly into flash ring buffer instead of dropping
+// #47 CRITICAL: Raw ring bypass must validate AEAD before processing
+// Drop packets that bypass the deferred queue — they cannot be verified
+// without the full decrypt path, so dropping is the only safe option.
     {
         bool any_free = false;
         for (int i = 0; i < DEFERRED_QUEUE_SIZE; i++) {
             if (!g_deferred[i].active) { any_free = true; break; }
         }
-        uint8_t peek_type = 0;
-        pbuf_copy_partial(p, &peek_type, 1, 14);
-        if (!any_free && peek_type == UMSG_BATCH_WRITE) {
-            // SRAM deferred queue full — push raw datagram to SRAM ring
-            // (fast memcpy, parsed + written to SD in poll loop)
-            uint16_t total = p->tot_len;
-            uint8_t raw[RAW_RING_MTU];
-            uint16_t clen = total > RAW_RING_MTU ? RAW_RING_MTU : total;
-            pbuf_copy_partial(p, raw, clen, 0);
+        if (!any_free) {
+            // Queue full — drop packet rather than bypassing AEAD verification
             pbuf_free(p);
-            raw_ring_push(raw, clen);
             return;
         }
     }
@@ -432,7 +448,7 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     udp_session_t *s = find_session(session_id);
 
     if (msg_type == UMSG_RESUME) {
-        handle_resume(addr, port, session_id);
+        handle_resume(addr, port, session_id, payload, payload_len);
         return;
     }
 

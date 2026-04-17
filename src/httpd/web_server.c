@@ -60,6 +60,22 @@ static char g_query_result[QUERY_RESULT_BUF];
 #define PAGE_BUF_SIZE 8192
 static char g_page_buf[PAGE_BUF_SIZE];
 
+// HTML entity escape helper (#54 — prevent stored XSS)
+static int html_escape(char *out, int out_max, const char *s) {
+    int n = 0;
+    for (; *s && n < out_max - 6; s++) {
+        switch (*s) {
+            case '<': n += snprintf(out+n, out_max-n, "&lt;"); break;
+            case '>': n += snprintf(out+n, out_max-n, "&gt;"); break;
+            case '&': n += snprintf(out+n, out_max-n, "&amp;"); break;
+            case '"': n += snprintf(out+n, out_max-n, "&quot;"); break;
+            default:  out[n++] = *s; break;
+        }
+    }
+    if (n < out_max) out[n] = '\0';
+    return n;
+}
+
 // ============================================================
 // Debug log ring buffer — accessible via GET /admin/log
 // ============================================================
@@ -3250,8 +3266,8 @@ route_I:
         }
         if (rlen > 1024) rlen = 1024;
 
-        // Validate: must be in XIP range (0x10000000–0x103FFFFF) 
-        if (addr < 0x10000000 || addr + rlen > 0x10400000) {
+        // Validate: must be in XIP range, overflow-safe (#53)
+        if (addr < 0x10000000 || rlen > 0x400000 || addr > 0x10400000 - rlen) {
             http_json(pcb, "400 Bad Request", "{\"error\":\"addr must be in 0x10000000-0x103FFFFF\"}");
             return;
         }
@@ -3307,8 +3323,8 @@ route_I:
         }
         if (rlen > 1024) rlen = 1024;
 
-        // Validate: must be in SRAM range (0x20000000–0x20082000)
-        if (addr < 0x20000000 || addr + rlen > 0x20082000) {
+        // Validate: must be in SRAM range, overflow-safe (#53)
+        if (addr < 0x20000000 || rlen > 0x82000 || addr > 0x20082000 - rlen) {
             http_json(pcb, "400 Bad Request", "{\"error\":\"addr must be in 0x20000000-0x20082000\"}");
             return;
         }
