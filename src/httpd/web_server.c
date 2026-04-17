@@ -1121,16 +1121,42 @@ typedef void (*route_handler_t)(struct tcp_pcb *pcb, http_verb_t verb,
 // /0/{type}/{id} — KV operations
 static void handle_kv(struct tcp_pcb *pcb, http_verb_t verb,
                       uint16_t type_id, uint32_t record_id,
-                      const uint8_t *body, uint16_t body_len) {
+                      const uint8_t *body, uint16_t body_len,
+                      const char *req) {
     uint32_t key = ((uint32_t)(type_id & 0x3FF) << 22) | (record_id & 0x3FFFFF);
 
     if (verb == VERB_GET) {
-        uint8_t val[KV_MAX_VALUE];
-        uint16_t len = KV_MAX_VALUE;
-        if (!kv_get_copy(key, val, &len, NULL)) {
-            http_json(pcb, "404 Not Found", "{\"error\":\"not found\"}");
+        // Check if client accepts picocompress — skip decompression
+        bool wants_pc = req && (strstr(req, "Accept: application/x-picocompress") ||
+                                strstr(req, "accept: application/x-picocompress"));
+        if (wants_pc) {
+            uint8_t raw[KV_MAX_VALUE];
+            uint16_t clen = KV_MAX_VALUE;
+            uint16_t rlen = 0;
+            bool compressed = false;
+            if (kv_store_get_raw(key, raw, &clen, &rlen, &compressed) && compressed) {
+                char extra[64];
+                snprintf(extra, sizeof(extra),
+                         "Content-Encoding: picocompress\r\nX-Raw-Length: %u\r\n", rlen);
+                http_respond_with_headers(pcb, "200 OK", "application/octet-stream",
+                                          extra, raw, clen);
+            } else {
+                // Not compressed or not found — fall back to normal path
+                uint8_t val[KV_MAX_VALUE];
+                uint16_t len = KV_MAX_VALUE;
+                if (!kv_get_copy(key, val, &len, NULL))
+                    http_json(pcb, "404 Not Found", "{\"error\":\"not found\"}");
+                else
+                    http_respond(pcb, "200 OK", "application/octet-stream", val, len);
+            }
         } else {
-            http_respond(pcb, "200 OK", "application/octet-stream", val, len);
+            uint8_t val[KV_MAX_VALUE];
+            uint16_t len = KV_MAX_VALUE;
+            if (!kv_get_copy(key, val, &len, NULL)) {
+                http_json(pcb, "404 Not Found", "{\"error\":\"not found\"}");
+            } else {
+                http_respond(pcb, "200 OK", "application/octet-stream", val, len);
+            }
         }
     } else if (verb == VERB_DELETE) {
         if (kv_delete(key)) {
@@ -2868,7 +2894,7 @@ route_b:
                 return;
             }
         }
-        handle_kv(pcb, verb, (uint16_t)pack_val, (uint32_t)card_val, body, body_len);
+        handle_kv(pcb, verb, (uint16_t)pack_val, (uint32_t)card_val, body, body_len, req);
         return;
     }
 
@@ -3154,7 +3180,7 @@ route_I:
             }
         }
 
-        handle_kv(pcb, verb, (uint16_t)type_val, (uint32_t)id_val, body, body_len);
+        handle_kv(pcb, verb, (uint16_t)type_val, (uint32_t)id_val, body, body_len, req);
         return;
     }
 

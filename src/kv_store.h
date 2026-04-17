@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include "kv_flash.h"
 #include "kv_sd.h"
 
@@ -49,6 +50,22 @@ static inline bool kv_store_get_copy(uint32_t key, uint8_t *out, uint16_t *len, 
     if (kv_use_sd(key))
         return kvsd_get_copy(key, out, len, ver);
     return kvf_get_copy(key, out, len, ver);
+}
+
+// Get raw compressed bytes — for picocompress pass-through to clients.
+// For flash: returns XIP pointer (zero-copy). For SD: copies to out buffer.
+static inline bool kv_store_get_raw(uint32_t key, uint8_t *out, uint16_t *len,
+                                     uint16_t *raw_len, bool *is_compressed) {
+    if (kv_use_sd(key)) {
+        bool ok = kvsd_get_raw(key, out, len, raw_len);
+        if (is_compressed) *is_compressed = ok;  // SD data is always compressed
+        return ok;
+    }
+    // Flash: use kv_get_raw for XIP zero-copy, then copy to out
+    const uint8_t *raw = kv_get_raw(key, len, raw_len, is_compressed);
+    if (!raw) return false;
+    if (*len > 0) memcpy(out, raw, *len);
+    return true;
 }
 
 static inline bool kv_store_delete(uint32_t key) {

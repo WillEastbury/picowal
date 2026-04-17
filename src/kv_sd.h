@@ -173,4 +173,9 @@ bool kvsd_ready(void);
 // OTA staging: returns the SD block offset for OTA firmware staging
 uint32_t kvsd_ota_start_block(void);
 
+// Read raw compressed bytes for a key (picocompress pass-through).
+// Copies compressed data into out, sets *len to compressed length,
+// *raw_len to uncompressed length. Returns false if not found.
+bool kvsd_get_raw(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *raw_len);
+
 #endif

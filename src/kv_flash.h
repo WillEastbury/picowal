@@ -86,6 +86,13 @@ const uint8_t *kv_get(uint32_t key, uint16_t *len);
 // Returns false if key is missing, corrupted, or out buffer is too small.
 bool kv_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version);
 
+// Read a key's raw stored bytes (compressed if applicable).
+// Returns pointer to stored data (XIP zero-copy for flash), sets *len to stored length.
+// *is_compressed is set to true if data is picocompress-encoded.
+// *raw_len is set to the uncompressed length.
+// Returns NULL if key not found.
+const uint8_t *kv_get_raw(uint32_t key, uint16_t *len, uint16_t *raw_len, bool *is_compressed);
+
 // Delete a key. Invalidates its sector.
 bool kv_delete(uint32_t key);
 

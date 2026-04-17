@@ -1180,6 +1180,25 @@ bool kvsd_get_copy(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *version)
     return true;
 }
 
+bool kvsd_get_raw(uint32_t key, uint8_t *out, uint16_t *len, uint16_t *raw_len) {
+    if (!g_ready) return false;
+    int32_t blk = find_slot_for_key(key);
+    if (blk < 0) return false;
+
+    uint8_t blkbuf[512];
+    if (!packed_read((uint32_t)blk, blkbuf)) return false;
+    uint16_t off = packed_find(blkbuf, key);
+    if (off == 0) return false;
+    const packed_entry_hdr_t *e = (const packed_entry_hdr_t *)(blkbuf + off);
+    if (off + PACKED_ENTRY_HDR + e->comp_len > 512) return false;
+
+    if (*len < e->comp_len) return false;
+    memcpy(out, blkbuf + off + PACKED_ENTRY_HDR, e->comp_len);
+    *len = e->comp_len;
+    if (raw_len) *raw_len = e->raw_len;
+    return true;
+}
+
 // ============================================================
 // Delete — remove entry from packed block, compact
 // ============================================================

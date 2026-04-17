@@ -548,6 +548,29 @@ static bool read_record(uint32_t loc, uint32_t key, uint8_t *out, uint16_t *len,
     return true;
 }
 
+const uint8_t *kv_get_raw(uint32_t key, uint16_t *len, uint16_t *raw_len, bool *is_compressed) {
+    uint32_t loc = 0;
+    if (!idx_get(key, &loc, NULL, NULL)) return NULL;
+
+    uint16_t page = 0, off = 0;
+    unpack_loc(loc, &page, &off, NULL);
+    if (page >= KV_SECTOR_COUNT) return NULL;
+
+    uint32_t rec_flash_off = KV_REGION_START + (uint32_t)page * KV_SECTOR_SIZE + off;
+    const kv_rec_prefix_t *rp = (const kv_rec_prefix_t *)xip_ptr(rec_flash_off);
+
+    if (rp->hdr.magic != KV_MAGIC || rp->hdr.key != key) return NULL;
+    if (rp->hdr.flags & KV_REC_FLAG_TOMB) return NULL;
+
+    const uint8_t *stored = xip_ptr(rec_flash_off + sizeof(kv_rec_prefix_t));
+    if (crc32(stored, rp->hdr.store_len) != rp->hdr.checksum) return NULL;
+
+    if (len) *len = rp->hdr.store_len;
+    if (raw_len) *raw_len = rp->hdr.raw_len;
+    if (is_compressed) *is_compressed = (rp->hdr.flags & KV_REC_FLAG_COMP) != 0;
+    return stored;
+}
+
 void __no_inline_not_in_flash_func(kv_wipe)(void) {
     for (uint32_t off = KV_REGION_START; off < KV_DEADLOG_END; off += KV_SECTOR_SIZE) {
         uint32_t irq = save_and_disable_interrupts();
