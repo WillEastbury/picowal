@@ -351,6 +351,54 @@ static bool is_numeric_type(uint8_t tc) {
            tc == 0x12; // lookup stored as uint32
 }
 
+// Fast typed extraction — reads numeric fields directly from binary card
+// without string round-trip. Returns true if field found.
+static bool extract_field_int32(const uint8_t *card, uint16_t card_len,
+                                uint8_t target_ord, uint8_t type_code,
+                                int32_t *out) {
+    if (card_len < 4 || card[0] != 0x7D || card[1] != 0xCA) return false;
+    uint16_t off = 4;
+    while (off + 1 < card_len) {
+        uint8_t ord = card[off] & 0x1F;
+        uint8_t flen = card[off + 1];
+        off += 2;
+        if (off + flen > card_len) break;
+        if (ord == target_ord) {
+            switch (type_code) {
+                case 0x01: *out = flen ? (int32_t)card[off] : 0; return true;
+                case 0x02: { uint16_t v = 0; if (flen >= 2) memcpy(&v, card+off, 2); *out = (int32_t)v; return true; }
+                case 0x03: case 0x12: { uint32_t v = 0; if (flen >= 4) memcpy(&v, card+off, 4); *out = (int32_t)v; return true; }
+                case 0x04: *out = flen ? (int32_t)(int8_t)card[off] : 0; return true;
+                case 0x05: { int16_t v = 0; if (flen >= 2) memcpy(&v, card+off, 2); *out = (int32_t)v; return true; }
+                case 0x06: { int32_t v = 0; if (flen >= 4) memcpy(&v, card+off, 4); *out = v; return true; }
+                default: return false;
+            }
+        }
+        off += flen;
+    }
+    return false;
+}
+
+// Direct integer comparison — no string conversion
+static bool compare_int_direct(int32_t actual, query_op_t op, const char *expected) {
+    long e = strtol(expected, NULL, 10);
+    switch (op) {
+        case QOP_EQ: return actual == e;
+        case QOP_NE: return actual != e;
+        case QOP_GT: return actual > e;
+        case QOP_LT: return actual < e;
+        case QOP_GE: return actual >= e;
+        case QOP_LE: return actual <= e;
+        case QOP_IN: case QOP_NI: {
+            // Fall back to string compare for IN/NI
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%ld", (long)actual);
+            return compare_str(buf, op, expected);
+        }
+    }
+    return false;
+}
+
 // ============================================================
 // Execute query — scan pack, filter, project
 // ============================================================
@@ -752,12 +800,17 @@ int query_execute(const query_t *q, char *buf, int buf_size,
 
             bool pass = true;
             for (uint8_t wi = 0; wi < w_count && pass; wi++) {
-                char actual[64] = "";
-                extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
-                if (is_numeric_type(w_types[wi]))
-                    pass = compare_int(actual, w_ops[wi], w_values[wi]);
-                else
+                if (is_numeric_type(w_types[wi])) {
+                    int32_t ival;
+                    if (extract_field_int32(card, clen, w_ords[wi], w_types[wi], &ival))
+                        pass = compare_int_direct(ival, w_ops[wi], w_values[wi]);
+                    else
+                        pass = false;
+                } else {
+                    char actual[64] = "";
+                    extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
                     pass = compare_str(actual, w_ops[wi], w_values[wi]);
+                }
             }
             if (!pass) continue;
 
@@ -771,10 +824,9 @@ int query_execute(const query_t *q, char *buf, int buf_size,
                 } else {
                     int8_t lf = find_lookup_to(primary, &packs[s_pack_idx[si]]);
                     if (lf >= 0) {
-                        char ref_id_str[16] = "";
-                        extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
-                        uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
-                        uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
+                        int32_t ref_id = 0;
+                        extract_field_int32(card, clen, primary->field_ords[lf], primary->field_types[lf], &ref_id);
+                        uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ((uint32_t)ref_id & 0x3FFFFF);
                         uint8_t ref_card[512]; uint16_t rclen = sizeof(ref_card);
                         if (kv_get_copy(ref_key, ref_card, &rclen, NULL)) {
                             char val[64] = "";
@@ -805,12 +857,17 @@ int query_execute(const query_t *q, char *buf, int buf_size,
 
         bool pass = true;
         for (uint8_t wi = 0; wi < w_count && pass; wi++) {
-            char actual[64] = "";
-            extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
-            if (is_numeric_type(w_types[wi]))
-                pass = compare_int(actual, w_ops[wi], w_values[wi]);
-            else
+            if (is_numeric_type(w_types[wi])) {
+                int32_t ival;
+                if (extract_field_int32(card, clen, w_ords[wi], w_types[wi], &ival))
+                    pass = compare_int_direct(ival, w_ops[wi], w_values[wi]);
+                else
+                    pass = false;
+            } else {
+                char actual[64] = "";
+                extract_field_str(card, clen, w_ords[wi], w_types[wi], actual, sizeof(actual));
                 pass = compare_str(actual, w_ops[wi], w_values[wi]);
+            }
         }
         if (!pass) continue;
 
@@ -822,10 +879,9 @@ int query_execute(const query_t *q, char *buf, int buf_size,
             } else {
                 int8_t lf = find_lookup_to(primary, &packs[s_pack_idx[si]]);
                 if (lf >= 0) {
-                    char ref_id_str[16] = "";
-                    extract_field_str(card, clen, primary->field_ords[lf], primary->field_types[lf], ref_id_str, sizeof(ref_id_str));
-                    uint32_t ref_id = (uint32_t)strtoul(ref_id_str, NULL, 10);
-                    uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ref_id;
+                    int32_t ref_id = 0;
+                    extract_field_int32(card, clen, primary->field_ords[lf], primary->field_types[lf], &ref_id);
+                    uint32_t ref_key = ((uint32_t)packs[s_pack_idx[si]].ord << 22) | ((uint32_t)ref_id & 0x3FFFFF);
                     uint8_t ref_card[512]; uint16_t rclen = sizeof(ref_card);
                     if (kv_get_copy(ref_key, ref_card, &rclen, NULL))
                         extract_field_str(ref_card, rclen, s_ords[si], s_types[si], row_vals[row_count][si], 32);
