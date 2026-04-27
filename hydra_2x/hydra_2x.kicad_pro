@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "filename": "hydra_2x.kicad_pro",
+    "version": 1
+  },
+  "board": {
+    "3dviewports": [],
+    "design_settings": {
+      "defaults": {
+        "board_outline_line_width": 0.1
+      },
+      "rules": {
+        "min_clearance": 0.15,
+        "min_track_width": 0.15,
+        "min_via_diameter": 0.6,
+        "min_via_annular_width": 0.15
+      }
+    },
+    "layer_presets": []
+  },
+  "schematic": {
+    "drawing": {
+      "default_line_thickness": 6.0
+    },
+    "meta": {
+      "version": 1
+    }
+  },
+  "text_variables": {}
+}
