@@ -1,0 +1,9 @@
+{
+  "meta": {"filename": "picowal.kicad_pro", "version": 2},
+  "board": {"design_settings": {"defaults": {"board_outline_line_width": 0.1},
+    "rules": {"min_clearance": 0.15, "min_track_width": 0.15}}},
+  "schematic": {"drawing": {"default_line_thickness": 0.006}},
+  "sheets": [
+    ["query_planner.kicad_sch", "PicoWAL Query Processor"]
+  ]
+}

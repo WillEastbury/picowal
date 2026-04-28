@@ -14,8 +14,14 @@
 //   flags bit 0: 0=READ, 1=WRITE
 //   address decomposition:
 //     [63:53] tenant_id  (11b, 2048 tenants)
-//     [52:42] card_id    (11b, 2048 cards)
+//     [52]    INDEX flag  (1=index block, 0=data block)
+//     [51:42] card_id    (10b, 1024 data cards per tenant)
 //     [41:0]  block      (42b, per-card LBA)
+//
+//   INDEX flag: when set, this access targets index blocks, not data.
+//     PicoWAL query planner checks addr[52] to route:
+//       0 → fast-path bypass to SATA KV nodes
+//       1 → route to index pico (separate RP2354B + W5500)
 //
 //   READ:  → 4096 bytes response
 //   WRITE: + 4096 bytes payload → 1-byte ACK

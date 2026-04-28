@@ -10,8 +10,8 @@ module sata_kv_engine (
 
     // --- Network ingress (from command parser) ---
     input  wire        cmd_valid,
-    input  wire [7:0]  cmd_flags,      // bit 0: 0=READ, 1=WRITE
-    input  wire [63:0] cmd_addr,       // [63:53]=tenant, [52:42]=card, [41:0]=block
+    input  wire [7:0]  cmd_flags,      // bit 0: 0=READ, 1=WRITE; bit 1: reserved (QUERY)
+    input  wire [63:0] cmd_addr,       // [63:53]=tenant, [52]=INDEX flag, [51:42]=card, [41:0]=block
     output wire        cmd_ready,
 
     // Write data from network (4KB page as DWORDs)
