@@ -45,28 +45,38 @@
 //   Crystal:           2
 //   Total:             25-67 pins — trivial
 //
+// Power: USB-C 5V (any phone charger works, ~4W total draw)
+//   ECP5:      ~1W
+//   GbE PHY:   ~0.5W
+//   M.2 SSD:   ~2-3W
+//   Total:     ~3.5-4.5W (USB-C 5V/1.5A = 7.5W headroom)
+//
 // BOM:
 //   ECP5 LFE5U-25F          $10
 //   RTL8211F GbE PHY         $2.50
 //   M.2 SATA connector       $1
-//   Ag9905 PoE PD            $15
+//   USB-C connector           $0.50
+//   LDO regulators (3.3V+1.2V) $1.50
 //   RJ45 + magnetics         $3
 //   Crystal + passives       $5
 //   PCB (4-layer, SERDES)    $8
 //   ─────────────────────────────
-//   Node (without drive):    $44.50
+//   Node (without drive):    $31.50
 //
-//   + 1TB M.2 SATA SSD:     ~$45
+//   + 128GB M.2 SATA SSD:   ~$15  (dev/test)
 //   ═════════════════════════════
-//   TOTAL:                   ~$90 ≈ £72
+//   TOTAL:                   ~$47 ≈ £37
+//
+//   + 1TB M.2 SATA SSD:     ~$45  (production)
+//   TOTAL:                   ~$77 ≈ £61
 //
 //   + 2TB M.2 SATA SSD:     ~$80
-//   TOTAL:                   ~$125 ≈ £100
+//   TOTAL:                   ~$112 ≈ £89
 //
 //   + 4TB M.2 SATA SSD:     ~$150
-//   TOTAL:                   ~$195 ≈ £155
+//   TOTAL:                   ~$182 ≈ £145
 //
-// That's a 1TB network KV store for £72. Swap drive for instant upgrade.
+// Dev kit: 128GB network KV store for £37. Swap drive for instant upgrade.
 
 module sata_kv_node #(
     parameter [47:0] MAC_ADDR = 48'h02_00_00_00_00_01,
