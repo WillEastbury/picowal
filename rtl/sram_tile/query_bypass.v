@@ -1,17 +1,17 @@
 // query_bypass.v — PicoWAL FPGA command router + block copy engine
 //
-// ALL data movement goes through this FPGA. The two RP2354B picos are
-// pure control plane — they issue register commands over dedicated SPI
-// ports and never directly touch SPI buses, SRAM, or SATA nodes.
+// ALL data movement goes through this FPGA (ECP5-5G-45F). The two RP2354B
+// picos are pure control plane — they issue register commands over dedicated
+// SPI ports and never directly touch SPI buses, SRAM, or NVMe drives.
 //
 // ── Data path (FPGA-owned, zero pico involvement) ──
-//   Upstream SPI → inspect addr[52] → bypass to downstream SATA nodes
+//   Upstream SPI → inspect addr[52] → PCIe NVMe read/write via SerDes
 //
 // ── Query pico (control plane only) ──
 //   Drains query FIFO via FPGA register reads.
 //   Issues commands to FPGA:
-//     CMD_IDX_READ   0x01  Read index block from SATA → FPGA returns data over SPI
-//     CMD_COPY_OUT   0x02  Copy data block from SATA → stream to upstream output
+//     CMD_IDX_READ   0x01  Read index block from NVMe → FPGA returns data over SPI
+//     CMD_COPY_OUT   0x02  Copy data block from NVMe → stream to upstream output
 //     CMD_MULTI_START 0x03 Begin multi-block gather
 //     CMD_MULTI_END  0x04  Flush gathered response to upstream
 //     CMD_FIFO_POP   0x10  Pop + read next query descriptor from SRAM FIFO
@@ -19,8 +19,8 @@
 // ── Index pico (control plane only) ──
 //   Receives write notifications via FPGA IRQ.
 //   Issues commands to FPGA:
-//     CMD_IDX_READ   0x01  Read index block from SATA → FPGA returns data over SPI
-//     CMD_IDX_WRITE  0x05  Write index block to SATA (pico sends data over SPI → FPGA)
+//     CMD_IDX_READ   0x01  Read index block from NVMe → FPGA returns data over SPI
+//     CMD_IDX_WRITE  0x05  Write index block to NVMe (pico sends data over SPI → FPGA)
 //     CMD_NOTIFY_ACK 0x11  Acknowledge write notification, clear IRQ
 //
 // ── SRAM ring buffer (FPGA-owned) ──
@@ -46,7 +46,7 @@ module query_bypass (
     output wire        up_spi_miso,
     input  wire        up_spi_cs_n,
 
-    // --- Downstream SPI master (to SATA KV data nodes) ---
+    // --- Downstream SPI master (to NVMe PCIe or legacy SATA nodes) ---
     output wire        dn_spi_sck,
     output wire        dn_spi_mosi,
     input  wire        dn_spi_miso,

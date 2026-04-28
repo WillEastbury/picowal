@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
-"""generate_picowal.py — PicoWAL Query Processor Card
+# -*- coding: utf-8 -*-
+"""generate_picowal.py -- PicoWAL Query Processor Card
 
 Generates KiCad 8 schematic + PCB for a single PicoWAL query processor:
 
-  - 1× iCE40HX8K-CT256: SPI bridge with bypass/query split
-  - 1× RP2354B: query planning, decomposition, result aggregation
+  - 1× ECP5-5G-45F (LFE5UM5G-45F-CABGA381): FPGA with 4× 3.125Gbps SerDes
+  - 3× M.2 M-key NVMe slots: PCIe Gen1 x1 each via ECP5 SerDes (RAID)
+  - 2× RP2354B: query pico + index pico (pure control plane via FPGA SPI)
   - 2× IS61WV25616BLL: FPGA-owned page staging (512KB, parallel banks)
-  - 1× LY68L6400: RP-owned 8MB PSRAM for working set / aggregation
-  - 1× W25Q128: RP flash
-  - 1× W25Q32: FPGA config flash
+  - 2× LY68L6400: RP-owned 8MB PSRAM (one per pico)
+  - 1× W5500 + RJ45: Index pico Ethernet
   - OC: TPS62A01 adjustable buck for DVDD (1.1-1.25V)
 
-Key insight: indexes are stored as reserved card_id blocks on the primary
-SATA KV store. No separate index card needed.
+NVMe RAID via ECP5 SerDes:
+  - 3 of 4 SerDes channels → PCIe Gen1 x1 → M.2 NVMe drives
+  - 4th SerDes channel spare (future: upstream PCIe or inter-card link)
+  - FPGA implements minimal PCIe root complex per channel
+  - 100MHz PCIe reference clock (differential, shared via fanout)
 
-  Address space: [63:53]=tenant, [52:42]=card_id, [41:0]=block
-  Reserved:      card_id 0x7FF = index pages (per-tenant)
-                 card_id 0x7FE = WAL/journal pages
-                 card_id 0x000-0x7FD = user data cards
+Address format: [63:53]=tenant [52]=INDEX [51:42]=card [41:0]=block
+  addr[52]=0: DATA  → FPGA bypass → NVMe drives (zero copy)
+  addr[52]=1: INDEX → FPGA queues in SRAM FIFO → pico processes
 
 PicoWAL query flow:
   FAST PATH (plain KV read/write):
     1. Packet arrives at FPGA via upstream SPI
-    2. FPGA inspects cmd_flags — if bit 1 (QUERY) is clear → BYPASS
-    3. FPGA forwards cmd directly to downstream SPI (SATA KV nodes)
-    4. Zero RP involvement, zero copy, ~2 SPI clock overhead
+    2. FPGA inspects addr[52] — if 0 → BYPASS direct to NVMe
+    3. Zero RP involvement, zero copy, ~2 SPI clock overhead
 
   QUERY PATH (index lookup + multi-read):
-    1. Packet arrives, FPGA sees QUERY flag set
-    2. FPGA stages cmd in SRAM ring buffer, asserts IRQ to RP
-    3. RP reads query descriptor from SRAM via FPGA SPI register map
-    4. RP reads index pages from reserved card_id=0x7FF on SATA store
-    5. RP decomposes into data page reads, dispatches via downstream SPI
-    6. Results buffered in PSRAM, aggregated, returned via upstream SPI
+    1. Packet arrives, FPGA sees addr[52]=1
+    2. FPGA stages cmd in SRAM ring buffer, asserts IRQ to query pico
+    3. Query pico reads descriptor, issues COPY_OUT cmds to FPGA
+    4. FPGA reads from NVMe, streams to upstream output
+    5. Index pico handles write notifications, updates index blocks
 
-Board: ~70×50mm, 4-layer, QFN/BGA/TSOP — requires reflow.
+Board: ~130×80mm, 4-layer, BGA/TSOP/M.2 — requires reflow.
 """
 
 import os, uuid
@@ -92,65 +93,80 @@ def sym_rp2354b():
     {nl.join(pins)}))"""
 
 
-def sym_ice40hx8k():
-    """iCE40HX8K-CT256 BGA with functional pin groups."""
+def sym_ecp5():
+    """ECP5-5G-45F (LFE5UM5G-45F) CABGA381 with SerDes/PCIe + functional pin groups."""
     pins = []
     pin_num = 1
     groups = [
         # SPI slave from upstream fabric
         ("UP_SPI_SCK", "input"), ("UP_SPI_MOSI", "input"),
         ("UP_SPI_MISO", "output"), ("UP_SPI_CS", "input"),
-        # SPI master to RP2354B
+        # SPI master to query RP2354B
         ("RP_SPI_SCK", "output"), ("RP_SPI_MOSI", "output"),
         ("RP_SPI_MISO", "input"), ("RP_SPI_CS", "output"),
         # IRQ + control
         ("RP_IRQ", "output"), ("RP_BUSY", "input"),
-        # SPI downstream (to index card or data nodes)
+        # SPI to index RP2354B
+        ("IDX_SPI_SCK", "output"), ("IDX_SPI_MOSI", "output"),
+        ("IDX_SPI_MISO", "input"), ("IDX_SPI_CS", "output"),
+        ("IDX_IRQ", "output"),
+        # Downstream SPI (legacy / expansion)
         ("DN_SPI_SCK", "output"), ("DN_SPI_MOSI", "output"),
         ("DN_SPI_MISO", "input"), ("DN_SPI_CS", "output"),
-        # SRAM bank A: address + data + control
     ]
-    # SRAM bank A address A[17:0]
+    # SerDes / PCIe channels (3× NVMe + 1 spare)
+    for ch in range(4):
+        groups += [
+            (f"HDOUTP{ch}", "output"), (f"HDOUTN{ch}", "output"),
+            (f"HDINP{ch}", "input"), (f"HDINTN{ch}", "input"),
+        ]
+    # PCIe reference clock (differential)
+    groups += [("REFCLKP", "input"), ("REFCLKN", "input")]
+    # PCIe per-slot control
+    for slot in range(3):
+        groups += [
+            (f"PERST{slot}_N", "output"),
+            (f"CLKREQ{slot}_N", "input"),
+        ]
+    # SRAM bank A: address + data + control
     for b in range(18):
         groups.append((f"SA_A{b}", "output"))
-    # SRAM bank A data D[15:0]
     for b in range(16):
         groups.append((f"SA_D{b}", "bidirectional"))
-    # SRAM bank A control
     groups += [("SA_CE_N", "output"), ("SA_OE_N", "output"), ("SA_WE_N", "output")]
-    # SRAM bank B address A[17:0]
+    # SRAM bank B: address + data + control
     for b in range(18):
         groups.append((f"SB_A{b}", "output"))
-    # SRAM bank B data D[15:0]
     for b in range(16):
         groups.append((f"SB_D{b}", "bidirectional"))
-    # SRAM bank B control
     groups += [("SB_CE_N", "output"), ("SB_OE_N", "output"), ("SB_WE_N", "output")]
-    # Config flash SPI
+    # Config flash SPI (ECP5 uses same MSPI boot)
     groups += [("CFG_SCK", "output"), ("CFG_MOSI", "output"),
                ("CFG_MISO", "input"), ("CFG_CS", "output")]
-    # CDONE/CRESET
-    groups += [("CDONE", "bidirectional"), ("CRESET_B", "input")]
+    # DONE/INITN/PROGRAMN
+    groups += [("DONE", "bidirectional"), ("INITN", "bidirectional"),
+               ("PROGRAMN", "input")]
     # Power
-    groups += [("VCC", "power_in"), ("VCC_IO", "power_in"),
-               ("VCC_PLL", "power_in"), ("GND", "power_in")]
+    groups += [("VCC", "power_in"), ("VCCIO", "power_in"),
+               ("VCCAUX", "power_in"), ("VCCHTX", "power_in"),
+               ("VCCHRX", "power_in"), ("GND", "power_in")]
 
     for name, ptype in groups:
-        y = 60 - pin_num * 1.1
-        side = -25.4 if pin_num <= len(groups) // 2 else 25.4
+        y = 80 - pin_num * 1.0
+        side = -27.94 if pin_num <= len(groups) // 2 else 27.94
         angle = 0 if side < 0 else 180
         pins.append(f'(pin {ptype} line (at {side} {y:.2f} {angle}) (length 2.54)'
                      f' (name "{name}") (number "{pin_num}") (uuid {make_uuid()}))')
         pin_num += 1
 
     nl = "\n    "
-    return f"""(symbol "ice40hx8k_ct256" (in_bom yes) (on_board yes)
-    (property "Reference" "U" (at 0 65 0) (effects (font (size 1.27 1.27))))
-    (property "Value" "iCE40HX8K-CT256" (at 0 -80 0) (effects (font (size 1.27 1.27))))
-    (property "Footprint" "Package_BGA:BGA-256_14x14mm_P0.8mm" (at 0 0 0) (effects (hide yes)))
-    (symbol "ice40hx8k_ct256_0_1"
-      (rectangle (start -22.86 63) (end 22.86 -78) (stroke (width 0.254)) (fill (type background))))
-    (symbol "ice40hx8k_ct256_1_1"
+    return f"""(symbol "ecp5_5g_45f" (in_bom yes) (on_board yes)
+    (property "Reference" "U" (at 0 85 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "LFE5UM5G-45F-CABGA381" (at 0 -95 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Package_BGA:BGA-381_17x17mm_P0.8mm" (at 0 0 0) (effects (hide yes)))
+    (symbol "ecp5_5g_45f_0_1"
+      (rectangle (start -25.4 83) (end 25.4 -93) (stroke (width 0.254)) (fill (type background))))
+    (symbol "ecp5_5g_45f_1_1"
     {nl.join(pins)}))"""
 
 
@@ -210,6 +226,33 @@ def sym_psram():
     {nl.join(pins)}))"""
 
 
+def sym_m2_mkey():
+    """M.2 M-key connector — simplified to functional NVMe/PCIe pins."""
+    pins = []
+    pin_defs = [
+        ("PERST_N", "input"), ("CLKREQ_N", "output"), ("PEWAKE_N", "output"),
+        ("PCIE_TX_P", "input"), ("PCIE_TX_N", "input"),
+        ("PCIE_RX_P", "output"), ("PCIE_RX_N", "output"),
+        ("REFCLK_P", "input"), ("REFCLK_N", "input"),
+        ("VCC_3V3", "power_in"), ("GND", "power_in"),
+    ]
+    for i, (name, ptype) in enumerate(pin_defs):
+        side = -12.7 if i < 6 else 12.7
+        y = 6.35 - (i % 6) * 2.54
+        angle = 0 if side < 0 else 180
+        pins.append(f'(pin {ptype} line (at {side} {y} {angle}) (length 2.54)'
+                     f' (name "{name}") (number "{i+1}") (uuid {make_uuid()}))')
+    nl = "\n    "
+    return f"""(symbol "m2_mkey_nvme" (in_bom yes) (on_board yes)
+    (property "Reference" "J" (at 0 10.16 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "M.2_M-Key_NVMe" (at 0 -10.16 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "Connector_M2:M2_M_Key_22x80" (at 0 0 0) (effects (hide yes)))
+    (symbol "m2_mkey_nvme_0_1"
+      (rectangle (start -10.16 8.89) (end 10.16 -8.89) (stroke (width 0.254)) (fill (type background))))
+    (symbol "m2_mkey_nvme_1_1"
+    {nl.join(pins)}))"""
+
+
 def sym_generic(ref_prefix, value, fp, pin_names):
     """Generic component symbol."""
     pins = []
@@ -235,17 +278,23 @@ def sym_generic(ref_prefix, value, fp, pin_names):
 # ═══════════════════════════════════════════════════════════════════════
 
 QUERY_PLANNER_BOM = [
-    # ── Query planner subsystem ──
-    {"ref": "U1",  "value": "iCE40HX8K-CT256",  "pkg": "BGA-256",   "cost": 5.80, "desc": "Bypass/query bridge FPGA"},
+    # ── FPGA + NVMe subsystem ──
+    {"ref": "U1",  "value": "LFE5UM5G-45F",     "pkg": "CABGA-381", "cost": 10.00, "desc": "ECP5-5G FPGA, 4× SerDes, PCIe Gen1"},
     {"ref": "U2",  "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Query planner MCU"},
     {"ref": "U3",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank A (FPGA-owned)"},
     {"ref": "U4",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank B (FPGA-owned)"},
     {"ref": "U5",  "value": "LY68L6400_8MB",     "pkg": "SOP-8",     "cost": 0.85, "desc": "Query RP PSRAM"},
     {"ref": "U6",  "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "Query RP flash"},
-    {"ref": "U7",  "value": "W25Q32JVSIQ",       "pkg": "SOIC-8",    "cost": 0.80, "desc": "FPGA config flash"},
+    {"ref": "U7",  "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA config flash (128Mbit for ECP5-45F)"},
     {"ref": "U8",  "value": "TPS62A01",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "Query DVDD buck (OC: 1.1-1.25V)"},
     {"ref": "U9",  "value": "AP2112K-3.3",       "pkg": "SOT-23-5",  "cost": 0.30, "desc": "3.3V IOVDD LDO"},
-    {"ref": "U10", "value": "AP2112K-1.2",       "pkg": "SOT-23-5",  "cost": 0.30, "desc": "1.2V FPGA core LDO"},
+    {"ref": "U10", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V ECP5 core buck"},
+    # ── NVMe storage ──
+    {"ref": "J7",  "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 0 (PCIe Gen1 x1, SerDes CH0)"},
+    {"ref": "J8",  "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 1 (PCIe Gen1 x1, SerDes CH1)"},
+    {"ref": "J9",  "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 2 (PCIe Gen1 x1, SerDes CH2)"},
+    {"ref": "Y3",  "value": "100MHz_DIFF",       "pkg": "3225",      "cost": 1.80, "desc": "PCIe reference clock (LVDS, shared fanout)"},
+    {"ref": "U16", "value": "TPS54331",          "pkg": "SOIC-8",    "cost": 1.20, "desc": "3.3V 3A buck for NVMe drives"},
     # ── Index pico subsystem ──
     {"ref": "U11", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Index pico MCU"},
     {"ref": "U12", "value": "LY68L6400_8MB",     "pkg": "SOP-8",     "cost": 0.85, "desc": "Index pico PSRAM"},
@@ -270,13 +319,12 @@ QUERY_PLANNER_BOM = [
 
 def gen_query_planner_sch():
     syms = [
-        sym_ice40hx8k(),
+        sym_ecp5(),
         sym_rp2354b(),
         sym_sram(),
         sym_psram(),
+        sym_m2_mkey(),
         sym_generic("U", "W25Q128JVSIQ", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-                    ["SCK", "CS", "DI", "DO", "WP", "HOLD", "VCC", "GND"]),
-        sym_generic("U", "W25Q32JVSIQ", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
                     ["SCK", "CS", "DI", "DO", "WP", "HOLD", "VCC", "GND"]),
         sym_generic("U", "W5500", "Package_QFP:LQFP-48_7x7mm_P0.5mm",
                     ["SCK", "MOSI", "MISO", "CS", "INT", "RST",
@@ -284,14 +332,18 @@ def gen_query_planner_sch():
                      "VCC", "GND"]),
         sym_generic("U", "TPS62A01", "Package_TO_SOT_SMD:SOT-23-6",
                     ["VIN", "SW", "GND", "EN", "FB", "PG"]),
+        sym_generic("U", "TPS62A02", "Package_TO_SOT_SMD:SOT-23-6",
+                    ["VIN", "SW", "GND", "EN", "FB", "PG"]),
         sym_generic("U", "AP2112K-3.3", "Package_TO_SOT_SMD:SOT-23-5",
                     ["VIN", "GND", "EN", "NC", "VOUT"]),
-        sym_generic("U", "AP2112K-1.2", "Package_TO_SOT_SMD:SOT-23-5",
-                    ["VIN", "GND", "EN", "NC", "VOUT"]),
+        sym_generic("U", "TPS54331", "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                    ["BOOT", "VIN", "EN", "SS", "VSENSE", "COMP", "PH", "GND"]),
         sym_generic("Y", "12MHz", "Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm",
                     ["XIN", "XOUT"]),
         sym_generic("Y", "25MHz", "Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm",
                     ["XIN", "XOUT"]),
+        sym_generic("Y", "100MHz_DIFF", "Oscillator:Oscillator_SMD_3225",
+                    ["OUT+", "OUT-", "EN", "VCC", "GND"]),
         sym_generic("J", "CONN_2x10", "Connector_PinHeader_2.54mm:PinHeader_2x10_P2.54mm_Vertical",
                     [f"P{i+1}" for i in range(20)]),
         sym_generic("J", "CONN_1x4", "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
@@ -305,9 +357,9 @@ def gen_query_planner_sch():
     instances = []
     x, y = 50, 80
 
-    # FPGA — center stage
-    instances.append(f"""(symbol (lib_id "ice40hx8k_ct256") (at {x+90} {y} 0) (unit 1)
-    (property "Reference" "U1" (at 0 2 0)) (property "Value" "iCE40HX8K-CT256" (at 0 -2 0))
+    # ECP5 FPGA — center stage
+    instances.append(f"""(symbol (lib_id "ecp5_5g_45f") (at {x+90} {y} 0) (unit 1)
+    (property "Reference" "U1" (at 0 2 0)) (property "Value" "LFE5UM5G-45F" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U1") (unit 1)))))""")
 
     # RP2354B — left
@@ -332,22 +384,39 @@ def gen_query_planner_sch():
     (property "Reference" "U6" (at 0 2 0)) (property "Value" "W25Q128JVSIQ" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U6") (unit 1)))))""")
 
-    instances.append(f"""(symbol (lib_id "w25q32jvsiq") (at {x+90} {y+80} 0) (unit 1)
-    (property "Reference" "U7" (at 0 2 0)) (property "Value" "W25Q32JVSIQ" (at 0 -2 0))
+    instances.append(f"""(symbol (lib_id "w25q128jvsiq") (at {x+90} {y+80} 0) (unit 1)
+    (property "Reference" "U7" (at 0 2 0)) (property "Value" "W25Q128_CFG" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U7") (unit 1)))))""")
 
     # Power regulators
     instances.append(f"""(symbol (lib_id "tps62a01") (at {x-40} {y-20} 0) (unit 1)
-    (property "Reference" "U8" (at 0 2 0)) (property "Value" "TPS62A01" (at 0 -2 0))
+    (property "Reference" "U8" (at 0 2 0)) (property "Value" "TPS62A01_QRY" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U8") (unit 1)))))""")
 
     instances.append(f"""(symbol (lib_id "ap2112k_3_3") (at {x-40} {y} 0) (unit 1)
     (property "Reference" "U9" (at 0 2 0)) (property "Value" "AP2112K-3.3" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U9") (unit 1)))))""")
 
-    instances.append(f"""(symbol (lib_id "ap2112k_1_2") (at {x-40} {y+20} 0) (unit 1)
-    (property "Reference" "U10" (at 0 2 0)) (property "Value" "AP2112K-1.2" (at 0 -2 0))
+    instances.append(f"""(symbol (lib_id "tps62a02") (at {x-40} {y+20} 0) (unit 1)
+    (property "Reference" "U10" (at 0 2 0)) (property "Value" "TPS62A02_CORE" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U10") (unit 1)))))""")
+
+    # 3× M.2 NVMe slots — below FPGA
+    for slot in range(3):
+        mx = x + 60 + slot * 50
+        instances.append(f"""(symbol (lib_id "m2_mkey_nvme") (at {mx} {y-60} 0) (unit 1)
+    (property "Reference" "J{7+slot}" (at 0 2 0)) (property "Value" "NVMe_{slot}" (at 0 -2 0))
+    (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "J{7+slot}") (unit 1)))))""")
+
+    # 100MHz PCIe reference clock oscillator
+    instances.append(f"""(symbol (lib_id "100mhz_diff") (at {x+90} {y-40} 0) (unit 1)
+    (property "Reference" "Y3" (at 0 2 0)) (property "Value" "100MHz_DIFF" (at 0 -2 0))
+    (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "Y3") (unit 1)))))""")
+
+    # NVMe 3.3V 3A buck
+    instances.append(f"""(symbol (lib_id "tps54331") (at {x+60} {y-40} 0) (unit 1)
+    (property "Reference" "U16" (at 0 2 0)) (property "Value" "TPS54331_NVMe" (at 0 -2 0))
+    (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "U16") (unit 1)))))""")
 
     # Crystal
     instances.append(f"""(symbol (lib_id "12mhz") (at {x+30} {y+30} 0) (unit 1)
@@ -413,7 +482,7 @@ def gen_query_planner_sch():
     (property "Reference" "J6" (at 0 2 0)) (property "Value" "SWD_IDX" (at 0 -2 0))
     (uuid {make_uuid()}) (instances (project "query_planner" (path "/{make_uuid()}" (reference "J6") (unit 1)))))""")
 
-    # Net labels — FPGA↔SRAM, FPGA↔RPs, upstream/downstream SPI, index pico Ethernet
+    # Net labels — FPGA↔SRAM, FPGA↔RPs, PCIe/NVMe, upstream/downstream SPI, Ethernet
     netlabels = []
     bus_nets = [
         # Upstream SPI
@@ -421,16 +490,26 @@ def gen_query_planner_sch():
         # FPGA↔Query RP SPI
         "RP_SPI_SCK", "RP_SPI_MOSI", "RP_SPI_MISO", "RP_SPI_CS",
         "RP_IRQ", "RP_BUSY",
-        # Downstream SPI (data path bypass)
+        # Downstream SPI (legacy expansion)
         "DN_SPI_SCK", "DN_SPI_MOSI", "DN_SPI_MISO", "DN_SPI_CS",
         # FPGA↔Index RP SPI (index path)
         "IDX_SPI_SCK", "IDX_SPI_MOSI", "IDX_SPI_MISO", "IDX_SPI_CS",
         "IDX_IRQ",
+        # PCIe SerDes (3× NVMe channels)
+        "PCIE_REFCLK_P", "PCIE_REFCLK_N",
+    ]
+    for ch in range(3):
+        bus_nets += [
+            f"NVME{ch}_TX_P", f"NVME{ch}_TX_N",
+            f"NVME{ch}_RX_P", f"NVME{ch}_RX_N",
+            f"NVME{ch}_PERST_N", f"NVME{ch}_CLKREQ_N",
+        ]
+    bus_nets += [
         # Index RP↔W5500 SPI
         "ETH_SPI_SCK", "ETH_SPI_MOSI", "ETH_SPI_MISO", "ETH_SPI_CS",
         "ETH_INT", "ETH_RST",
         # Power rails
-        "VCC_3V3", "VCC_1V2", "DVDD_QRY", "DVDD_IDX", "GND",
+        "VCC_3V3", "VCC_1V1", "VCC_NVME_3V3", "DVDD_QRY", "DVDD_IDX", "GND",
     ]
     # SRAM bank A/B address + data
     for bank in ["SA", "SB"]:
@@ -451,9 +530,9 @@ def gen_query_planner_sch():
     return f"""(kicad_sch (version 20231120) (generator "picowal_gen") (generator_version "{VERSION}")
   (paper "A2")
   (title_block
-    (title "PicoWAL Query Planner v{VERSION}")
-    (comment 1 "iCE40HX8K owns all buses. 2× RP2354B are pure control plane via FPGA SPI register map.")
-    (comment 2 "FAST PATH: addr[52]=0 → FPGA bypass → downstream SATA nodes (zero copy, zero pico)")
+    (title "PicoWAL Query Processor v{VERSION} — ECP5-5G + 3× NVMe RAID")
+    (comment 1 "ECP5-5G-45F owns all buses. 3× PCIe Gen1 x1 NVMe via SerDes. 2× RP2354B control plane.")
+    (comment 2 "FAST PATH: addr[52]=0 → FPGA reads NVMe directly (zero copy, zero pico)")
     (comment 3 "QUERY PATH: addr[52]=1 → FPGA queues in SRAM FIFO → query pico issues copy cmds via FPGA")
     (comment 4 "INDEX: data writes → FPGA IRQs index pico → pico reads/writes index blocks via FPGA cmds"))
   (lib_symbols
@@ -475,37 +554,47 @@ def make_fp(ref, footprint, value, x, y):
       (effects (font (size 0.8 0.8) (thickness 0.12)))))"""
 
 
-def gen_pcb(board_name, bom, board_w=70, board_h=50):
+def gen_pcb(board_name, bom, board_w=130, board_h=80):
     footprints = []
-    # Layout: regulators left, MCU center-left, FPGA center, memory right
+    # Layout: power left, MCUs center-left, FPGA center, SRAM right-of-FPGA,
+    # M.2 NVMe slots across bottom, Ethernet+RJ45 right edge
     layout = {
         "query_planner": {
-            # Query planner subsystem (left half)
-            "U1": ("Package_BGA:BGA-256_14x14mm_P0.8mm", "iCE40HX8K", 30, 25),
-            "U2": ("Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP5.45x5.45mm", "RP2354B_QRY", 12, 25),
-            "U3": ("Package_SO:TSOP-II-44_10.16x18.41mm_P0.8mm", "SRAM_A", 48, 10),
-            "U4": ("Package_SO:TSOP-II-44_10.16x18.41mm_P0.8mm", "SRAM_B", 48, 40),
-            "U5": ("Package_SO:SOP-8_3.9x4.9mm_P1.27mm", "PSRAM_QRY", 12, 42),
-            "U6": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q128_QRY", 5, 10),
-            "U7": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q32", 30, 42),
-            "U8": ("Package_TO_SOT_SMD:SOT-23-6", "TPS62A01_QRY", 3, 20),
-            "U9": ("Package_TO_SOT_SMD:SOT-23-5", "AP2112K_3V3", 3, 28),
-            "U10": ("Package_TO_SOT_SMD:SOT-23-5", "AP2112K_1V2", 3, 34),
+            # FPGA + memory (center)
+            "U1": ("Package_BGA:BGA-381_17x17mm_P0.8mm", "ECP5-5G-45F", 50, 25),
+            "U2": ("Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP5.45x5.45mm", "RP2354B_QRY", 20, 25),
+            "U3": ("Package_SO:TSOP-II-44_10.16x18.41mm_P0.8mm", "SRAM_A", 72, 10),
+            "U4": ("Package_SO:TSOP-II-44_10.16x18.41mm_P0.8mm", "SRAM_B", 72, 40),
+            "U5": ("Package_SO:SOP-8_3.9x4.9mm_P1.27mm", "PSRAM_QRY", 20, 42),
+            "U6": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q128_QRY", 8, 10),
+            "U7": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q128_CFG", 50, 42),
+            # Power regulators (left edge)
+            "U8": ("Package_TO_SOT_SMD:SOT-23-6", "TPS62A01_QRY", 5, 20),
+            "U9": ("Package_TO_SOT_SMD:SOT-23-5", "AP2112K_3V3", 5, 28),
+            "U10": ("Package_TO_SOT_SMD:SOT-23-6", "TPS62A02_CORE", 5, 34),
             # Index pico subsystem (right half)
-            "U11": ("Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP5.45x5.45mm", "RP2354B_IDX", 68, 25),
-            "U12": ("Package_SO:SOP-8_3.9x4.9mm_P1.27mm", "PSRAM_IDX", 68, 42),
-            "U13": ("Package_QFP:LQFP-48_7x7mm_P0.5mm", "W5500", 82, 25),
-            "U14": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q128_IDX", 68, 10),
-            "U15": ("Package_TO_SOT_SMD:SOT-23-6", "TPS62A01_IDX", 60, 20),
-            # Shared
-            "Y1": ("Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm", "12MHz", 18, 15),
-            "Y2": ("Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm", "25MHz", 82, 15),
+            "U11": ("Package_DFN_QFN:QFN-80-1EP_10x10mm_P0.4mm_EP5.45x5.45mm", "RP2354B_IDX", 92, 25),
+            "U12": ("Package_SO:SOP-8_3.9x4.9mm_P1.27mm", "PSRAM_IDX", 92, 42),
+            "U13": ("Package_QFP:LQFP-48_7x7mm_P0.5mm", "W5500", 108, 25),
+            "U14": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "W25Q128_IDX", 92, 10),
+            "U15": ("Package_TO_SOT_SMD:SOT-23-6", "TPS62A01_IDX", 85, 20),
+            # NVMe power
+            "U16": ("Package_SO:SOIC-8_3.9x4.9mm_P1.27mm", "TPS54331_NVMe", 5, 60),
+            # 3× M.2 NVMe slots (bottom row)
+            "J7": ("Connector_M2:M2_M_Key_22x80", "NVMe_0", 25, 68),
+            "J8": ("Connector_M2:M2_M_Key_22x80", "NVMe_1", 55, 68),
+            "J9": ("Connector_M2:M2_M_Key_22x80", "NVMe_2", 85, 68),
+            # Crystals / oscillators
+            "Y1": ("Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm", "12MHz", 30, 15),
+            "Y2": ("Crystal:Crystal_SMD_3215-2Pin_3.2x1.5mm", "25MHz", 108, 15),
+            "Y3": ("Oscillator:Oscillator_SMD_3225-4Pin_3.2x2.5mm", "100MHz", 50, 15),
+            # Connectors
             "J1": ("Connector_PinHeader_2.54mm:PinHeader_2x10_P2.54mm_Vertical", "UP", 0, 25),
-            "J2": ("Connector_PinHeader_2.54mm:PinHeader_2x10_P2.54mm_Vertical", "DN", 55, 50),
-            "J3": ("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", "UART", 55, 5),
-            "J4": ("Connector_PinHeader_1.27mm:PinHeader_1x05_P1.27mm_Vertical", "SWD_QRY", 40, 50),
-            "J5": ("Connector_RJ45:RJ45_Amphenol_ARJM11C7", "RJ45", 92, 25),
-            "J6": ("Connector_PinHeader_1.27mm:PinHeader_1x05_P1.27mm_Vertical", "SWD_IDX", 78, 50),
+            "J2": ("Connector_PinHeader_2.54mm:PinHeader_2x10_P2.54mm_Vertical", "DN", 0, 45),
+            "J3": ("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", "UART", 120, 50),
+            "J4": ("Connector_PinHeader_1.27mm:PinHeader_1x05_P1.27mm_Vertical", "SWD_QRY", 30, 50),
+            "J5": ("Connector_RJ45:RJ45_Amphenol_ARJM11C7", "RJ45", 120, 25),
+            "J6": ("Connector_PinHeader_1.27mm:PinHeader_1x05_P1.27mm_Vertical", "SWD_IDX", 100, 50),
         },
     }
 
@@ -550,35 +639,48 @@ def gen_project():
 # ═══════════════════════════════════════════════════════════════════════
 
 def pin_budget_report():
-    print("\n  Pin Budget — iCE40HX8K-CT256 (208 I/O max)")
-    print("  " + "─" * 55)
+    print("\n  Pin Budget — ECP5-5G-45F CABGA381 (~205 user I/O + 4× SerDes)")
+    print("  " + "─" * 60)
     pins = [
         ("Upstream SPI (slave)", 4),
-        ("Downstream SPI (master, bypass+copy)", 4),
+        ("Downstream SPI (master, legacy/expansion)", 4),
         ("Query pico SPI (slave, register map)", 4),
         ("Index pico SPI (slave, register map)", 4),
-        ("Query pico IRQ", 1),
+        ("Query pico IRQ + BUSY", 2),
         ("Index pico IRQ", 1),
         ("SRAM bank A (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("SRAM bank B (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("Config flash SPI", 4),
-        ("CDONE/CRESET_B", 2),
+        ("Config flash SPI (MSPI boot)", 4),
+        ("DONE/INITN/PROGRAMN", 3),
+        ("NVMe PERST# × 3", 3),
+        ("NVMe CLKREQ# × 3", 3),
         ("Status LEDs", 4),
+        ("── SerDes (dedicated, not I/O) ──", 0),
+        ("  PCIe TX+/- × 4 channels", 0),
+        ("  PCIe RX+/- × 4 channels", 0),
+        ("  REFCLK+/- × 2 (per DCU)", 0),
     ]
     total = 0
     for name, n in pins:
-        print(f"    {name:48s} {n:3d}")
-        total += n
-    print(f"    {'─'*48} {'─'*3}")
-    print(f"    {'TOTAL':48s} {total:3d} / 208  ({'OK' if total <= 208 else 'OVER'})")
+        if n > 0:
+            print(f"    {name:52s} {n:3d}")
+            total += n
+        else:
+            print(f"    {name}")
+    print(f"    {'─'*52} {'─'*3}")
+    print(f"    {'TOTAL (general purpose I/O)':52s} {total:3d} / 205  ({'OK' if total <= 205 else 'OVER'})")
+    print(f"    SerDes channels: 3 used (NVMe) + 1 spare of 4")
 
 
 def power_budget_report():
-    print("\n  Power Budget — Single card, 3.3V input")
-    print("  " + "─" * 55)
+    print("\n  Power Budget — Single card, 5V/12V input")
+    print("  " + "─" * 60)
     rails = [
-        ("iCE40HX8K core (1.2V, 80mA)", 0.096),
-        ("iCE40HX8K I/O (3.3V, 40mA)", 0.132),
+        ("ECP5-5G-45F core (1.1V, 300mA)", 0.330),
+        ("ECP5-5G-45F I/O (3.3V, 60mA)", 0.198),
+        ("ECP5-5G-45F aux (2.5V, 20mA)", 0.050),
+        ("ECP5-5G-45F SerDes TX (1.1V, 80mA×3ch)", 0.264),
+        ("ECP5-5G-45F SerDes RX (1.1V, 60mA×3ch)", 0.198),
         ("RP2354B #1 QRY DVDD (1.1V, 100mA)", 0.110),
         ("RP2354B #1 QRY IOVDD (3.3V, 50mA)", 0.165),
         ("RP2354B #2 IDX DVDD (1.1V, 100mA)", 0.110),
@@ -586,15 +688,25 @@ def power_budget_report():
         ("2× IS61WV25616BLL (3.3V, 40mA each)", 0.264),
         ("2× LY68L6400 PSRAM (3.3V, 25mA each)", 0.165),
         ("W5500 Ethernet (3.3V, 130mA)", 0.429),
-        ("Flash chips (3.3V, 40mA total)", 0.132),
+        ("Flash chips ×3 (3.3V, 60mA total)", 0.198),
+        ("100MHz LVDS oscillator (3.3V, 30mA)", 0.099),
         ("OC headroom (+25% on both DVDD)", 0.055),
+        ("── NVMe Drives (external power budget) ──", 0),
+        ("NVMe SSD ×3 (3.3V, ~1A each typical)", 9.900),
     ]
+    subtotal_board = 0
     total = 0
     for name, w in rails:
-        print(f"    {name:48s} {w:.3f}W")
-        total += w
-    print(f"    {'─'*48} {'─'*5}")
-    print(f"    {'TOTAL':48s} {total:.3f}W")
+        if w > 0:
+            print(f"    {name:52s} {w:.3f}W")
+            total += w
+            if "NVMe SSD" not in name:
+                subtotal_board += w
+        else:
+            print(f"    {name}")
+    print(f"    {'─'*52} {'─'*6}")
+    print(f"    {'Board logic (excl. NVMe drives)':52s} {subtotal_board:.3f}W")
+    print(f"    {'TOTAL (with 3× NVMe drives)':52s} {total:.3f}W")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -616,32 +728,40 @@ def main():
 
     # PCB
     with open(os.path.join(OUTPUT_DIR, "query_planner.kicad_pcb"), "w") as f:
-        f.write(gen_pcb("query_planner", QUERY_PLANNER_BOM, board_w=100, board_h=55))
+        f.write(gen_pcb("query_planner", QUERY_PLANNER_BOM, board_w=130, board_h=80))
     print("[OK] query_planner.kicad_pcb")
 
     # Summary
     print(f"\n{'='*70}")
-    print(f" PicoWAL v{VERSION} — Single Query Processor Card")
+    print(f" PicoWAL v{VERSION} — ECP5-5G NVMe RAID Query Engine")
     print(f"{'='*70}")
     print()
     print(" Architecture: FPGA owns everything. Picos are pure control plane.")
     print()
-    print("   iCE40HX8K-CT256    SPI router + SRAM FIFO + block copy engine")
+    print("   ECP5-5G-45F        4× SerDes, PCIe Gen1 root complex, SRAM FIFO")
+    print("   3× M.2 M-Key NVMe PCIe Gen1 x1 each (~250 MB/s per drive)")
     print("   RP2354B #1 (QRY)   Drains query FIFO, issues copy cmds to FPGA")
-    print("   RP2354B #2 (IDX)   Updates index blocks on SATA via FPGA cmds")
+    print("   RP2354B #2 (IDX)   Updates index blocks on NVMe via FPGA cmds")
     print("   2× IS61WV25616BLL  FPGA-owned SRAM (query FIFO + page staging)")
     print("   2× LY68L6400       PSRAM per pico (working set only)")
-    print("   W5500 + RJ45       Index pico Ethernet (reads/writes index blocks)")
-    print("   Board:              100×55mm, 4-layer")
+    print("   W5500 + RJ45       Index pico Ethernet")
+    print("   Board:              130×80mm, 4-layer")
+    print()
+    print(" NVMe RAID:")
+    print("   SerDes CH0 → M.2 slot 0 (NVMe drive 0)")
+    print("   SerDes CH1 → M.2 slot 1 (NVMe drive 1)")
+    print("   SerDes CH2 → M.2 slot 2 (NVMe drive 2)")
+    print("   SerDes CH3 → spare (future upstream PCIe or inter-card)")
+    print("   100MHz LVDS ref clock shared via fanout buffer")
     print()
     print(" Address format: [63:53]=tenant [52]=INDEX [51:42]=card [41:0]=block")
-    print("   addr[52]=0  DATA   → FPGA bypass → downstream SATA nodes")
+    print("   addr[52]=0  DATA   → FPGA reads NVMe directly (zero copy)")
     print("   addr[52]=1  INDEX  → FPGA queues → query pico processes")
     print()
     print(" Pico command interface (SPI register map via FPGA):")
     print("   CMD_FIFO_POP   0x10  Query pico reads next descriptor from FIFO")
-    print("   CMD_IDX_READ   0x01  Read index block from SATA via FPGA")
-    print("   CMD_IDX_WRITE  0x05  Write index block to SATA via FPGA")
+    print("   CMD_IDX_READ   0x01  Read index block from NVMe via FPGA")
+    print("   CMD_IDX_WRITE  0x05  Write index block to NVMe via FPGA")
     print("   CMD_COPY_OUT   0x02  FPGA reads data block → streams to upstream")
     print("   CMD_MULTI_START 0x03 Begin multi-block gather")
     print("   CMD_MULTI_END  0x04  Flush gathered response")
@@ -649,13 +769,13 @@ def main():
     print()
 
     print(" BOM:")
-    total = sum(p["cost"] for p in QUERY_PLANNER_BOM) + 5.0 + 2.50
+    total = sum(p["cost"] for p in QUERY_PLANNER_BOM) + 8.0 + 3.50
     for part in QUERY_PLANNER_BOM:
-        print(f"   {part['ref']:6s}  {part['value']:20s}  £{part['cost']:.2f}  {part['desc']}")
-    print(f"   {'PCB':6s}  {'4-layer 100×55mm':20s}  £5.00")
-    print(f"   {'MISC':6s}  {'Passives+bypass':20s}  £2.50")
-    print(f"   {'─'*57}")
-    print(f"   {'TOTAL':6s}  {'':20s}  £{total:.2f}")
+        print(f"   {part['ref']:6s}  {part['value']:24s}  £{part['cost']:.2f}  {part['desc']}")
+    print(f"   {'PCB':6s}  {'4-layer 130×80mm':24s}  £8.00")
+    print(f"   {'MISC':6s}  {'Passives+bypass+fanout':24s}  £3.50")
+    print(f"   {'─'*62}")
+    print(f"   {'TOTAL':6s}  {'(excl. NVMe SSDs)':24s}  £{total:.2f}")
     print()
 
     print(" OC Configuration (both picos):")
@@ -667,8 +787,8 @@ def main():
 
     print(" Data flow:")
     print("   ┌─ FAST PATH (addr[52]=0) ─────────────────────────┐")
-    print("   │ upstream SPI → FPGA bypass → downstream SATA KV  │")
-    print("   │ zero copy, zero pico, ~2 clk overhead            │")
+    print("   │ upstream SPI → FPGA → PCIe NVMe read/write       │")
+    print("   │ zero copy, zero pico, FPGA drives PCIe directly  │")
     print("   └──────────────────────────────────────────────────┘")
     print("   ┌─ QUERY PATH (addr[52]=1) ────────────────────────┐")
     print("   │ upstream → FPGA SRAM FIFO → qry_irq              │")
@@ -676,9 +796,9 @@ def main():
     print("   │ FPGA does all data movement, pico just commands   │")
     print("   └──────────────────────────────────────────────────┘")
     print("   ┌─ INDEX UPDATE (on data writes) ──────────────────┐")
-    print("   │ FPGA bypass + idx_irq                             │")
-    print("   │ index pico: IDX_READ → update → IDX_WRITE         │")
-    print("   │ indexes stored as blocks with addr[52]=1 on SATA  │")
+    print("   │ FPGA NVMe write + idx_irq                        │")
+    print("   │ index pico: IDX_READ → update → IDX_WRITE        │")
+    print("   │ indexes stored as blocks with addr[52]=1 on NVMe │")
     print("   └──────────────────────────────────────────────────┘")
 
     pin_budget_report()
