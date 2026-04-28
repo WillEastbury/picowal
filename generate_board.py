@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Hydra Mesh v11.0 -- INT8 Analogue Dataflow Engine
-4x RP2354B orchestration + 12x LIFCL-17 DSP pipeline + 11x R-2R ladders
-Generates KiCad 8 files: hydra_dataflow.kicad_pro/sch/pcb"""
+"""Hydra Mesh v11.1 -- Pure Digital Pipeline Engine
+4x RP2354B orchestration + 12x LIFCL-17 DSP pipeline (no R-2R)
+Generates KiCad 8 files: hydra_12 + hydra_4 variants"""
 
 import json, os
 
@@ -42,19 +42,19 @@ def gen_project(name, out_dir):
 
 # == Schematic helpers ==
 
-def sch_header(paper="A0", title="", rev="11.0"):
+def sch_header(paper="A0", title="", rev="11.1"):
     u = nuuid()
     lines = [
         "(kicad_sch",
         "  (version 20231120)",
         '  (generator "hydra_v11_gen")',
-        '  (generator_version "11.0")',
+        '  (generator_version "11.1")',
         f'  (uuid "{u}")',
         f'  (paper "{paper}")',
         "  (title_block",
         f'    (title "{title}")',
         f'    (rev "{rev}")',
-        '    (company "Hydra Mesh v11.0")',
+        '    (company "Hydra Mesh v11.1")',
         "  )",
     ]
     return "\n".join(lines) + "\n"
@@ -221,7 +221,6 @@ def lib_symbol_rp2354b():
     xtal = [("XIN","X1","input"),("XOUT","X2","output")]
     for i, (name, num, pt) in enumerate(xtal):
         pins.append(_pin(pt, 0, -30.48, -50.8 - i * 2.54, name, num, 1.016))
-    # eMMC 8-bit interface (2 channels for Node0 RAID-0)
     emmc0 = [("EMMC0_CLK","EM01"),("EMMC0_CMD","EM02"),
              ("EMMC0_D0","EM03"),("EMMC0_D1","EM04"),("EMMC0_D2","EM05"),("EMMC0_D3","EM06"),
              ("EMMC0_D4","EM07"),("EMMC0_D5","EM08"),("EMMC0_D6","EM09"),("EMMC0_D7","EM10"),
@@ -234,7 +233,6 @@ def lib_symbol_rp2354b():
              ("EMMC1_RST","EM22")]
     for i, (name, num) in enumerate(emmc1):
         pins.append(_pin("bidirectional", 0, -30.48, -84.46 - i * 2.54, name, num, 1.016))
-    # Fabric QSPI link
     fabric = [("FABRIC_QSPI_SCK","FQ1"),("FABRIC_QSPI_CS","FQ2"),
               ("FABRIC_QSPI_D0","FQ3"),("FABRIC_QSPI_D1","FQ4"),
               ("FABRIC_QSPI_D2","FQ5"),("FABRIC_QSPI_D3","FQ6")]
@@ -261,34 +259,28 @@ def lib_symbol_rp2354b():
 def lib_symbol_ice40hx4k():
     pins = []
     pn = 1
-    # 11x QSPI slave ports (6 pins each)
     for n in range(11):
         y_base = 96.52 - n * 10.16
         for j, suffix in enumerate(["SCK", "CS", "D0", "D1", "D2", "D3"]):
             pins.append(_pin("bidirectional", 0, -35.56, y_base - j * 2.54,
                              f"QSPI{n}_{suffix}", str(pn), 1.016))
             pn += 1
-    # Inter-FPGA bridge (4 pins)
     bridge = [("BRIDGE_SCK", "bidirectional"), ("BRIDGE_MOSI", "bidirectional"),
               ("BRIDGE_MISO", "bidirectional"), ("BRIDGE_CS", "bidirectional")]
     for j, (name, pt) in enumerate(bridge):
         pins.append(_pin(pt, 180, 35.56, 96.52 - j * 2.54, name, str(pn), 1.016))
         pn += 1
-    # Config SPI (4 pins)
     cfg = [("CFG_SCK", "output"), ("CFG_MOSI", "output"),
            ("CFG_MISO", "input"), ("CFG_CS", "output")]
     for j, (name, pt) in enumerate(cfg):
         pins.append(_pin(pt, 180, 35.56, 83.82 - j * 2.54, name, str(pn), 1.016))
         pn += 1
-    # Clock
     pins.append(_pin("input", 180, 35.56, 73.66, "CLK_IN", str(pn), 1.016)); pn += 1
     pins.append(_pin("output", 180, 35.56, 71.12, "CLK_OUT", str(pn), 1.016)); pn += 1
-    # LED outputs
     for j in range(3):
         pins.append(_pin("output", 180, 35.56, 66.04 - j * 2.54,
                          f"LED{j}", str(pn), 1.016))
         pn += 1
-    # RMII interface (HX-A only, directly to KSZ8081 GbE PHY)
     rmii = [("RMII_TXD0", "output"), ("RMII_TXD1", "output"),
             ("RMII_TX_EN", "output"), ("RMII_RXD0", "input"),
             ("RMII_RXD1", "input"), ("RMII_CRS_DV", "input"),
@@ -296,10 +288,8 @@ def lib_symbol_ice40hx4k():
     for j, (name, pt) in enumerate(rmii):
         pins.append(_pin(pt, 180, 35.56, 48.26 - j * 2.54, name, str(pn), 1.016))
         pn += 1
-    # CDONE / CRESET
     pins.append(_pin("output", 180, 35.56, 30.48, "CDONE", str(pn), 1.016)); pn += 1
     pins.append(_pin("input", 180, 35.56, 27.94, "CRESET", str(pn), 1.016)); pn += 1
-    # Power
     pwr = [("VCC", "power_in"), ("VCCIO", "power_in"),
            ("GND", "power_in"), ("GND", "power_in"),
            ("GND", "power_in"), ("GND", "power_in")]
@@ -315,6 +305,67 @@ def lib_symbol_ice40hx4k():
         (rectangle (start -33.02 99.06) (end 33.02 -17.78) (stroke (width 0.254) (type default)) (fill (type background)))
       )
       (symbol "iCE40HX4K-TQ144_1_1"
+{pins_str}
+      )
+    )"""
+
+def lib_symbol_lifcl17():
+    pins = []
+    pn = 1
+    # 6-pin QSPI fabric slave (left side, bidirectional)
+    for j, suffix in enumerate(["SCK", "CS", "D0", "D1", "D2", "D3"]):
+        pins.append(_pin("bidirectional", 0, -25.4, 30.48 - j * 2.54,
+                         f"FABRIC_{suffix}", str(pn), 1.016))
+        pn += 1
+    # 4-pin config SPI (left side)
+    for j, suffix in enumerate(["CFG_SCK", "CFG_MOSI", "CFG_MISO", "CFG_CS"]):
+        pt = "input" if suffix == "CFG_MISO" else "output"
+        pins.append(_pin(pt, 0, -25.4, 15.24 - j * 2.54,
+                         suffix, str(pn), 1.016))
+        pn += 1
+    # Pipeline OUT: 8 data + VALID (output) + READY (input) = 10 pins, right side
+    for b in range(8):
+        pins.append(_pin("output", 180, 25.4, 30.48 - b * 2.54,
+                         f"PIPE_OUT_D{b}", str(pn), 1.016))
+        pn += 1
+    pins.append(_pin("output", 180, 25.4, 30.48 - 8 * 2.54,
+                     "PIPE_OUT_VALID", str(pn), 1.016))
+    pn += 1
+    pins.append(_pin("input", 180, 25.4, 30.48 - 9 * 2.54,
+                     "PIPE_OUT_READY", str(pn), 1.016))
+    pn += 1
+    # Pipeline IN: 8 data + VALID (input) + READY (output) = 10 pins, right side
+    for b in range(8):
+        pins.append(_pin("input", 180, 25.4, 5.08 - b * 2.54,
+                         f"PIPE_IN_D{b}", str(pn), 1.016))
+        pn += 1
+    pins.append(_pin("input", 180, 25.4, 5.08 - 8 * 2.54,
+                     "PIPE_IN_VALID", str(pn), 1.016))
+    pn += 1
+    pins.append(_pin("output", 180, 25.4, 5.08 - 9 * 2.54,
+                     "PIPE_IN_READY", str(pn), 1.016))
+    pn += 1
+    # CLK_IN (left side)
+    pins.append(_pin("input", 0, -25.4, 5.08, "CLK_IN", str(pn), 1.016)); pn += 1
+    # CDONE / CRESET (right side)
+    pins.append(_pin("output", 180, 25.4, -22.86, "CDONE", str(pn), 1.016)); pn += 1
+    pins.append(_pin("input", 180, 25.4, -25.4, "CRESET", str(pn), 1.016)); pn += 1
+    # Power (left side)
+    pwr = [("VCC_CORE", "power_in"), ("VCC_IO", "power_in"),
+           ("GND", "power_in"), ("GND", "power_in"),
+           ("GND", "power_in"), ("GND", "power_in")]
+    for j, (name, pt) in enumerate(pwr):
+        pins.append(_pin(pt, 0, -25.4, -7.62 - j * 2.54, name, str(pn), 1.016))
+        pn += 1
+    pins_str = "\n".join(pins)
+    return f"""    (symbol "FPGA_Lattice:LIFCL-17-QFN72" (in_bom yes) (on_board yes)
+      (property "Reference" "U" (at 0 35.56 0) (effects (font (size 1.27 1.27))))
+      (property "Value" "LIFCL-17" (at 0 -30.48 0) (effects (font (size 1.27 1.27))))
+      (property "Footprint" "Package_DFN_QFN:QFN-72-1EP_9x9mm_P0.4mm" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+      (symbol "LIFCL-17-QFN72_0_1"
+        (rectangle (start -22.86 33.02) (end 22.86 -27.94) (stroke (width 0.254) (type default)) (fill (type background)))
+      )
+      (symbol "LIFCL-17-QFN72_1_1"
 {pins_str}
       )
     )"""
@@ -387,25 +438,20 @@ def lib_symbol_emmc():
 
 def lib_symbol_ksz8081():
     pins = []
-    # RMII interface (directly to HX-A FPGA)
     rmii = [("TXD0","R1","input"),("TXD1","R2","input"),
             ("TX_EN","R3","input"),("RXD0","R4","output"),
             ("RXD1","R5","output"),("CRS_DV","R6","output"),
             ("REF_CLK","R7","input")]
     for i, (name, num, pt) in enumerate(rmii):
         pins.append(_pin(pt, 0, -15.24, 10.16 - i * 2.54, name, num, 1.016))
-    # MDC/MDIO management
     pins.append(_pin("input", 0, -15.24, -10.16, "MDC", "M1", 1.016))
     pins.append(_pin("bidirectional", 0, -15.24, -12.7, "MDIO", "M2", 1.016))
-    # Ethernet PHY pairs
     eth = [("TXP","E1","output"),("TXN","E2","output"),
            ("RXP","E3","input"),("RXN","E4","input")]
     for i, (name, num, pt) in enumerate(eth):
         pins.append(_pin(pt, 180, 15.24, 10.16 - i * 2.54, name, num, 1.016))
-    # Reset + interrupt
     pins.append(_pin("input", 180, 15.24, -2.54, "RST", "RST1", 1.016))
     pins.append(_pin("output", 180, 15.24, -5.08, "INT", "INT1", 1.016))
-    # Power
     pwr = [("VCC","P1","power_in"),("VDDIO","P2","power_in"),("GND","P3","power_in"),("GND","P4","power_in")]
     for i, (name, num, pt) in enumerate(pwr):
         pins.append(_pin(pt, 180, 15.24, -10.16 - i * 2.54, name, num, 1.016))
@@ -547,86 +593,6 @@ def lib_symbol_polyfuse():
       )
     )"""
 
-def lib_symbol_lifcl17():
-    pins = []
-    pn = 1
-    # 6-pin QSPI fabric slave
-    for j, suffix in enumerate(["SCK", "CS", "D0", "D1", "D2", "D3"]):
-        pins.append(_pin("bidirectional", 0, -25.4, 30.48 - j * 2.54,
-                         f"FABRIC_{suffix}", str(pn), 1.016))
-        pn += 1
-    # 4-pin config SPI
-    for j, suffix in enumerate(["CFG_SCK", "CFG_MOSI", "CFG_MISO", "CFG_CS"]):
-        pt = "input" if suffix == "CFG_MISO" else "output"
-        pins.append(_pin(pt, 0, -25.4, 15.24 - j * 2.54,
-                         suffix, str(pn), 1.016))
-        pn += 1
-    # 8-pin DAC output (pipeline out)
-    for b in range(8):
-        pins.append(_pin("output", 180, 25.4, 30.48 - b * 2.54,
-                         f"PIPE_OUT_B{b}", str(pn), 1.016))
-        pn += 1
-    # 8-pin ADC input (pipeline in)
-    for b in range(8):
-        pins.append(_pin("input", 180, 25.4, 10.16 - b * 2.54,
-                         f"PIPE_IN_B{b}", str(pn), 1.016))
-        pn += 1
-    # CLK_IN
-    pins.append(_pin("input", 0, -25.4, 5.08, "CLK_IN", str(pn), 1.016)); pn += 1
-    # 3x LED outputs
-    for j in range(3):
-        pins.append(_pin("output", 180, 25.4, -12.7 - j * 2.54,
-                         f"LED{j}", str(pn), 1.016))
-        pn += 1
-    # CDONE / CRESET
-    pins.append(_pin("output", 180, 25.4, -20.32, "CDONE", str(pn), 1.016)); pn += 1
-    pins.append(_pin("input", 180, 25.4, -22.86, "CRESET", str(pn), 1.016)); pn += 1
-    # Power
-    pwr = [("VCC", "power_in"), ("VCCIO", "power_in"),
-           ("GND", "power_in"), ("GND", "power_in"),
-           ("GND", "power_in"), ("GND", "power_in")]
-    for j, (name, pt) in enumerate(pwr):
-        pins.append(_pin(pt, 0, -25.4, -7.62 - j * 2.54, name, str(pn), 1.016))
-        pn += 1
-    pins_str = "\n".join(pins)
-    return f"""    (symbol "FPGA_Lattice:LIFCL-17-QFN72" (in_bom yes) (on_board yes)
-      (property "Reference" "U" (at 0 35.56 0) (effects (font (size 1.27 1.27))))
-      (property "Value" "LIFCL-17" (at 0 -27.94 0) (effects (font (size 1.27 1.27))))
-      (property "Footprint" "Package_DFN_QFN:QFN-72-1EP_9x9mm_P0.4mm" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
-      (symbol "LIFCL-17-QFN72_0_1"
-        (rectangle (start -22.86 33.02) (end 22.86 -25.4) (stroke (width 0.254) (type default)) (fill (type background)))
-      )
-      (symbol "LIFCL-17-QFN72_1_1"
-{pins_str}
-      )
-    )"""
-
-def lib_symbol_r2r_ladder():
-    pins = []
-    pn = 1
-    # 8 input pins (left side)
-    for b in range(8):
-        pins.append(_pin("input", 0, -10.16, 8.89 - b * 2.54,
-                         f"BIT{b}", str(pn), 1.016))
-        pn += 1
-    # VOUT (right side)
-    pins.append(_pin("output", 180, 10.16, 2.54, "VOUT", str(pn), 1.016)); pn += 1
-    # Power
-    pins.append(_pin("power_in", 0, -10.16, -12.7, "VCC_REF", str(pn), 1.016)); pn += 1
-    pins.append(_pin("power_in", 0, -10.16, -15.24, "GND", str(pn), 1.016)); pn += 1
-    pins_str = "\n".join(pins)
-    return f"""    (symbol "Analog_DAC:R2R_Ladder_8bit" (in_bom yes) (on_board yes)
-      (property "Reference" "RN" (at 0 12.7 0) (effects (font (size 1.27 1.27))))
-      (property "Value" "R2R_8bit" (at 0 -17.78 0) (effects (font (size 1.27 1.27))))
-      (property "Footprint" "Resistor_SMD:R2R_8bit_0402_array" (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
-      (symbol "R2R_Ladder_8bit_0_1"
-        (rectangle (start -7.62 10.16) (end 7.62 -15.24) (stroke (width 0.254) (type default)) (fill (type background)))
-      )
-      (symbol "R2R_Ladder_8bit_1_1"
-{pins_str}
-      )
-    )"""
-
 def lib_symbol_power_conn():
     pins = "\n".join([
         _pin("power_out", 180, 7.62, 2.54, "VCC_48V_POE", "1"),
@@ -655,7 +621,7 @@ def pcb_header(board_w, board_h, layers=4):
     return f"""(kicad_pcb
   (version 20240108)
   (generator "hydra_v11_gen")
-  (generator_version "11.0")
+  (generator_version "11.1")
   (general
     (thickness 1.6)
     (legacy_teardrops no)
@@ -794,11 +760,6 @@ MODELS = {
         "lib_symbol_fn": lib_symbol_lifcl17,
         "footprint": "Package_DFN_QFN:QFN-72-1EP_9x9mm_P0.4mm",
     },
-    "r2r_ladder": {
-        "lib_id": "Analog_DAC:R2R_Ladder_8bit",
-        "lib_symbol_fn": lib_symbol_r2r_ladder,
-        "footprint": "Resistor_SMD:R2R_8bit_0402_array",
-    },
     "ksz8081": {
         "lib_id": "Interface_Ethernet:KSZ8081RNA",
         "lib_symbol_fn": lib_symbol_ksz8081,
@@ -899,13 +860,13 @@ def _handle_symbol(ctx, sp):
     ref = sp["ref"]
     if ref.startswith("C@"):
         ref = f"C{ctx['c_idx']}"
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
     elif ref.startswith("R@"):
         ref = f"R{ctx['r_idx']}"
-        ctx["r_idx"] += 1
+        ctx['r_idx'] += 1
     elif ref.startswith("D@"):
         ref = f"D{ctx['d_idx']}"
-        ctx["d_idx"] += 1
+        ctx['d_idx'] += 1
     ctx["s"] += place_symbol(lib_id, ref, sp["value"], sp["x"], sp["y"],
                               sp.get("angle", 0), sp.get("unit", 1), sp.get("extra_props"))
 
@@ -945,14 +906,14 @@ def _handle_decoupling(ctx, sp):
         ctx["s"] += place_symbol("Device:C", f"C{ctx['c_idx']}", "100nF", x, y_c)
         ctx["s"] += place_global_label(vcc_label, x, y_c + y_vcc_off, 0, vcc_shape)
         ctx["s"] += place_global_label("GND", x, y_c + y_gnd_off, 0, "input")
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
     if sp.get("bulk"):
         bx = sp["bulk_x"]
         by = sp["bulk_y"]
         ctx["s"] += place_symbol("Device:C_0805", f"C{ctx['c_idx']}", "10uF", bx, by)
         ctx["s"] += place_global_label(vcc_label, bx, by + y_vcc_off, 0, vcc_shape)
         ctx["s"] += place_global_label("GND", bx, by + y_gnd_off, 0, "input")
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
 
 def _handle_pull_ups(ctx, sp):
     signals = sp["signals"]
@@ -964,7 +925,7 @@ def _handle_pull_ups(ctx, sp):
         ctx["s"] += place_symbol("Device:R", f"R{ctx['r_idx']}", sp.get("value", "10k"), x, y)
         ctx["s"] += place_global_label(vcc_label, x, y + 2.54, 0, "input")
         ctx["s"] += place_label(f"{label_prefix}{sig}", x, y - 2.54)
-        ctx["r_idx"] += 1
+        ctx['r_idx'] += 1
 
 def _handle_regulator_block(ctx, sp):
     lib_id = MODELS[sp["model"]]["lib_id"]
@@ -976,10 +937,10 @@ def _handle_regulator_block(ctx, sp):
     for cap_def in sp.get("caps", []):
         if cap_def[0] == "cap":
             ctx["s"] += place_symbol("Device:C", f"C{ctx['c_idx']}", "100nF", cap_def[1], cap_def[2])
-            ctx["c_idx"] += 1
+            ctx['c_idx'] += 1
         elif cap_def[0] == "cap_0805":
             ctx["s"] += place_symbol("Device:C_0805", f"C{ctx['c_idx']}", "10uF", cap_def[1], cap_def[2])
-            ctx["c_idx"] += 1
+            ctx['c_idx'] += 1
         for gl in cap_def[3:]:
             ctx["s"] += place_global_label(gl[0], gl[1], gl[2], gl[3], gl[4])
 
@@ -995,7 +956,7 @@ def _handle_bulk_caps(ctx, sp):
         ctx["s"] += place_symbol(lib_id, f"C{ctx['c_idx']}", cap_value, x_base + bc * x_step, y)
         ctx["s"] += place_global_label(vcc_label, x_base + bc * x_step, y + 2.54, 0, "input")
         ctx["s"] += place_global_label("GND", x_base + bc * x_step, y - 2.54, 0, "input")
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
 
 def _handle_fill_caps(ctx, sp):
     lib_id = MODELS[sp["model"]]["lib_id"]
@@ -1005,10 +966,10 @@ def _handle_fill_caps(ctx, sp):
     x_base, y_base = sp["x_base"], sp["y_base"]
     x_step, y_step = sp["x_step"], sp["y_step"]
     start_offset = sp.get("start_offset", lambda idx: ((idx - 1) % cols, (idx - 1) // cols))
-    while ctx["c_idx"] <= limit:
-        col, row = start_offset(ctx["c_idx"])
+    while ctx['c_idx'] <= limit:
+        col, row = start_offset(ctx['c_idx'])
         ctx["s"] += place_symbol(lib_id, f"C{ctx['c_idx']}", cap_value, x_base + col * x_step, y_base + row * y_step)
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
 
 def _handle_led_block(ctx, sp):
     names = sp["names"]
@@ -1019,8 +980,8 @@ def _handle_led_block(ctx, sp):
         ctx["s"] += place_symbol("Device:R", f"R{ctx['r_idx']}", "330", lx, ly)
         ctx["s"] += place_global_label("VCC_3V3", lx, ly + 2.54, 0, "input")
         ctx["s"] += place_global_label("GND", lx + 10 + 3.81, ly, 0, "input")
-        ctx["d_idx"] += 1
-        ctx["r_idx"] += 1
+        ctx['d_idx'] += 1
+        ctx['r_idx'] += 1
 
 def _handle_node_led_pair(ctx, sp):
     led_ref, led_value = sp["led_ref"], sp["led_value"]
@@ -1037,7 +998,7 @@ def _handle_node_cluster(ctx, sp):
     """Place N RP2354B nodes in a grid with their flash chips and fabric QSPI links."""
     node_start = sp["node_start"]
     node_end = sp["node_end"]
-    fabric_ref = sp["fabric_ref"]  # "HXA" or "HXB"
+    fabric_ref = sp["fabric_ref"]
     rows = sp["rows"]
     cols = sp["cols"]
     x_base = sp["x_base"]
@@ -1052,18 +1013,12 @@ def _handle_node_cluster(ctx, sp):
         col = idx % cols
         nx = x_base + col * x_step
         ny = y_base + row * y_step
-
         rp_ref = f"U{rp_ref_start + idx}"
         flash_ref = f"U{flash_ref_start + idx}"
-
-        # RP2354B
         ctx["s"] += place_symbol("MCU_RaspberryPi:RP2354B", rp_ref,
                                   f"RP2354B Node{node_num} @500MHz", nx, ny)
-        # W25Q128 flash (directly on RP, not through fabric)
         ctx["s"] += place_symbol("Memory_Flash:W25Q128JV", flash_ref,
                                   f"W25Q128 N{node_num}", nx + 40, ny - 20)
-
-        # QSPI flash labels (RP ↔ flash)
         qspi_sigs = ["SCK", "CS", "D0", "D1", "D2", "D3"]
         for j, sig in enumerate(qspi_sigs):
             label = f"N{node_num}_QSPI_{sig}"
@@ -1074,48 +1029,37 @@ def _handle_node_cluster(ctx, sp):
             else:
                 flash_y = ny - 20 + 3.81 - (j - 2) * 2.54
                 ctx["s"] += place_label(label, nx + 40 - 13, flash_y)
-
-        # Fabric QSPI labels (RP ↔ HX fabric)
         fabric_sigs = ["SCK", "CS", "D0", "D1", "D2", "D3"]
         for j, sig in enumerate(fabric_sigs):
             ctx["s"] += place_global_label(f"N{node_num}_FABRIC_{sig}",
                                             nx + 33, ny - 70.58 - j * 2.54, 0, "bidirectional")
-
-        # SWD debug labels
         ctx["s"] += place_global_label(f"N{node_num}_SWD_CLK", nx + 33, ny - 62.74, 0, "bidirectional")
         ctx["s"] += place_global_label(f"N{node_num}_SWD_DIO", nx + 33, ny - 65.28, 0, "bidirectional")
-
-        # Power
         ctx["s"] += place_global_label("VCC_3V3", nx + 33, ny - 86.36, 0, "input")
         ctx["s"] += place_global_label("VCC_3V3", nx + 33, ny - 88.9, 0, "input")
         ctx["s"] += place_global_label("GND", nx + 33, ny - 91.44, 0, "input")
         ctx["s"] += place_global_label("GND", nx + 33, ny - 93.98, 0, "input")
-
-        # Flash power
         ctx["s"] += place_global_label("VCC_3V3", nx + 40 + 13, ny - 20 - 3.81, 0, "input")
         ctx["s"] += place_global_label("GND", nx + 40 - 13, ny - 20 - 3.81, 180, "input")
-
-        # Per-node decoupling (2 caps)
         for dc in range(2):
             ctx["s"] += place_symbol("Device:C", f"C{ctx['c_idx']}", "100nF",
                                       nx + 40 + dc * 7, ny + 30)
             ctx["s"] += place_global_label("VCC_3V3", nx + 40 + dc * 7, ny + 32.54, 0, "input")
             ctx["s"] += place_global_label("GND", nx + 40 + dc * 7, ny + 27.46, 0, "input")
-            ctx["c_idx"] += 1
+            ctx['c_idx'] += 1
 
-def _handle_dataflow_pipeline(ctx, sp):
-    """Place 12 LIFCL-17 engines in a pipeline chain with R-2R ladders between stages."""
+def _handle_digital_pipeline(ctx, sp):
+    """Place LIFCL-17 engines in a pure digital pipeline chain."""
     x_base = sp["x_base"]
     y_base = sp["y_base"]
     x_step = sp["x_step"]
     y_step = sp["y_step"]
     cols = sp.get("cols", 6)
-    lifcl_ref_start = sp["lifcl_ref_start"]   # U9
-    flash_ref_start = sp["flash_ref_start"]    # U23
-    ladder_start = sp.get("ladder_start", 0)   # first ladder index
-    r_idx_start = sp.get("r_idx_start", 9)     # R9 onwards for R-2R resistors
+    engine_count = sp["engine_count"]
+    lifcl_ref_start = sp["lifcl_ref_start"]
+    flash_ref_start = sp["flash_ref_start"]
 
-    for eng in range(12):
+    for eng in range(engine_count):
         row = eng // cols
         col = eng % cols
         ex = x_base + col * x_step
@@ -1126,15 +1070,15 @@ def _handle_dataflow_pipeline(ctx, sp):
 
         # LIFCL-17 engine
         ctx["s"] += place_symbol("FPGA_Lattice:LIFCL-17-QFN72", u_ref,
-                                  f"LIFCL-17 DSP{eng} @200MHz", ex, ey)
+                                  f"LIFCL-17 E{eng} @200MHz 24-DSP", ex, ey)
 
         # Config flash
         ctx["s"] += place_symbol("Memory_Flash:W25Q32JV", flash_ref,
-                                  f"W25Q32 DSP{eng} Cfg", ex + 35, ey - 15)
+                                  f"W25Q32 E{eng} Cfg", ex + 35, ey - 15)
 
-        # Config SPI labels (LIFCL ↔ flash)
+        # Config SPI labels (LIFCL <-> flash)
         for j, suffix in enumerate(["SCK", "MOSI", "MISO", "CS"]):
-            label = f"DSP{eng}_CFG_{suffix}"
+            label = f"E{eng}_CFG_{suffix}"
             ctx["s"] += place_label(label, ex - 28, ey + 15.24 - j * 2.54)
             if j < 2:
                 ctx["s"] += place_label(label, ex + 35 + 13, ey - 15 + (3.81 if j == 0 else 1.27))
@@ -1145,7 +1089,7 @@ def _handle_dataflow_pipeline(ctx, sp):
         ctx["s"] += place_global_label("VCC_3V3", ex + 35 + 13, ey - 15 - 3.81, 0, "input")
         ctx["s"] += place_global_label("GND", ex + 35 - 13, ey - 15 - 3.81, 180, "input")
 
-        # Fabric QSPI labels (LIFCL ↔ HX switch)
+        # Fabric QSPI labels (LIFCL <-> HX switch)
         for j, suffix in enumerate(["SCK", "CS", "D0", "D1", "D2", "D3"]):
             ctx["s"] += place_global_label(f"DSP{eng}_FABRIC_{suffix}",
                                             ex - 28, ey + 30.48 - j * 2.54, 180, "bidirectional")
@@ -1153,17 +1097,36 @@ def _handle_dataflow_pipeline(ctx, sp):
         # Clock
         ctx["s"] += place_global_label("CLK_25MHZ", ex - 28, ey + 5.08, 180, "input")
 
-        # Pipeline output labels (DAC)
-        for b in range(8):
-            ctx["s"] += place_label(f"PIPE_{eng}_DAC_B{b}", ex + 28, ey + 30.48 - b * 2.54)
+        # Pipeline output global labels
+        if eng < engine_count - 1:
+            for b in range(8):
+                ctx["s"] += place_global_label(f"PIPE{eng}_{eng+1}_D{b}",
+                                                ex + 28, ey + 30.48 - b * 2.54, 0, "output")
+            ctx["s"] += place_global_label(f"PIPE{eng}_{eng+1}_VALID",
+                                            ex + 28, ey + 30.48 - 8 * 2.54, 0, "output")
+            ctx["s"] += place_global_label(f"PIPE{eng}_{eng+1}_READY",
+                                            ex + 28, ey + 30.48 - 9 * 2.54, 0, "input")
+        else:
+            for b in range(8):
+                ctx["s"] += place_global_label(f"PIPE_RESULT_D{b}",
+                                                ex + 28, ey + 30.48 - b * 2.54, 0, "output")
+            ctx["s"] += place_global_label("PIPE_RESULT_VALID",
+                                            ex + 28, ey + 30.48 - 8 * 2.54, 0, "output")
+            ctx["s"] += place_global_label("PIPE_RESULT_READY",
+                                            ex + 28, ey + 30.48 - 9 * 2.54, 0, "input")
 
-        # Pipeline input labels (DIN) — stage 0 has no input from previous ladder
+        # Pipeline input global labels
         if eng > 0:
             for b in range(8):
-                ctx["s"] += place_label(f"PIPE_{eng}_DIN_B{b}", ex + 28, ey + 10.16 - b * 2.54)
+                ctx["s"] += place_global_label(f"PIPE{eng-1}_{eng}_D{b}",
+                                                ex + 28, ey + 5.08 - b * 2.54, 0, "input")
+            ctx["s"] += place_global_label(f"PIPE{eng-1}_{eng}_VALID",
+                                            ex + 28, ey + 5.08 - 8 * 2.54, 0, "input")
+            ctx["s"] += place_global_label(f"PIPE{eng-1}_{eng}_READY",
+                                            ex + 28, ey + 5.08 - 9 * 2.54, 0, "output")
 
-        # Power
-        ctx["s"] += place_global_label("VCC_3V3", ex - 28, ey - 7.62, 180, "input")
+        # Power: VCC_1V0 for VCC_CORE, VCC_3V3 for VCC_IO, GND x4
+        ctx["s"] += place_global_label("VCC_1V0", ex - 28, ey - 7.62, 180, "input")
         ctx["s"] += place_global_label("VCC_3V3", ex - 28, ey - 10.16, 180, "input")
         ctx["s"] += place_global_label("GND", ex - 28, ey - 12.7, 180, "input")
         ctx["s"] += place_global_label("GND", ex - 28, ey - 15.24, 180, "input")
@@ -1176,54 +1139,7 @@ def _handle_dataflow_pipeline(ctx, sp):
                                       ex + 35 + dc * 7, ey + 25)
             ctx["s"] += place_global_label("VCC_3V3", ex + 35 + dc * 7, ey + 27.54, 0, "input")
             ctx["s"] += place_global_label("GND", ex + 35 + dc * 7, ey + 22.46, 0, "input")
-            ctx["c_idx"] += 1
-
-    # R-2R ladders between adjacent stages (11 ladders)
-    rn_idx = 1
-    for stage in range(11):
-        src_eng = stage
-        dst_eng = stage + 1
-        src_col = src_eng % cols
-        src_row = src_eng // cols
-        dst_col = dst_eng % cols
-        dst_row = dst_eng // cols
-
-        # Place ladder symbol between source and destination
-        lx = x_base + (src_col + 0.5) * x_step + 15
-        if src_row != dst_row:
-            # Wrapping to next row — place ladder at end of row
-            lx = x_base + (cols - 0.5) * x_step + 25
-        ly = y_base + src_row * y_step + 45
-
-        ctx["s"] += place_symbol("Analog_DAC:R2R_Ladder_8bit", f"RN{rn_idx}",
-                                  f"R2R Stage {stage}→{stage+1}", lx, ly)
-        rn_idx += 1
-
-        # Wire ladder inputs from source DAC outputs
-        for b in range(8):
-            ctx["s"] += place_label(f"PIPE_{src_eng}_DAC_B{b}", lx - 13, ly + 8.89 - b * 2.54)
-
-        # Wire ladder VOUT to destination DIN (via labels)
-        for b in range(8):
-            ctx["s"] += place_label(f"PIPE_{dst_eng}_DIN_B{b}", lx + 13, ly + 2.54)
-
-        # Ladder power
-        ctx["s"] += place_global_label("VCC_3V3", lx - 13, ly - 12.7, 180, "input")
-        ctx["s"] += place_global_label("GND", lx - 13, ly - 15.24, 180, "input")
-
-    # Place precision resistors for BOM (R9-R184: 176 resistors)
-    r_label_x = sp.get("r_label_x", x_base)
-    r_label_y = sp.get("r_label_y", y_base + 2 * y_step + 80)
-    ctx["s"] += place_text("R-2R Precision Resistors: R9-R184 (176x 0.1% 0402)",
-                           r_label_x, r_label_y, 1.5)
-    for ladder in range(11):
-        for rr in range(16):
-            r_num = r_idx_start + ladder * 16 + rr
-            val = "10k 0.1%" if rr % 2 == 0 else "20k 0.1%"
-            rx = r_label_x + (rr % 16) * 6
-            ry = r_label_y + 5 + ladder * 4
-            ctx["s"] += place_symbol("Device:R", f"R{r_num}", val, rx, ry)
-            ctx["r_idx"] = max(ctx["r_idx"], r_num + 1)
+            ctx['c_idx'] += 1
 
 SPLICE_HANDLERS = {
     "text": _handle_text,
@@ -1240,7 +1156,7 @@ SPLICE_HANDLERS = {
     "led_block": _handle_led_block,
     "node_led_pair": _handle_node_led_pair,
     "node_cluster": _handle_node_cluster,
-    "dataflow_pipeline": _handle_dataflow_pipeline,
+    "digital_pipeline": _handle_digital_pipeline,
 }
 
 # ============================================================
@@ -1248,9 +1164,6 @@ SPLICE_HANDLERS = {
 # ============================================================
 
 def run_sch_engine(board_def, output_dir, filename):
-    reset_uuids()
-    gen_project(board_def["project_name"], output_dir)
-
     hdr = board_def["header"]
     s = sch_header(hdr["paper"], hdr["title"], hdr["rev"])
     s += "  (lib_symbols\n"
@@ -1304,63 +1217,62 @@ def _pcb_ic_caps(step, ctx):
         for dc in range(2):
             ctx["s"] += pcb_footprint("Capacitor_SMD:C_0402_1005Metric",
                                        f"C{ctx['c_idx']}", "100nF", ix - 8 + dc * 3, iy + 12)
-            ctx["c_idx"] += 1
+            ctx['c_idx'] += 1
 
 def _pcb_fill_100nf(step, ctx):
     limit = step.get("limit", 100)
-    while ctx["c_idx"] <= limit:
-        col = (ctx["c_idx"] - 1) % 20
-        row = (ctx["c_idx"] - 1) // 20
+    while ctx['c_idx'] <= limit:
+        col = (ctx['c_idx'] - 1) % 20
+        row = (ctx['c_idx'] - 1) // 20
         ctx["s"] += pcb_footprint("Capacitor_SMD:C_0402_1005Metric",
                                    f"C{ctx['c_idx']}", "100nF", 10 + col * 7, 85 + row * 3)
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
 
 def _pcb_bulk_caps(step, ctx):
     limit = step.get("limit", 160)
-    start = ctx["c_idx"]
-    while ctx["c_idx"] <= limit:
-        col = (ctx["c_idx"] - start) % 12
-        row = (ctx["c_idx"] - start) // 12
+    start = ctx['c_idx']
+    while ctx['c_idx'] <= limit:
+        col = (ctx['c_idx'] - start) % 12
+        row = (ctx['c_idx'] - start) // 12
         ctx["s"] += pcb_footprint("Capacitor_SMD:C_0805_2012Metric",
                                    f"C{ctx['c_idx']}", "10uF", 15 + col * 12, 92 + row * 4)
-        ctx["c_idx"] += 1
+        ctx['c_idx'] += 1
 
 # ============================================================
-# BOARD DEFINITION -- Hydra Mesh v11.0 INT8 Analogue Dataflow
+# LIB SYMBOL ORDER (shared)
 # ============================================================
 
-NODE_BOARD = {
-    "project_name": "hydra_dataflow",
+LIB_SYMBOL_ORDER = [
+    "rp2354b", "ice40hx4k", "lifcl17", "ksz8081", "emmc",
+    "w25q128", "w25q32", "tps54560", "ap2112k", "tps2379", "osc_25mhz",
+    "power_conn", "polyfuse", "fan_header",
+    "resistor", "cap", "cap_0805", "cap_1206", "led", "inductor",
+]
+
+# ============================================================
+# HYDRA-12 BOARD DEFINITION
+# ============================================================
+
+HYDRA_12_BOARD = {
+    "project_name": "hydra_12",
     "header": {
         "paper": "A0",
-        "title": "Hydra Mesh v11.0 -- INT8 Analogue Dataflow Engine -- 12x LIFCL-17 + 4x RP2354B",
-        "rev": "11.0",
+        "title": "Hydra Mesh v11.1 -- Pure Digital Pipeline -- 12x LIFCL-17 + 4x RP2354B",
+        "rev": "11.1",
     },
-    "lib_symbol_order": [
-        "rp2354b", "ice40hx4k", "lifcl17", "r2r_ladder", "ksz8081", "emmc",
-        "w25q128", "w25q32", "tps54560", "ap2112k", "tps2379", "osc_25mhz",
-        "power_conn", "polyfuse", "fan_header",
-        "resistor", "cap", "cap_0805", "cap_1206", "led", "inductor",
-    ],
+    "lib_symbol_order": LIB_SYMBOL_ORDER,
     "splices": [
-        {"type": "text", "text": "HYDRA MESH v11.0 -- INT8 Analogue Dataflow Engine",
+        {"type": "text", "text": "HYDRA MESH v11.1 -- Pure Digital Pipeline Engine",
          "x": 400, "y": 10, "size": 3.0},
         {"type": "text",
-         "text": "12x LIFCL-17 = 384 DSP MACs, 155.6 GOPS peak (INT8), ~140 GOPS sustained, ~180ns latency, ~5.5M inf/s, 14W PoE",
+         "text": "12x LIFCL-17 = 288 DSP MACs, Pure Digital Pipeline, ~180ns latency, 14W PoE",
          "x": 400, "y": 18, "size": 1.5},
 
-        # ======================================================
-        # Section 1: Orchestration Nodes (top-left)
-        # 4x RP2354B + W25Q128 + SWD debug
-        # Node0: bus master, eMMC, GbE, model loading
-        # Nodes 1-3: pre/post-processing, data marshalling
-        # ======================================================
+        # Section 1: Orchestration Nodes -- 4x RP2354B + eMMC + Fabric Links
         {"type": "text", "text": "Section 1: Orchestration Nodes -- 4x RP2354B + eMMC + Fabric Links",
          "x": 120, "y": 30, "size": 2.0},
 
-        # U1: Node0 RP2354B (bus master)
         {"type": "symbol", "model": "rp2354b", "ref": "U1", "value": "RP2354B Node0 @500MHz (Bus Master)", "x": 80, "y": 100},
-        # U5: W25Q128 flash for Node0
         {"type": "symbol", "model": "w25q128", "ref": "U5", "value": "W25Q128 N0 Flash", "x": 140, "y": 55},
         {"type": "bus_labels", "prefix": "N0_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
          "a_x": 113, "a_y_base": 53.26, "a_y_step": -2.54,
@@ -1369,25 +1281,20 @@ NODE_BOARD = {
             ("VCC_3V3", 153, 51.19, 0, "input"),
             ("GND", 127, 51.19, 180, "input"),
         ]},
-        # Node0 fabric QSPI link to HX-A
         {"type": "global_label_fan", "signals": [
             "RP0_FABRIC_SCK","RP0_FABRIC_CS","RP0_FABRIC_D0","RP0_FABRIC_D1","RP0_FABRIC_D2","RP0_FABRIC_D3"],
          "x": 113, "y_base": 29.42, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # Node0 power
         {"type": "global_labels", "labels": [
             ("VCC_3V3", 113, 13.64, 0, "input"),
             ("VCC_3V3", 113, 11.1, 0, "input"),
             ("GND", 113, 8.56, 0, "input"),
             ("GND", 113, 6.02, 0, "input"),
         ]},
-        # Node0 SWD
         {"type": "global_label_fan", "signals": ["N0_SWD_CLK","N0_SWD_DIO"],
          "x": 113, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # Node0 decoupling
         {"type": "decoupling", "x_base": 130, "y": 70, "count": 2, "x_step": 7,
          "vcc_label": "VCC_3V3", "bulk": True, "bulk_x": 130, "bulk_y": 80},
 
-        # U37: eMMC #0 (32GB, 8-bit) on Node0
         {"type": "symbol", "model": "emmc", "ref": "U37", "value": "eMMC #0 32GB", "x": 80, "y": 230},
         {"type": "bus_labels", "prefix": "EMMC0_", "signals": ["CLK","CMD","D0","D1","D2","D3","D4","D5","D6","D7","RST"],
          "a_x": 47, "a_y_base": 43.58, "a_y_step": -2.54,
@@ -1399,7 +1306,6 @@ NODE_BOARD = {
         ]},
         {"type": "decoupling", "x_base": 105, "y": 230, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # U38: eMMC #1 (32GB, 8-bit) on Node0 (RAID-0 pair)
         {"type": "symbol", "model": "emmc", "ref": "U38", "value": "eMMC #1 32GB", "x": 80, "y": 270},
         {"type": "bus_labels", "prefix": "EMMC1_", "signals": ["CLK","CMD","D0","D1","D2","D3","D4","D5","D6","D7","RST"],
          "a_x": 47, "a_y_base": 15.54, "a_y_step": -2.54,
@@ -1411,7 +1317,6 @@ NODE_BOARD = {
         ]},
         {"type": "decoupling", "x_base": 105, "y": 270, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # U2: Node1 RP2354B (pre-processing)
         {"type": "symbol", "model": "rp2354b", "ref": "U2", "value": "RP2354B Node1 @500MHz", "x": 250, "y": 100},
         {"type": "symbol", "model": "w25q128", "ref": "U6", "value": "W25Q128 N1 Flash", "x": 310, "y": 55},
         {"type": "bus_labels", "prefix": "N1_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
@@ -1429,7 +1334,6 @@ NODE_BOARD = {
          "x": 283, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
         {"type": "decoupling", "x_base": 300, "y": 70, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # U3: Node2 RP2354B (post-processing)
         {"type": "symbol", "model": "rp2354b", "ref": "U3", "value": "RP2354B Node2 @500MHz", "x": 420, "y": 100},
         {"type": "symbol", "model": "w25q128", "ref": "U7", "value": "W25Q128 N2 Flash", "x": 480, "y": 55},
         {"type": "bus_labels", "prefix": "N2_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
@@ -1447,7 +1351,6 @@ NODE_BOARD = {
          "x": 453, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
         {"type": "decoupling", "x_base": 470, "y": 70, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # U4: Node3 RP2354B (data marshalling)
         {"type": "symbol", "model": "rp2354b", "ref": "U4", "value": "RP2354B Node3 @500MHz", "x": 590, "y": 100},
         {"type": "symbol", "model": "w25q128", "ref": "U8", "value": "W25Q128 N3 Flash", "x": 650, "y": 55},
         {"type": "bus_labels", "prefix": "N3_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
@@ -1465,70 +1368,53 @@ NODE_BOARD = {
          "x": 623, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
         {"type": "decoupling", "x_base": 640, "y": 70, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # ======================================================
-        # Section 2: INT8 Analogue Dataflow Pipeline (center, large)
-        # 12x LIFCL-17 in 2 rows of 6 + 11x R-2R ladders
-        # ======================================================
-        {"type": "text", "text": "Section 2: INT8 Analogue Dataflow Pipeline -- 12 stages, ~180ns latency",
+        # Section 2: Pure Digital Pipeline -- 12 stages
+        {"type": "text", "text": "Section 2: Pure Digital Pipeline -- 12 stages, ~180ns latency",
          "x": 350, "y": 300, "size": 2.0},
         {"type": "text",
-         "text": "384 DSP MACs | 2.16MB weight BRAM | R-2R Kirchhoff current summing | Flash ADC digitize",
+         "text": "288 DSP MACs | 24-DSP per LIFCL-17 | Pure digital data path | No R-2R",
          "x": 350, "y": 308, "size": 1.5},
 
-        # U9-U20: 12x LIFCL-17 engines in pipeline + U23-U34: config flash
-        {"type": "dataflow_pipeline",
+        {"type": "digital_pipeline",
          "x_base": 100, "y_base": 350,
          "x_step": 110, "y_step": 160,
          "cols": 6,
+         "engine_count": 12,
          "lifcl_ref_start": 9,
          "flash_ref_start": 23,
-         "r_idx_start": 9,
-         "r_label_x": 100, "r_label_y": 700,
         },
 
-        # ======================================================
-        # Section 3: SPI Fabric Switches (left)
-        # 2x iCE40HX4K + config flash
-        # ======================================================
+        # Section 3: SPI Fabric Switches -- 2x iCE40HX4K + Config Flash
         {"type": "text", "text": "Section 3: SPI Fabric Switches -- 2x iCE40HX4K + Config Flash",
          "x": 120, "y": 760, "size": 2.0},
 
-        # U21: iCE40HX4K-A (RP nodes 0-1 + LIFCL engines 0-5 + KSZ8081 RMII)
         {"type": "symbol", "model": "ice40hx4k", "ref": "U21", "value": "iCE40HX4K-A (RP0-1 + DSP0-5 + RMII)", "x": 80, "y": 880},
-        # HX-A QSPI slave ports: 2 RP nodes + 6 LIFCL engines = 8 ports (uses 8 of 11 slots)
         {"type": "global_label_fan",
          "signals": [f"RP{n}_FABRIC_{s}" for n in range(2) for s in ["SCK","CS","D0","D1","D2","D3"]]
                   + [f"DSP{n}_FABRIC_{s}" for n in range(6) for s in ["SCK","CS","D0","D1","D2","D3"]],
          "x": 42, "y_base": 976.52, "y_step": -2.54, "angle": 180, "shape": "bidirectional"},
-        # HX-A bridge to HX-B
         {"type": "global_label_fan",
          "signals": ["HX_BRIDGE_SCK","HX_BRIDGE_MOSI","HX_BRIDGE_MISO","HX_BRIDGE_CS"],
          "x": 118, "y_base": 976.52, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # HX-A config SPI
         {"type": "global_label_fan",
          "signals": ["HXA_CFG_SCK","HXA_CFG_MOSI","HXA_CFG_MISO","HXA_CFG_CS"],
          "x": 118, "y_base": 963.82, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # HX-A clock
         {"type": "global_labels", "labels": [
             ("CLK_25MHZ", 118, 953.66, 0, "input"),
             ("HXA_CLK_OUT", 118, 951.12, 0, "output"),
         ]},
-        # HX-A LEDs
         {"type": "global_labels", "labels": [
             ("LED_HXA_0", 118, 946.04, 0, "output"),
             ("LED_HXA_1", 118, 943.5, 0, "output"),
             ("LED_HXA_2", 118, 940.96, 0, "output"),
         ]},
-        # HX-A RMII interface → KSZ8081 GbE PHY
         {"type": "global_label_fan",
          "signals": ["RMII_TXD0","RMII_TXD1","RMII_TX_EN","RMII_RXD0","RMII_RXD1","RMII_CRS_DV","RMII_REF_CLK"],
          "x": 118, "y_base": 935.88, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # HX-A CDONE/CRESET
         {"type": "global_labels", "labels": [
             ("HXA_CDONE", 118, 910.48, 0, "output"),
             ("HXA_CRESET", 118, 907.94, 0, "input"),
         ]},
-        # HX-A power
         {"type": "global_labels", "labels": [
             ("VCC_3V3", 118, 902.8, 0, "input"),
             ("VCC_3V3", 118, 900.26, 0, "input"),
@@ -1540,7 +1426,6 @@ NODE_BOARD = {
         {"type": "decoupling", "x_base": 130, "y": 900, "count": 3, "x_step": 7, "vcc_label": "VCC_3V3",
          "bulk": True, "bulk_x": 130, "bulk_y": 910},
 
-        # U35: W25Q32 config flash for HX-A
         {"type": "symbol", "model": "w25q32", "ref": "U35", "value": "W25Q32 HX-A Cfg", "x": 160, "y": 880},
         {"type": "bus_labels", "prefix": "HXA_CFG_", "signals": ["SCK","MOSI","MISO","CS"],
          "a_x": 118, "a_y_base": 963.82, "a_y_step": -2.54,
@@ -1550,37 +1435,30 @@ NODE_BOARD = {
             ("GND", 147, 876.19, 180, "input"),
         ]},
 
-        # U22: iCE40HX4K-B (RP nodes 2-3 + LIFCL engines 6-11)
         {"type": "symbol", "model": "ice40hx4k", "ref": "U22", "value": "iCE40HX4K-B (RP2-3 + DSP6-11)", "x": 80, "y": 1080},
         {"type": "global_label_fan",
          "signals": [f"RP{n}_FABRIC_{s}" for n in range(2, 4) for s in ["SCK","CS","D0","D1","D2","D3"]]
                   + [f"DSP{n}_FABRIC_{s}" for n in range(6, 12) for s in ["SCK","CS","D0","D1","D2","D3"]],
          "x": 42, "y_base": 1176.52, "y_step": -2.54, "angle": 180, "shape": "bidirectional"},
-        # HX-B bridge to HX-A
         {"type": "global_label_fan",
          "signals": ["HX_BRIDGE_SCK","HX_BRIDGE_MOSI","HX_BRIDGE_MISO","HX_BRIDGE_CS"],
          "x": 118, "y_base": 1176.52, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # HX-B config SPI
         {"type": "global_label_fan",
          "signals": ["HXB_CFG_SCK","HXB_CFG_MOSI","HXB_CFG_MISO","HXB_CFG_CS"],
          "x": 118, "y_base": 1163.82, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
-        # HX-B clock
         {"type": "global_labels", "labels": [
             ("CLK_25MHZ", 118, 1153.66, 0, "input"),
             ("HXB_CLK_OUT", 118, 1151.12, 0, "output"),
         ]},
-        # HX-B LEDs
         {"type": "global_labels", "labels": [
             ("LED_HXB_0", 118, 1146.04, 0, "output"),
             ("LED_HXB_1", 118, 1143.5, 0, "output"),
             ("LED_HXB_2", 118, 1140.96, 0, "output"),
         ]},
-        # HX-B CDONE/CRESET
         {"type": "global_labels", "labels": [
             ("HXB_CDONE", 118, 1110.48, 0, "output"),
             ("HXB_CRESET", 118, 1107.94, 0, "input"),
         ]},
-        # HX-B power
         {"type": "global_labels", "labels": [
             ("VCC_3V3", 118, 1102.8, 0, "input"),
             ("VCC_3V3", 118, 1100.26, 0, "input"),
@@ -1592,7 +1470,6 @@ NODE_BOARD = {
         {"type": "decoupling", "x_base": 130, "y": 1100, "count": 3, "x_step": 7, "vcc_label": "VCC_3V3",
          "bulk": True, "bulk_x": 130, "bulk_y": 1110},
 
-        # U36: W25Q32 config flash for HX-B
         {"type": "symbol", "model": "w25q32", "ref": "U36", "value": "W25Q32 HX-B Cfg", "x": 160, "y": 1080},
         {"type": "bus_labels", "prefix": "HXB_CFG_", "signals": ["SCK","MOSI","MISO","CS"],
          "a_x": 118, "a_y_base": 1163.82, "a_y_step": -2.54,
@@ -1602,14 +1479,10 @@ NODE_BOARD = {
             ("GND", 147, 1076.19, 180, "input"),
         ]},
 
-        # ======================================================
-        # Section 4: Networking (top-right)
-        # KSZ8081 GbE PHY (RMII via HX-A) + RJ45 + PoE
-        # ======================================================
+        # Section 4: Networking
         {"type": "text", "text": "Section 4: Networking -- KSZ8081 GbE PHY (RMII via HX-A) + PoE",
          "x": 600, "y": 30, "size": 2.0},
 
-        # U39: KSZ8081RNA GbE PHY
         {"type": "symbol", "model": "ksz8081", "ref": "U39", "value": "KSZ8081RNA GbE", "x": 650, "y": 315},
         {"type": "global_label_fan", "signals": [
             "RMII_TXD0","RMII_TXD1","RMII_TX_EN","RMII_RXD0","RMII_RXD1","RMII_CRS_DV","RMII_REF_CLK"],
@@ -1626,14 +1499,12 @@ NODE_BOARD = {
         ]},
         {"type": "decoupling", "x_base": 680, "y": 315, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
 
-        # J1: RJ45 MagJack with PoE center-tap
         {"type": "symbol", "model": "power_conn", "ref": "J1", "value": "RJ45 MagJack PoE", "x": 700, "y": 315},
         {"type": "global_labels", "labels": [
             ("VCC_48V_POE", 710, 317.54, 0, "output"),
             ("GND", 710, 312.46, 0, "input"),
         ]},
 
-        # U40: TPS2379 PoE PD controller (802.3at 25W)
         {"type": "symbol", "model": "tps2379", "ref": "U40", "value": "TPS2379 PoE PD 25W", "x": 700, "y": 345},
         {"type": "global_labels", "labels": [
             ("VCC_48V_POE", 687, 350.08, 180, "input"),
@@ -1641,22 +1512,17 @@ NODE_BOARD = {
         ]},
         {"type": "decoupling", "x_base": 720, "y": 345, "count": 1, "x_step": 7, "vcc_label": "VCC_48V_POE"},
 
-        # ======================================================
-        # Section 5: Power Supply (bottom)
-        # PoE → polyfuse → TPS54560 3.3V + TPS54560 5V (fan) → AP2112K 1.8V
-        # ======================================================
-        {"type": "text", "text": "Section 5: Power Supply -- PoE 48V → 3.3V/5A + 5V/2A (fan) → 1.8V (eMMC VCCQ)",
+        # Section 5: Power Supply
+        {"type": "text", "text": "Section 5: Power Supply -- PoE 48V -> 3.3V/5A + 1.0V/2A + 5V/2A (fan) -> 1.8V",
          "x": 300, "y": 1200, "size": 2.0},
 
-        # F1: Polyfuse
         {"type": "symbol", "model": "polyfuse", "ref": "F1", "value": "1A Polyfuse", "x": 200, "y": 1222},
         {"type": "global_labels", "labels": [
             ("VCC_48V_POE", 192, 1222, 180, "output"),
             ("VCC_48V_FUSED", 208, 1222, 0, "output"),
         ]},
 
-        # U41: TPS54560 48V→3.3V/5A
-        {"type": "regulator_block", "model": "tps54560", "ref": "U41", "value": "TPS54560 48V→3.3V/5A",
+        {"type": "regulator_block", "model": "tps54560", "ref": "U41", "value": "TPS54560 48V->3.3V/5A",
          "x": 260, "y": 1230,
          "globals": [
              ("VCC_48V_FUSED", 245, 1237.62, 180, "input"),
@@ -1667,50 +1533,58 @@ NODE_BOARD = {
              ("cap", 282, 1230, ("VCC_3V3", 282, 1232.54, 0, "input"), ("GND", 282, 1227.46, 0, "input")),
              ("cap_0805", 289, 1230, ("VCC_3V3", 289, 1232.54, 0, "input"), ("GND", 289, 1227.46, 0, "input")),
          ]},
-        # L1 for TPS54560 3.3V
         {"type": "symbol", "model": "inductor", "ref": "L1", "value": "4.7uH", "x": 275, "y": 1240},
 
-        # U42: TPS54560 48V→5V/2A (fan supply)
-        {"type": "regulator_block", "model": "tps54560", "ref": "U42", "value": "TPS54560 48V→5V/2A (Fan)",
+        {"type": "regulator_block", "model": "tps54560", "ref": "U42", "value": "TPS54560 48V->1.0V/2A (FPGA Core)",
          "x": 400, "y": 1230,
          "globals": [
              ("VCC_48V_FUSED", 385, 1237.62, 180, "input"),
-             ("VCC_5V", 415, 1237.62, 0, "output"),
+             ("VCC_1V0", 415, 1237.62, 0, "output"),
              ("GND", 415, 1224.92, 0, "input"),
          ],
          "caps": [
-             ("cap", 422, 1230, ("VCC_5V", 422, 1232.54, 0, "input"), ("GND", 422, 1227.46, 0, "input")),
-             ("cap_0805", 429, 1230, ("VCC_5V", 429, 1232.54, 0, "input"), ("GND", 429, 1227.46, 0, "input")),
+             ("cap", 422, 1230, ("VCC_1V0", 422, 1232.54, 0, "input"), ("GND", 422, 1227.46, 0, "input")),
+             ("cap_0805", 429, 1230, ("VCC_1V0", 429, 1232.54, 0, "input"), ("GND", 429, 1227.46, 0, "input")),
          ]},
-        # L2 for TPS54560 5V
         {"type": "symbol", "model": "inductor", "ref": "L2", "value": "4.7uH", "x": 415, "y": 1240},
 
-        # U43: AP2112K 3.3V→1.8V (eMMC VCCQ)
-        {"type": "regulator_block", "model": "ap2112k", "ref": "U43", "value": "AP2112K 3.3V→1.8V",
+        {"type": "regulator_block", "model": "tps54560", "ref": "U43", "value": "TPS54560 48V->5V/2A (Fan)",
          "x": 540, "y": 1230,
          "globals": [
-             ("VCC_3V3", 527, 1232.54, 180, "input"),
-             ("GND", 527, 1227.46, 180, "input"),
-             ("VCC_1V8", 553, 1232.54, 0, "output"),
+             ("VCC_48V_FUSED", 525, 1237.62, 180, "input"),
+             ("VCC_5V", 555, 1237.62, 0, "output"),
+             ("GND", 555, 1224.92, 0, "input"),
          ],
          "caps": [
-             ("cap", 560, 1230, ("VCC_1V8", 560, 1232.54, 0, "input"), ("GND", 560, 1227.46, 0, "input")),
+             ("cap", 562, 1230, ("VCC_5V", 562, 1232.54, 0, "input"), ("GND", 562, 1227.46, 0, "input")),
+             ("cap_0805", 569, 1230, ("VCC_5V", 569, 1232.54, 0, "input"), ("GND", 569, 1227.46, 0, "input")),
+         ]},
+        {"type": "symbol", "model": "inductor", "ref": "L3", "value": "4.7uH", "x": 555, "y": 1240},
+
+        {"type": "regulator_block", "model": "ap2112k", "ref": "U44", "value": "AP2112K 3.3V->1.8V (eMMC VCCQ)",
+         "x": 680, "y": 1230,
+         "globals": [
+             ("VCC_3V3", 667, 1232.54, 180, "input"),
+             ("GND", 667, 1227.46, 180, "input"),
+             ("VCC_1V8", 693, 1232.54, 0, "output"),
+         ],
+         "caps": [
+             ("cap", 700, 1230, ("VCC_1V8", 700, 1232.54, 0, "input"), ("GND", 700, 1227.46, 0, "input")),
          ]},
 
-        # J2: Fan header 2-pin (5V)
         {"type": "symbol", "model": "fan_header", "ref": "J2", "value": "Fan 40mm 5V", "x": 480, "y": 1250},
         {"type": "global_labels", "labels": [
             ("VCC_5V", 490, 1252.54, 0, "input"),
             ("GND", 490, 1247.46, 0, "input"),
         ]},
 
-        # Bulk caps near regulators
         {"type": "bulk_caps", "count": 4, "model": "cap_0805", "value": "10uF",
          "x_base": 220, "y": 1260, "x_step": 15, "vcc_label": "VCC_3V3"},
         {"type": "bulk_caps", "count": 2, "model": "cap_0805", "value": "10uF",
-         "x_base": 400, "y": 1260, "x_step": 15, "vcc_label": "VCC_5V"},
+         "x_base": 400, "y": 1260, "x_step": 15, "vcc_label": "VCC_1V0"},
+        {"type": "bulk_caps", "count": 2, "model": "cap_0805", "value": "10uF",
+         "x_base": 500, "y": 1260, "x_step": 15, "vcc_label": "VCC_5V"},
 
-        # Y1: 25MHz oscillator
         {"type": "symbol", "model": "osc_25mhz", "ref": "Y1", "value": "25MHz Oscillator", "x": 200, "y": 1280},
         {"type": "global_labels", "labels": [
             ("VCC_3V3", 190, 1282.54, 180, "input"),
@@ -1718,10 +1592,7 @@ NODE_BOARD = {
             ("CLK_25MHZ", 210, 1282.54, 0, "output"),
         ]},
 
-        # ======================================================
-        # Section 6: Status LEDs (edge)
-        # D1-D8: PWR, SYS, ERR, NET, PIPE_ACTIVE, PIPE_DONE, HX-A, HX-B
-        # ======================================================
+        # Section 6: Status LEDs
         {"type": "text", "text": "Section 6: Status LEDs (8x)", "x": 15, "y": 1300, "size": 1.5},
         {"type": "node_led_pair", "led_ref": "D1", "led_value": "PWR_GREEN", "lx": 20, "ly": 1315,
          "r_ref": "R1", "r_value": "330", "rx": 10, "ry": 1315},
@@ -1731,7 +1602,7 @@ NODE_BOARD = {
          "r_ref": "R3", "r_value": "330", "rx": 10, "ry": 1339},
         {"type": "node_led_pair", "led_ref": "D4", "led_value": "NET_YELLOW", "lx": 20, "ly": 1351,
          "r_ref": "R4", "r_value": "330", "rx": 10, "ry": 1351},
-        {"type": "node_led_pair", "led_ref": "D5", "led_value": "PIPE_ACTIVE_GREEN", "lx": 20, "ly": 1363,
+        {"type": "node_led_pair", "led_ref": "D5", "led_value": "PIPE_ACT_GREEN", "lx": 20, "ly": 1363,
          "r_ref": "R5", "r_value": "330", "rx": 10, "ry": 1363},
         {"type": "node_led_pair", "led_ref": "D6", "led_value": "PIPE_DONE_GREEN", "lx": 20, "ly": 1375,
          "r_ref": "R6", "r_value": "330", "rx": 10, "ry": 1375},
@@ -1751,131 +1622,486 @@ NODE_BOARD = {
 }
 
 # ============================================================
-# PCB DEFINITION -- 200x150mm 4-layer
+# HYDRA-4 BOARD DEFINITION
 # ============================================================
 
-_pcb_footprints = []
+HYDRA_4_BOARD = {
+    "project_name": "hydra_4",
+    "header": {
+        "paper": "A3",
+        "title": "Hydra Mesh v11.1 -- Pure Digital Pipeline -- 4x LIFCL-17 + 2x RP2354B (Budget)",
+        "rev": "11.1",
+    },
+    "lib_symbol_order": LIB_SYMBOL_ORDER,
+    "splices": [
+        {"type": "text", "text": "HYDRA MESH v11.1 -- Pure Digital Pipeline (Budget)",
+         "x": 200, "y": 10, "size": 3.0},
+        {"type": "text",
+         "text": "4x LIFCL-17 = 96 DSP MACs, Pure Digital Pipeline, Budget variant",
+         "x": 200, "y": 18, "size": 1.5},
 
-# Top-left: 4x RP2354B + eMMC + flash
-# U1-U4: RP2354B nodes
-for i in range(4):
-    _pcb_footprints.append((MODELS["rp2354b"]["footprint"], f"U{1+i}", f"RP2354B N{i}", 20 + i * 22, 18))
-# U5-U8: W25Q128 flash for RP nodes
-for i in range(4):
-    _pcb_footprints.append((MODELS["w25q128"]["footprint"], f"U{5+i}", f"W25Q128 N{i}", 20 + i * 22, 8))
-# U37-U38: eMMC near Node0
-_pcb_footprints.append((MODELS["emmc"]["footprint"], "U37", "eMMC #0", 20, 32))
-_pcb_footprints.append((MODELS["emmc"]["footprint"], "U38", "eMMC #1", 40, 32))
+        # Section 1: 2x RP2354B + W25Q128 + eMMC on Node0
+        {"type": "text", "text": "Section 1: Orchestration -- 2x RP2354B + eMMC",
+         "x": 80, "y": 30, "size": 2.0},
 
-# Center: 12x LIFCL-17 in 2 rows of 6 + R-2R resistor networks
+        {"type": "symbol", "model": "rp2354b", "ref": "U1", "value": "RP2354B Node0 @500MHz (Bus Master)", "x": 80, "y": 100},
+        {"type": "symbol", "model": "w25q128", "ref": "U3", "value": "W25Q128 N0 Flash", "x": 140, "y": 55},
+        {"type": "bus_labels", "prefix": "N0_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
+         "a_x": 113, "a_y_base": 53.26, "a_y_step": -2.54,
+         "b_x": 150, "b_y_base": 58.81, "b_y_step": -2.54},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 153, 51.19, 0, "input"),
+            ("GND", 127, 51.19, 180, "input"),
+        ]},
+        {"type": "global_label_fan", "signals": [
+            "RP0_FABRIC_SCK","RP0_FABRIC_CS","RP0_FABRIC_D0","RP0_FABRIC_D1","RP0_FABRIC_D2","RP0_FABRIC_D3"],
+         "x": 113, "y_base": 29.42, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 113, 13.64, 0, "input"), ("VCC_3V3", 113, 11.1, 0, "input"),
+            ("GND", 113, 8.56, 0, "input"), ("GND", 113, 6.02, 0, "input"),
+        ]},
+        {"type": "global_label_fan", "signals": ["N0_SWD_CLK","N0_SWD_DIO"],
+         "x": 113, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "decoupling", "x_base": 130, "y": 70, "count": 2, "x_step": 7,
+         "vcc_label": "VCC_3V3", "bulk": True, "bulk_x": 130, "bulk_y": 80},
+
+        {"type": "symbol", "model": "emmc", "ref": "U15", "value": "eMMC #0 32GB", "x": 80, "y": 230},
+        {"type": "bus_labels", "prefix": "EMMC0_", "signals": ["CLK","CMD","D0","D1","D2","D3","D4","D5","D6","D7","RST"],
+         "a_x": 47, "a_y_base": 43.58, "a_y_step": -2.54,
+         "b_x": 65, "b_y_base": 242.7, "b_y_step": -2.54},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 95, 235.08, 0, "input"),
+            ("VCC_1V8", 95, 232.54, 0, "input"),
+            ("GND", 95, 230.0, 0, "input"),
+        ]},
+        {"type": "decoupling", "x_base": 105, "y": 230, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
+
+        {"type": "symbol", "model": "emmc", "ref": "U16", "value": "eMMC #1 32GB", "x": 80, "y": 270},
+        {"type": "bus_labels", "prefix": "EMMC1_", "signals": ["CLK","CMD","D0","D1","D2","D3","D4","D5","D6","D7","RST"],
+         "a_x": 47, "a_y_base": 15.54, "a_y_step": -2.54,
+         "b_x": 65, "b_y_base": 282.7, "b_y_step": -2.54},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 95, 275.08, 0, "input"),
+            ("VCC_1V8", 95, 272.54, 0, "input"),
+            ("GND", 95, 270.0, 0, "input"),
+        ]},
+        {"type": "decoupling", "x_base": 105, "y": 270, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
+
+        {"type": "symbol", "model": "rp2354b", "ref": "U2", "value": "RP2354B Node1 @500MHz", "x": 250, "y": 100},
+        {"type": "symbol", "model": "w25q128", "ref": "U4", "value": "W25Q128 N1 Flash", "x": 310, "y": 55},
+        {"type": "bus_labels", "prefix": "N1_QSPI_", "signals": ["SCK","CS","D0","D1","D2","D3"],
+         "a_x": 283, "a_y_base": 53.26, "a_y_step": -2.54,
+         "b_x": 320, "b_y_base": 58.81, "b_y_step": -2.54},
+        {"type": "global_labels", "labels": [("VCC_3V3", 323, 51.19, 0, "input"), ("GND", 297, 51.19, 180, "input")]},
+        {"type": "global_label_fan", "signals": [
+            "RP1_FABRIC_SCK","RP1_FABRIC_CS","RP1_FABRIC_D0","RP1_FABRIC_D1","RP1_FABRIC_D2","RP1_FABRIC_D3"],
+         "x": 283, "y_base": 29.42, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 283, 13.64, 0, "input"), ("VCC_3V3", 283, 11.1, 0, "input"),
+            ("GND", 283, 8.56, 0, "input"), ("GND", 283, 6.02, 0, "input"),
+        ]},
+        {"type": "global_label_fan", "signals": ["N1_SWD_CLK","N1_SWD_DIO"],
+         "x": 283, "y_base": 37.26, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "decoupling", "x_base": 300, "y": 70, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
+
+        # Section 2: Digital Pipeline -- 4 stages
+        {"type": "text", "text": "Section 2: Pure Digital Pipeline -- 4 stages",
+         "x": 200, "y": 300, "size": 2.0},
+
+        {"type": "digital_pipeline",
+         "x_base": 100, "y_base": 350,
+         "x_step": 110, "y_step": 160,
+         "cols": 2,
+         "engine_count": 4,
+         "lifcl_ref_start": 5,
+         "flash_ref_start": 10,
+        },
+
+        # Section 3: SPI Fabric Switch -- 1x iCE40HX4K
+        {"type": "text", "text": "Section 3: SPI Fabric Switch -- 1x iCE40HX4K",
+         "x": 80, "y": 700, "size": 2.0},
+
+        {"type": "symbol", "model": "ice40hx4k", "ref": "U9", "value": "iCE40HX4K (RP0-1 + DSP0-3 + RMII)", "x": 80, "y": 820},
+        {"type": "global_label_fan",
+         "signals": [f"RP{n}_FABRIC_{s}" for n in range(2) for s in ["SCK","CS","D0","D1","D2","D3"]]
+                  + [f"DSP{n}_FABRIC_{s}" for n in range(4) for s in ["SCK","CS","D0","D1","D2","D3"]],
+         "x": 42, "y_base": 916.52, "y_step": -2.54, "angle": 180, "shape": "bidirectional"},
+        {"type": "global_label_fan",
+         "signals": ["HX_CFG_SCK","HX_CFG_MOSI","HX_CFG_MISO","HX_CFG_CS"],
+         "x": 118, "y_base": 903.82, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_labels", "labels": [
+            ("CLK_25MHZ", 118, 893.66, 0, "input"),
+            ("HX_CLK_OUT", 118, 891.12, 0, "output"),
+        ]},
+        {"type": "global_labels", "labels": [
+            ("LED_HX_0", 118, 886.04, 0, "output"),
+            ("LED_HX_1", 118, 883.5, 0, "output"),
+            ("LED_HX_2", 118, 880.96, 0, "output"),
+        ]},
+        {"type": "global_label_fan",
+         "signals": ["RMII_TXD0","RMII_TXD1","RMII_TX_EN","RMII_RXD0","RMII_RXD1","RMII_CRS_DV","RMII_REF_CLK"],
+         "x": 118, "y_base": 875.88, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_labels", "labels": [
+            ("HX_CDONE", 118, 850.48, 0, "output"),
+            ("HX_CRESET", 118, 847.94, 0, "input"),
+        ]},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 118, 842.86, 0, "input"),
+            ("VCC_3V3", 118, 840.32, 0, "input"),
+            ("GND", 118, 837.78, 0, "input"),
+            ("GND", 118, 835.24, 0, "input"),
+            ("GND", 118, 832.7, 0, "input"),
+            ("GND", 118, 830.16, 0, "input"),
+        ]},
+        {"type": "decoupling", "x_base": 130, "y": 840, "count": 3, "x_step": 7, "vcc_label": "VCC_3V3",
+         "bulk": True, "bulk_x": 130, "bulk_y": 850},
+
+        {"type": "symbol", "model": "w25q32", "ref": "U14", "value": "W25Q32 HX Cfg", "x": 160, "y": 820},
+        {"type": "bus_labels", "prefix": "HX_CFG_", "signals": ["SCK","MOSI","MISO","CS"],
+         "a_x": 118, "a_y_base": 903.82, "a_y_step": -2.54,
+         "b_x": 173, "b_y_base": 821.27, "b_y_step": -2.54},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 173, 816.19, 0, "input"),
+            ("GND", 147, 816.19, 180, "input"),
+        ]},
+
+        # Section 4: Networking
+        {"type": "text", "text": "Section 4: Networking -- KSZ8081 + PoE",
+         "x": 350, "y": 30, "size": 2.0},
+
+        {"type": "symbol", "model": "ksz8081", "ref": "U17", "value": "KSZ8081RNA GbE", "x": 400, "y": 315},
+        {"type": "global_label_fan", "signals": [
+            "RMII_TXD0","RMII_TXD1","RMII_TX_EN","RMII_RXD0","RMII_RXD1","RMII_CRS_DV","RMII_REF_CLK"],
+         "x": 382, "y_base": 325.16, "y_step": -2.54, "angle": 180, "shape": "bidirectional"},
+        {"type": "global_label_fan", "signals": ["ETH_TXP","ETH_TXN","ETH_RXP","ETH_RXN"],
+         "x": 418, "y_base": 325.16, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_label_fan", "signals": ["PHY_RST","PHY_INT"],
+         "x": 418, "y_base": 312.46, "y_step": -2.54, "angle": 0, "shape": "bidirectional"},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 418, 304.8, 0, "input"),
+            ("VCC_3V3", 418, 302.26, 0, "input"),
+            ("GND", 418, 299.72, 0, "input"),
+            ("GND", 418, 297.18, 0, "input"),
+        ]},
+        {"type": "decoupling", "x_base": 430, "y": 315, "count": 2, "x_step": 7, "vcc_label": "VCC_3V3"},
+
+        {"type": "symbol", "model": "power_conn", "ref": "J1", "value": "RJ45 MagJack PoE", "x": 450, "y": 315},
+        {"type": "global_labels", "labels": [
+            ("VCC_48V_POE", 460, 317.54, 0, "output"),
+            ("GND", 460, 312.46, 0, "input"),
+        ]},
+
+        {"type": "symbol", "model": "tps2379", "ref": "U18", "value": "TPS2379 PoE PD 25W", "x": 450, "y": 345},
+        {"type": "global_labels", "labels": [
+            ("VCC_48V_POE", 437, 350.08, 180, "input"),
+            ("GND", 437, 339.92, 180, "input"),
+        ]},
+        {"type": "decoupling", "x_base": 470, "y": 345, "count": 1, "x_step": 7, "vcc_label": "VCC_48V_POE"},
+
+        # Section 5: Power Supply
+        {"type": "text", "text": "Section 5: Power Supply -- PoE 48V -> 3.3V + 1.0V + 5V -> 1.8V",
+         "x": 200, "y": 900, "size": 2.0},
+
+        {"type": "symbol", "model": "polyfuse", "ref": "F1", "value": "1A Polyfuse", "x": 100, "y": 922},
+        {"type": "global_labels", "labels": [
+            ("VCC_48V_POE", 92, 922, 180, "output"),
+            ("VCC_48V_FUSED", 108, 922, 0, "output"),
+        ]},
+
+        {"type": "regulator_block", "model": "tps54560", "ref": "U19", "value": "TPS54560 48V->3.3V/5A",
+         "x": 160, "y": 930,
+         "globals": [
+             ("VCC_48V_FUSED", 145, 937.62, 180, "input"),
+             ("VCC_3V3", 175, 937.62, 0, "output"),
+             ("GND", 175, 924.92, 0, "input"),
+         ],
+         "caps": [
+             ("cap", 182, 930, ("VCC_3V3", 182, 932.54, 0, "input"), ("GND", 182, 927.46, 0, "input")),
+             ("cap_0805", 189, 930, ("VCC_3V3", 189, 932.54, 0, "input"), ("GND", 189, 927.46, 0, "input")),
+         ]},
+        {"type": "symbol", "model": "inductor", "ref": "L1", "value": "4.7uH", "x": 175, "y": 940},
+
+        {"type": "regulator_block", "model": "tps54560", "ref": "U20", "value": "TPS54560 48V->1.0V/2A (FPGA Core)",
+         "x": 280, "y": 930,
+         "globals": [
+             ("VCC_48V_FUSED", 265, 937.62, 180, "input"),
+             ("VCC_1V0", 295, 937.62, 0, "output"),
+             ("GND", 295, 924.92, 0, "input"),
+         ],
+         "caps": [
+             ("cap", 302, 930, ("VCC_1V0", 302, 932.54, 0, "input"), ("GND", 302, 927.46, 0, "input")),
+             ("cap_0805", 309, 930, ("VCC_1V0", 309, 932.54, 0, "input"), ("GND", 309, 927.46, 0, "input")),
+         ]},
+        {"type": "symbol", "model": "inductor", "ref": "L2", "value": "4.7uH", "x": 295, "y": 940},
+
+        {"type": "regulator_block", "model": "tps54560", "ref": "U21", "value": "TPS54560 48V->5V/2A (Fan)",
+         "x": 400, "y": 930,
+         "globals": [
+             ("VCC_48V_FUSED", 385, 937.62, 180, "input"),
+             ("VCC_5V", 415, 937.62, 0, "output"),
+             ("GND", 415, 924.92, 0, "input"),
+         ],
+         "caps": [
+             ("cap", 422, 930, ("VCC_5V", 422, 932.54, 0, "input"), ("GND", 422, 927.46, 0, "input")),
+             ("cap_0805", 429, 930, ("VCC_5V", 429, 932.54, 0, "input"), ("GND", 429, 927.46, 0, "input")),
+         ]},
+        {"type": "symbol", "model": "inductor", "ref": "L3", "value": "4.7uH", "x": 415, "y": 940},
+
+        {"type": "regulator_block", "model": "ap2112k", "ref": "U22", "value": "AP2112K 3.3V->1.8V (eMMC VCCQ)",
+         "x": 520, "y": 930,
+         "globals": [
+             ("VCC_3V3", 507, 932.54, 180, "input"),
+             ("GND", 507, 927.46, 180, "input"),
+             ("VCC_1V8", 533, 932.54, 0, "output"),
+         ],
+         "caps": [
+             ("cap", 540, 930, ("VCC_1V8", 540, 932.54, 0, "input"), ("GND", 540, 927.46, 0, "input")),
+         ]},
+
+        {"type": "symbol", "model": "fan_header", "ref": "J2", "value": "Fan 40mm 5V", "x": 380, "y": 950},
+        {"type": "global_labels", "labels": [
+            ("VCC_5V", 390, 952.54, 0, "input"),
+            ("GND", 390, 947.46, 0, "input"),
+        ]},
+
+        {"type": "bulk_caps", "count": 3, "model": "cap_0805", "value": "10uF",
+         "x_base": 120, "y": 960, "x_step": 15, "vcc_label": "VCC_3V3"},
+        {"type": "bulk_caps", "count": 2, "model": "cap_0805", "value": "10uF",
+         "x_base": 280, "y": 960, "x_step": 15, "vcc_label": "VCC_1V0"},
+
+        {"type": "symbol", "model": "osc_25mhz", "ref": "Y1", "value": "25MHz Oscillator", "x": 100, "y": 980},
+        {"type": "global_labels", "labels": [
+            ("VCC_3V3", 90, 982.54, 180, "input"),
+            ("GND", 90, 977.46, 180, "input"),
+            ("CLK_25MHZ", 110, 982.54, 0, "output"),
+        ]},
+
+        # Section 6: Status LEDs (6x)
+        {"type": "text", "text": "Section 6: Status LEDs (6x)", "x": 15, "y": 1000, "size": 1.5},
+        {"type": "node_led_pair", "led_ref": "D1", "led_value": "PWR_GREEN", "lx": 20, "ly": 1015,
+         "r_ref": "R1", "r_value": "330", "rx": 10, "ry": 1015},
+        {"type": "node_led_pair", "led_ref": "D2", "led_value": "SYS_BLUE", "lx": 20, "ly": 1027,
+         "r_ref": "R2", "r_value": "330", "rx": 10, "ry": 1027},
+        {"type": "node_led_pair", "led_ref": "D3", "led_value": "ERR_RED", "lx": 20, "ly": 1039,
+         "r_ref": "R3", "r_value": "330", "rx": 10, "ry": 1039},
+        {"type": "node_led_pair", "led_ref": "D4", "led_value": "NET_YELLOW", "lx": 20, "ly": 1051,
+         "r_ref": "R4", "r_value": "330", "rx": 10, "ry": 1051},
+        {"type": "node_led_pair", "led_ref": "D5", "led_value": "PIPE_ACT_GREEN", "lx": 20, "ly": 1063,
+         "r_ref": "R5", "r_value": "330", "rx": 10, "ry": 1063},
+        {"type": "node_led_pair", "led_ref": "D6", "led_value": "HX_GREEN", "lx": 20, "ly": 1075,
+         "r_ref": "R6", "r_value": "330", "rx": 10, "ry": 1075},
+
+        # Fill caps
+        {"type": "fill_caps", "model": "cap", "value": "100nF", "limit": 80, "cols": 14,
+         "x_base": 40, "y_base": 1100, "x_step": 8, "y_step": 6,
+         "start_offset": lambda idx: ((idx - 1) % 14, (idx - 1) // 14)},
+        {"type": "fill_caps", "model": "cap_0805", "value": "10uF", "limit": 120, "cols": 12,
+         "x_base": 200, "y_base": 1100, "x_step": 10, "y_step": 6,
+         "start_offset": lambda idx: ((idx - 81) % 12, (idx - 81) // 12)},
+    ],
+}
+
+# ============================================================
+# HYDRA-12 PCB DEFINITION -- 200x150mm 4-layer
+# ============================================================
+
+_h12_pcb_fps = []
+
+# RP2354B nodes U1-U4
+for i in range(4):
+    _h12_pcb_fps.append((MODELS["rp2354b"]["footprint"], f"U{1+i}", f"RP2354B N{i}", 20 + i * 22, 18))
+# W25Q128 flash U5-U8
+for i in range(4):
+    _h12_pcb_fps.append((MODELS["w25q128"]["footprint"], f"U{5+i}", f"W25Q128 N{i}", 20 + i * 22, 8))
+# eMMC U37-U38
+_h12_pcb_fps.append((MODELS["emmc"]["footprint"], "U37", "eMMC #0", 20, 32))
+_h12_pcb_fps.append((MODELS["emmc"]["footprint"], "U38", "eMMC #1", 40, 32))
+
+# 12x LIFCL-17 U9-U20
 for eng in range(12):
     row = eng // 6
     col = eng % 6
     x = 30 + col * 25
     y = 55 + row * 30
-    _pcb_footprints.append((MODELS["lifcl17"]["footprint"], f"U{9+eng}", f"LIFCL-17 DSP{eng}", x, y))
+    _h12_pcb_fps.append((MODELS["lifcl17"]["footprint"], f"U{9+eng}", f"LIFCL-17 E{eng}", x, y))
 
-# U23-U34: W25Q32 config flash for LIFCL-17 engines (nearby)
+# W25Q32 config flash U23-U34
 for eng in range(12):
     row = eng // 6
     col = eng % 6
     x = 30 + col * 25
     y = 48 + row * 30
-    _pcb_footprints.append((MODELS["w25q32"]["footprint"], f"U{23+eng}", f"W25Q32 DSP{eng}", x, y))
+    _h12_pcb_fps.append((MODELS["w25q32"]["footprint"], f"U{23+eng}", f"W25Q32 E{eng}", x, y))
 
-# R-2R ladder resistor networks between LIFCL-17 stages (footprint placeholders)
-for ladder in range(11):
-    row = ladder // 6
-    col = ladder % 6
-    rx = 42 + col * 25
-    ry = 62 + row * 30
-    # Each ladder is 16 discrete 0402 resistors
-    for rr in range(16):
-        r_num = 9 + ladder * 16 + rr
-        _pcb_footprints.append((MODELS["resistor"]["footprint"], f"R{r_num}",
-                                "10k" if rr % 2 == 0 else "20k", rx - 3 + (rr % 4) * 2, ry - 2 + (rr // 4) * 1.5))
+# iCE40HX4K U21-U22
+_h12_pcb_fps.append((MODELS["ice40hx4k"]["footprint"], "U21", "iCE40HX4K-A", 12, 65))
+_h12_pcb_fps.append((MODELS["ice40hx4k"]["footprint"], "U22", "iCE40HX4K-B", 12, 95))
+# HX config flash U35-U36
+_h12_pcb_fps.append((MODELS["w25q32"]["footprint"], "U35", "W25Q32 HX-A", 12, 55))
+_h12_pcb_fps.append((MODELS["w25q32"]["footprint"], "U36", "W25Q32 HX-B", 12, 85))
 
-# Left edge: 2x iCE40HX4K
-_pcb_footprints.append((MODELS["ice40hx4k"]["footprint"], "U21", "iCE40HX4K-A", 12, 65))
-_pcb_footprints.append((MODELS["ice40hx4k"]["footprint"], "U22", "iCE40HX4K-B", 12, 95))
-# U35-U36: HX config flash
-_pcb_footprints.append((MODELS["w25q32"]["footprint"], "U35", "W25Q32 HX-A", 12, 55))
-_pcb_footprints.append((MODELS["w25q32"]["footprint"], "U36", "W25Q32 HX-B", 12, 85))
+# Networking U39, J1, U40
+_h12_pcb_fps.append((MODELS["ksz8081"]["footprint"], "U39", "KSZ8081RNA", 170, 15))
+_h12_pcb_fps.append((MODELS["power_conn"]["footprint"], "J1", "RJ45 MagJack", 188, 12))
+_h12_pcb_fps.append((MODELS["tps2379"]["footprint"], "U40", "TPS2379", 180, 25))
 
-# Top-right: KSZ8081 + RJ45 + TPS2379
-_pcb_footprints.append((MODELS["ksz8081"]["footprint"], "U39", "KSZ8081RNA", 170, 15))
-_pcb_footprints.append((MODELS["power_conn"]["footprint"], "J1", "RJ45 MagJack", 188, 12))
-_pcb_footprints.append((MODELS["tps2379"]["footprint"], "U40", "TPS2379", 180, 25))
+# Power: U41-U44, L1-L3, F1, J2
+_h12_pcb_fps.append((MODELS["tps54560"]["footprint"], "U41", "TPS54560 3.3V", 60, 138))
+_h12_pcb_fps.append((MODELS["tps54560"]["footprint"], "U42", "TPS54560 1.0V", 100, 138))
+_h12_pcb_fps.append((MODELS["tps54560"]["footprint"], "U43", "TPS54560 5V", 140, 138))
+_h12_pcb_fps.append((MODELS["ap2112k"]["footprint"], "U44", "AP2112K 1.8V", 170, 138))
+_h12_pcb_fps.append((MODELS["inductor"]["footprint"], "L1", "4.7uH", 75, 144))
+_h12_pcb_fps.append((MODELS["inductor"]["footprint"], "L2", "4.7uH", 115, 144))
+_h12_pcb_fps.append((MODELS["inductor"]["footprint"], "L3", "4.7uH", 155, 144))
+_h12_pcb_fps.append((MODELS["polyfuse"]["footprint"], "F1", "1A", 40, 144))
+_h12_pcb_fps.append((MODELS["fan_header"]["footprint"], "J2", "Fan 40mm", 190, 144))
 
-# Bottom: Power supply, fan header
-_pcb_footprints.append((MODELS["tps54560"]["footprint"], "U41", "TPS54560 3.3V", 60, 138))
-_pcb_footprints.append((MODELS["tps54560"]["footprint"], "U42", "TPS54560 5V Fan", 100, 138))
-_pcb_footprints.append((MODELS["ap2112k"]["footprint"], "U43", "AP2112K 1.8V", 140, 138))
-_pcb_footprints.append((MODELS["inductor"]["footprint"], "L1", "4.7uH", 75, 144))
-_pcb_footprints.append((MODELS["inductor"]["footprint"], "L2", "4.7uH", 115, 144))
-_pcb_footprints.append((MODELS["polyfuse"]["footprint"], "F1", "1A", 40, 144))
-_pcb_footprints.append((MODELS["fan_header"]["footprint"], "J2", "Fan 40mm", 160, 144))
+# Y1
+_h12_pcb_fps.append((MODELS["osc_25mhz"]["footprint"], "Y1", "25MHz", 12, 110))
 
-# Y1: 25MHz oscillator
-_pcb_footprints.append((MODELS["osc_25mhz"]["footprint"], "Y1", "25MHz", 12, 110))
-
-# Right edge: LEDs
+# LEDs D1-D8 + R1-R8
 for i in range(8):
-    _pcb_footprints.append((MODELS["led"]["footprint"], f"D{i+1}", f"LED{i+1}", 195, 40 + i * 5))
-    _pcb_footprints.append((MODELS["resistor"]["footprint"], f"R{i+1}", "330", 191, 40 + i * 5))
+    _h12_pcb_fps.append((MODELS["led"]["footprint"], f"D{i+1}", f"LED{i+1}", 195, 40 + i * 5))
+    _h12_pcb_fps.append((MODELS["resistor"]["footprint"], f"R{i+1}", "330", 191, 40 + i * 5))
 
-# IC positions for decoupling cap placement
-_ic_positions = (
-    [(20 + i * 22, 18) for i in range(4)]          # RP2354B nodes
-    + [(20, 32), (40, 32)]                           # eMMC
-    + [(30 + (e % 6) * 25, 55 + (e // 6) * 30) for e in range(12)]  # LIFCL-17
-    + [(12, 65), (12, 95)]                           # HX4K-A, HX4K-B
-    + [(170, 15)]                                    # KSZ8081
-    + [(60, 138), (100, 138), (140, 138)]            # Regulators
+_h12_ic_positions = (
+    [(20 + i * 22, 18) for i in range(4)]
+    + [(20, 32), (40, 32)]
+    + [(30 + (e % 6) * 25, 55 + (e // 6) * 30) for e in range(12)]
+    + [(12, 65), (12, 95)]
+    + [(170, 15)]
+    + [(60, 138), (100, 138), (140, 138), (170, 138)]
 )
 
-NODE_PCB_DEF = {
+HYDRA_12_PCB = {
     "width": 200, "height": 150, "layers": 4,
-    "title_text": "Hydra Mesh v11.0 -- INT8 Analogue Dataflow Engine -- 200x150mm 4-layer",
+    "title_text": "Hydra Mesh v11.1 -- 12-stage Digital Pipeline -- 200x150mm 4-layer",
     "title_x": 100, "title_y": 4,
     "mounting_holes": [(4, 4), (196, 4), (4, 146), (196, 146)],
-    "footprints": _pcb_footprints,
+    "footprints": _h12_pcb_fps,
     "cap_steps": [
-        {"fn": _pcb_ic_caps, "ic_positions": _ic_positions},
+        {"fn": _pcb_ic_caps, "ic_positions": _h12_ic_positions},
         {"fn": _pcb_fill_100nf, "limit": 100},
         {"fn": _pcb_bulk_caps, "limit": 160},
     ],
 }
 
 # ============================================================
-# GENERATION FUNCTIONS (thin wrappers around engine)
+# HYDRA-4 PCB DEFINITION -- 150x100mm 4-layer
 # ============================================================
 
-def gen_dataflow_sch(output_dir):
-    run_sch_engine(NODE_BOARD, output_dir, "hydra_dataflow.kicad_sch")
+_h4_pcb_fps = []
 
-def gen_dataflow_pcb(output_dir):
-    run_pcb_engine(NODE_PCB_DEF, output_dir, "hydra_dataflow.kicad_pcb")
+# RP2354B U1-U2
+for i in range(2):
+    _h4_pcb_fps.append((MODELS["rp2354b"]["footprint"], f"U{1+i}", f"RP2354B N{i}", 20 + i * 22, 15))
+# W25Q128 flash U3-U4
+for i in range(2):
+    _h4_pcb_fps.append((MODELS["w25q128"]["footprint"], f"U{3+i}", f"W25Q128 N{i}", 20 + i * 22, 6))
+# eMMC U15-U16
+_h4_pcb_fps.append((MODELS["emmc"]["footprint"], "U15", "eMMC #0", 20, 28))
+_h4_pcb_fps.append((MODELS["emmc"]["footprint"], "U16", "eMMC #1", 40, 28))
+
+# 4x LIFCL-17 U5-U8
+for eng in range(4):
+    row = eng // 2
+    col = eng % 2
+    x = 30 + col * 30
+    y = 45 + row * 25
+    _h4_pcb_fps.append((MODELS["lifcl17"]["footprint"], f"U{5+eng}", f"LIFCL-17 E{eng}", x, y))
+
+# W25Q32 config flash U10-U13
+for eng in range(4):
+    row = eng // 2
+    col = eng % 2
+    x = 30 + col * 30
+    y = 38 + row * 25
+    _h4_pcb_fps.append((MODELS["w25q32"]["footprint"], f"U{10+eng}", f"W25Q32 E{eng}", x, y))
+
+# iCE40HX4K U9
+_h4_pcb_fps.append((MODELS["ice40hx4k"]["footprint"], "U9", "iCE40HX4K", 10, 55))
+# HX config flash U14
+_h4_pcb_fps.append((MODELS["w25q32"]["footprint"], "U14", "W25Q32 HX", 10, 45))
+
+# Networking U17, J1, U18
+_h4_pcb_fps.append((MODELS["ksz8081"]["footprint"], "U17", "KSZ8081RNA", 120, 12))
+_h4_pcb_fps.append((MODELS["power_conn"]["footprint"], "J1", "RJ45 MagJack", 138, 10))
+_h4_pcb_fps.append((MODELS["tps2379"]["footprint"], "U18", "TPS2379", 130, 22))
+
+# Power: U19-U22, L1-L3, F1, J2
+_h4_pcb_fps.append((MODELS["tps54560"]["footprint"], "U19", "TPS54560 3.3V", 40, 88))
+_h4_pcb_fps.append((MODELS["tps54560"]["footprint"], "U20", "TPS54560 1.0V", 70, 88))
+_h4_pcb_fps.append((MODELS["tps54560"]["footprint"], "U21", "TPS54560 5V", 100, 88))
+_h4_pcb_fps.append((MODELS["ap2112k"]["footprint"], "U22", "AP2112K 1.8V", 125, 88))
+_h4_pcb_fps.append((MODELS["inductor"]["footprint"], "L1", "4.7uH", 55, 94))
+_h4_pcb_fps.append((MODELS["inductor"]["footprint"], "L2", "4.7uH", 85, 94))
+_h4_pcb_fps.append((MODELS["inductor"]["footprint"], "L3", "4.7uH", 115, 94))
+_h4_pcb_fps.append((MODELS["polyfuse"]["footprint"], "F1", "1A", 20, 94))
+_h4_pcb_fps.append((MODELS["fan_header"]["footprint"], "J2", "Fan 40mm", 140, 94))
+
+# Y1
+_h4_pcb_fps.append((MODELS["osc_25mhz"]["footprint"], "Y1", "25MHz", 10, 75))
+
+# LEDs D1-D6 + R1-R6
+for i in range(6):
+    _h4_pcb_fps.append((MODELS["led"]["footprint"], f"D{i+1}", f"LED{i+1}", 145, 30 + i * 5))
+    _h4_pcb_fps.append((MODELS["resistor"]["footprint"], f"R{i+1}", "330", 141, 30 + i * 5))
+
+_h4_ic_positions = (
+    [(20 + i * 22, 15) for i in range(2)]
+    + [(20, 28), (40, 28)]
+    + [(30 + (e % 2) * 30, 45 + (e // 2) * 25) for e in range(4)]
+    + [(10, 55)]
+    + [(120, 12)]
+    + [(40, 88), (70, 88), (100, 88), (125, 88)]
+)
+
+HYDRA_4_PCB = {
+    "width": 150, "height": 100, "layers": 4,
+    "title_text": "Hydra Mesh v11.1 -- 4-stage Digital Pipeline -- 150x100mm 4-layer",
+    "title_x": 75, "title_y": 4,
+    "mounting_holes": [(4, 4), (146, 4), (4, 96), (146, 96)],
+    "footprints": _h4_pcb_fps,
+    "cap_steps": [
+        {"fn": _pcb_ic_caps, "ic_positions": _h4_ic_positions},
+        {"fn": _pcb_fill_100nf, "limit": 60},
+        {"fn": _pcb_bulk_caps, "limit": 100},
+    ],
+}
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
-    print("Hydra Mesh v11.0 -- INT8 Analogue Dataflow Engine")
-    print("Generating KiCad 8 files...\n")
+    print("Hydra Mesh v11.1 -- Pure Digital Pipeline Engine")
+    print("Generating KiCad 8 files for both variants...\n")
 
-    out_dir = os.path.join(OUTPUT_DIR, "hydra_dataflow")
-    os.makedirs(out_dir, exist_ok=True)
+    # Hydra-12
+    h12_dir = os.path.join(OUTPUT_DIR, "hydra_12")
+    os.makedirs(h12_dir, exist_ok=True)
     reset_uuids()
-    gen_dataflow_sch(out_dir)
-    gen_dataflow_pcb(out_dir)
+    gen_project("hydra_12", h12_dir)
+    run_sch_engine(HYDRA_12_BOARD, h12_dir, "hydra_12.kicad_sch")
+    run_pcb_engine(HYDRA_12_PCB, h12_dir, "hydra_12.kicad_pcb")
+
+    # Hydra-4
+    h4_dir = os.path.join(OUTPUT_DIR, "hydra_4")
+    os.makedirs(h4_dir, exist_ok=True)
+    reset_uuids()
+    gen_project("hydra_4", h4_dir)
+    run_sch_engine(HYDRA_4_BOARD, h4_dir, "hydra_4.kicad_sch")
+    run_pcb_engine(HYDRA_4_PCB, h4_dir, "hydra_4.kicad_pcb")
 
     print("\nDone! Generated files:")
-    for root, dirs, files in os.walk(out_dir):
-        for f in sorted(files):
-            fp = os.path.join(root, f)
-            print(f"  {fp}  ({os.path.getsize(fp)} bytes)")
+    for variant in ["hydra_12", "hydra_4"]:
+        vdir = os.path.join(OUTPUT_DIR, variant)
+        for root, dirs, files in os.walk(vdir):
+            for f in sorted(files):
+                fp = os.path.join(root, f)
+                print(f"  {fp}  ({os.path.getsize(fp)} bytes)")
+
 
 if __name__ == "__main__":
     main()
+
