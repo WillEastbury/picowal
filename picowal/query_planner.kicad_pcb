@@ -7,7 +7,7 @@
     (44 "Edge.Cuts" user))
   (setup (grid_origin 0 0)
     (pcbplotparams (layerselection 0x00010fc_ffffffff) (outputdirectory "")))
-  (gr_rect (start 0 0) (end 180 110)
+  (gr_rect (start 0 0) (end 200 120)
     (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") (uuid d485c633-de8d-57f3-9bb9-52bb0d731832))
   (footprint "Package_BGA:BGA-381_17x17mm_P0.8mm"
     (at 50 30) (layer "F.Cu") (uuid 359516fb-2fc2-5c58-9c7b-3a8dbdc8a44f)
