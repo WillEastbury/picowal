@@ -66,6 +66,10 @@ module picowal_hx_top (
     // Dual-port BRAM: read port A (rs1), read port B (rs2), write port
     // ═══════════════════════════════════════════════════════════════════
     reg  [31:0] regfile [0:127];    // 8 ctx × 16 regs = 128 entries
+    initial begin : rf_init
+        integer i;
+        for (i = 0; i < 128; i = i + 1) regfile[i] = 32'd0;
+    end
     wire [6:0]  rf_raddr1 = {ctx_id, decode_rs1};
     wire [6:0]  rf_raddr2 = {ctx_id, decode_rs2};
     wire [6:0]  rf_waddr  = {ctx_id, decode_rd};
@@ -222,7 +226,7 @@ module picowal_hx_top (
         .op_div     (is_div),
         .a          (rf_rdata1),
         .b          (alu_b),
-        .start      (sel_alu | sel_mul | sel_div),
+        .start      (alu_start_pulse),
         .result     (alu_result),
         .done       (alu_done),
         .flag_z     (flag_z),
@@ -248,6 +252,7 @@ module picowal_hx_top (
         .clk            (clk),
         .rst_n          (rst_n),
         .ctx_id         (ctx_id),
+        .advance        (ctx_done_cycle),
         .is_jump        (is_jump),
         .is_branch      (is_branch),
         .is_call        (is_call),
@@ -447,37 +452,99 @@ module picowal_hx_top (
     assign http_ctx_id   = irq_target_ctx;
 
     // ═══════════════════════════════════════════════════════════════════
-    // Execution control (simple FSM to coordinate modules)
+    // Execution control — 3-stage FSM: FETCH → READ → EXECUTE
+    // Stage 0 (FETCH): PC addresses instr_mem, decoder outputs valid combinatorially
+    // Stage 1 (READ): Register file reads latch (1-cycle BRAM latency)
+    // Stage 2 (EXECUTE): ALU/branch/etc operate on latched register data
     // ═══════════════════════════════════════════════════════════════════
 
-    // Instruction valid when scheduler has active context and not loading card
     reg  loading_card;
-    initial loading_card = 1'b0;  // not loading at startup
-    assign instr_valid = ctx_valid & ~loading_card & ~alu_busy & ~pipe_busy;
+    initial loading_card = 1'b0;
 
-    // Cycle complete: advance scheduler when instruction finishes
-    assign ctx_done_cycle = (sel_alu & alu_done) |
-                            (sel_flow & pc_update) |
-                            (sel_sched) |
-                            (sel_http) |
-                            (is_noop & ~is_http_ctrl);
+    localparam EX_FETCH   = 2'd0;
+    localparam EX_READ    = 2'd1;
+    localparam EX_EXECUTE = 2'd2;
+    localparam EX_RETIRE  = 2'd3;
 
-    // WAIT/RAISE/FORK/JOIN signals to scheduler
-    assign cmd_wait     = is_wait & ~is_join;
-    assign cmd_raise    = is_raise & ~is_fork;
-    assign cmd_fork     = is_fork;
-    assign cmd_join     = is_join;
+    reg [1:0] exec_state;
+    initial exec_state = EX_FETCH;
+
+    // instr_valid gates the decoder — high during READ and EXECUTE
+    assign instr_valid = ctx_valid & ~loading_card & ~alu_busy & ~pipe_busy
+                         & (exec_state == EX_READ || exec_state == EX_EXECUTE);
+
+    // ALU start only fires once at the beginning of EXECUTE stage
+    reg alu_started;
+    initial alu_started = 1'b0;
+    wire alu_start_pulse = (sel_alu | sel_mul | sel_div) & (exec_state == EX_EXECUTE) & ~alu_started;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            alu_started <= 1'b0;
+        else if (exec_state == EX_EXECUTE && (sel_alu | sel_mul | sel_div))
+            alu_started <= 1'b1;
+        else if (exec_state != EX_EXECUTE)
+            alu_started <= 1'b0;
+    end
+
+    // Cycle complete: instruction finished this cycle
+    wire exec_complete = (exec_state == EX_EXECUTE) & (
+        ((sel_alu | sel_mul | sel_div) & alu_done) |
+        sel_flow |
+        sel_sched |
+        sel_http |
+        (is_noop & ~is_http_ctrl) |
+        (sel_mem & sram_done) |
+        sel_pipe
+    );
+
+    assign ctx_done_cycle = exec_complete;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            exec_state <= EX_FETCH;
+        end else begin
+            case (exec_state)
+                EX_FETCH: begin
+                    // Wait for valid context
+                    if (ctx_valid & ~loading_card)
+                        exec_state <= EX_READ;
+                end
+                EX_READ: begin
+                    // Register file outputs will be valid next cycle
+                    exec_state <= EX_EXECUTE;
+                end
+                EX_EXECUTE: begin
+                    if (exec_complete)
+                        exec_state <= EX_RETIRE;
+                    // Multi-cycle ops (MUL/DIV/PIPE): stay here until done
+                end
+                EX_RETIRE: begin
+                    // Wait for PC update from branch unit, then fetch next
+                    if (pc_update)
+                        exec_state <= EX_FETCH;
+                end
+            endcase
+        end
+    end
+
+    // WAIT/RAISE/FORK/JOIN signals to scheduler (only during EXECUTE)
+    wire in_execute = (exec_state == EX_EXECUTE);
+    assign cmd_wait     = is_wait & ~is_join & in_execute;
+    assign cmd_raise    = is_raise & ~is_fork & in_execute;
+    assign cmd_fork     = is_fork & in_execute;
+    assign cmd_join     = is_join & in_execute;
     assign wait_mask    = decode_imm16[3:0];
     assign raise_channel = decode_imm16[3:0];
     assign raise_target = decode_rs1[2:0];
     assign fork_count   = decode_imm16[2:0];
 
-    // PIPE start signal
-    assign pipe_start = is_pipe & instr_valid;
+    // PIPE start signal (only during EXECUTE)
+    assign pipe_start = is_pipe & in_execute & ~alu_started;
 
     // SRAM arbitration (PIPE gets priority when active)
-    assign sram_cmd_read  = pipe_busy ? pipe_sram_read : (is_load & instr_valid);
-    assign sram_cmd_write = is_save & instr_valid & ~pipe_busy;
+    assign sram_cmd_read  = pipe_busy ? pipe_sram_read : (is_load & in_execute & ~alu_started);
+    assign sram_cmd_write = is_save & in_execute & ~pipe_busy & ~alu_started;
     assign sram_cmd_addr  = pipe_busy ? pipe_sram_addr : {2'b00, decode_imm16};
     assign sram_cmd_wdata = rf_rdata1[15:0];
     assign sram_burst     = pipe_busy;

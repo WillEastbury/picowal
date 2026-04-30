@@ -14,6 +14,9 @@ module picoscript_branch (
     // Current context
     input  wire [2:0]  ctx_id,
 
+    // Advance signal: only update PC when instruction completes
+    input  wire        advance,
+
     // Instruction decode inputs
     input  wire        is_jump,
     input  wire        is_branch,
@@ -39,7 +42,7 @@ module picoscript_branch (
     // Hardware FOR state
     input  wire [31:0] for_counter,     // current loop counter
     input  wire [31:0] for_limit,       // loop limit
-    output reg         for_done,        // loop exhausted
+    output wire        for_done,        // loop exhausted
 
     // Program counter output
     output reg  [15:0] pc_card,         // current card ID
@@ -83,9 +86,7 @@ module picoscript_branch (
     end
 
     // ─── Hardware FOR: compare counter vs limit ──────────────────────
-    always @(*) begin
-        for_done = (for_counter >= for_limit);
-    end
+    assign for_done = (for_counter >= for_limit);
 
     // ─── Main logic ──────────────────────────────────────────────────
     wire [5:0] stack_addr = {ctx_id, stack_ptr[ctx_id]};
@@ -96,7 +97,6 @@ module picoscript_branch (
             need_card_load  <= 1'b0;
             stack_overflow  <= 1'b0;
             stack_underflow <= 1'b0;
-            for_done        <= 1'b0;
             begin : rst_loop
                 integer i;
                 for (i = 0; i < 8; i = i + 1) begin
@@ -111,9 +111,12 @@ module picoscript_branch (
             stack_overflow  <= 1'b0;
             stack_underflow <= 1'b0;
 
-            // Output current PC
+            // Output current PC (always visible)
             pc_card <= ctx_card[ctx_id];
             pc_ip   <= ctx_ip[ctx_id];
+
+            // Only update PC when advance is asserted
+            if (advance) begin
 
             // ─── JUMP (unconditional) ────────────────────────────────
             if (is_jump & ~is_switch) begin
@@ -211,6 +214,8 @@ module picoscript_branch (
                 ctx_ip[ctx_id] <= ctx_ip[ctx_id] + 7'd1;
                 pc_update      <= 1'b1;
             end
+
+            end // if (advance)
         end
     end
 

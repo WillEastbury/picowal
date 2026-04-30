@@ -102,7 +102,7 @@ module tb_picowal;
 
         // Check LED7 = PLL locked
         if (leds[7] !== 1'b1) begin
-            $display("FAIL: PLL not locked after 100ns");
+            $display("FAIL: PLL not locked after 50ns");
             $finish;
         end
         $display("PASS: PLL locked, LED7=1");
@@ -115,27 +115,52 @@ module tb_picowal;
         end
         $display("PASS: Scheduler active, LED6=1");
 
-        // Let it run for a while to exercise execution
-        #5000;
+        // Let instructions execute (3 cycles per instruction × 3 instructions = 9 cycles minimum)
+        // Plus pipeline overhead. Wait 2000ns (200 cycles) to be safe.
+        #2000;
+
+        // Check R0 = 42 (from ADD R0, R0, 42)
+        if (dut.regfile[0] !== 32'd42) begin
+            $display("FAIL: R0 = %0d, expected 42", dut.regfile[0]);
+            $display("  exec_state=%0d, pc_ip=%0d", dut.exec_state, dut.pc_ip);
+            $finish;
+        end
+        $display("PASS: R0 = 42 (ADD R0, R0, 42 executed correctly)");
+
+        // Check R1 = 43 (from ADD R1, R0, 1)
+        if (dut.regfile[1] !== 32'd43) begin
+            $display("FAIL: R1 = %0d, expected 43", dut.regfile[1]);
+            $finish;
+        end
+        $display("PASS: R1 = 43 (ADD R1, R0, 1 executed correctly)");
+
+        // Check R2 = 33 (from SUB R2, R1, 10)
+        if (dut.regfile[2] !== 32'd33) begin
+            $display("FAIL: R2 = %0d, expected 33", dut.regfile[2]);
+            $finish;
+        end
+        $display("PASS: R2 = 33 (SUB R2, R1, 10 executed correctly)");
 
         // Check no stack errors
         if (leds[1] | leds[0]) begin
             $display("FAIL: Stack error detected (LEDs[1:0]=%b)", leds[1:0]);
             $finish;
         end
-        $display("PASS: No stack errors after 5000ns");
+        $display("PASS: No stack errors");
 
         $display("");
-        $display("═══════════════════════════════════════════");
-        $display(" ALL TESTS PASSED — PicoWAL boots cleanly");
-        $display("═══════════════════════════════════════════");
+        $display("═══════════════════════════════════════════════");
+        $display(" ALL TESTS PASSED — PicoWAL executes correctly");
+        $display("═══════════════════════════════════════════════");
         $finish;
     end
 
     // Timeout
     initial begin
-        #20000;
-        $display("TIMEOUT at 20us");
+        #50000;
+        $display("TIMEOUT at 50us");
+        $display("  exec_state=%0d, pc_ip=%0d, ctx_valid=%b", dut.exec_state, dut.pc_ip, dut.ctx_valid);
+        $display("  R0=%0d, R1=%0d, R2=%0d", dut.regfile[0], dut.regfile[1], dut.regfile[2]);
         $finish;
     end
 
