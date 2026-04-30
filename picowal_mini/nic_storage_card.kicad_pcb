@@ -1,0 +1,16 @@
+(kicad_pcb
+  (version 20231014)
+  (generator "picowal_mini_gen")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (36 "B.SilkS" user)
+    (37 "F.SilkS" user)
+    (44 "Edge.Cuts" user)
+  )
+  (gr_rect (start 0 0) (end 22 42) (layer "Edge.Cuts") (width 0.1) (uuid "d6a89c20-2b11-5df6-9efa-7d81c066fb72"))
+)

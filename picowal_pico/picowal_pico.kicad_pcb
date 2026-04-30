@@ -1,0 +1,55 @@
+(kicad_pcb
+  (version 20231014)
+  (generator "picowal_pico_gen")
+  (general
+    (thickness 1.6)
+    (pcbplotparams)
+  )
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (36 "B.SilkS" user)
+    (37 "F.SilkS" user)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (grid_origin 0 0)
+  )
+  (gr_rect (start 0 0) (end 40 30) (layer "Edge.Cuts") (width 0.1) (uuid "f81a6e4f-b0c1-5566-b1f4-9db6fb305226"))
+  (footprint "QFN-60"
+    (at 20 15)
+    (uuid "4f45f182-2d95-5f56-a7db-d49e2a1562b7")
+    (property "Reference" "U1" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "QFP-48"
+    (at 8 8)
+    (uuid "80836bdc-4801-542b-ad20-72067b7410d6")
+    (property "Reference" "U2" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "SOP-8"
+    (at 32 8)
+    (uuid "e53e3eb3-175e-5131-b97f-e28c23ceaf6b")
+    (property "Reference" "U3" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "SOIC-8"
+    (at 32 22)
+    (uuid "875749a3-e9b5-5de7-8fa9-010330faa14c")
+    (property "Reference" "U4" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "USB-C"
+    (at 20 28)
+    (uuid "031f9d68-a2c0-508c-864e-3a6db9506ae1")
+    (property "Reference" "J1" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "RJ45"
+    (at 2 20)
+    (uuid "e12a4e7a-360b-53ba-872f-66c2c7614551")
+    (property "Reference" "J2" (at 0 -2 0) (layer "F.SilkS"))
+  )
+  (footprint "SD"
+    (at 38 15)
+    (uuid "1be8c63e-71f8-5c7f-8eeb-0895226b8e45")
+    (property "Reference" "J3" (at 0 -2 0) (layer "F.SilkS"))
+  )
+)

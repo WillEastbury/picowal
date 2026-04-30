@@ -1,0 +1,25 @@
+(kicad_sch
+  (version 20231120)
+  (generator "picowal_midi_gen")
+  (uuid "dc425873-5234-5ab8-8047-bad035c0636e")
+  (paper "A4")
+  (title_block
+    (title "PicoWAL Midi NIC Card")
+    (rev "1.0")
+    (comment 1 "M.2 Key-E 2242, RTL8221B 2.5GbE")
+  )
+  (symbol
+    (lib_id "RTL8221B")
+    (at 50 50)
+    (uuid "9a6e6888-c524-59f9-ae43-863b722ed540")
+    (property "Reference" "U1" (at 50 47 0))
+    (property "Value" "RTL8221B" (at 50 53 0))
+  )
+  (symbol
+    (lib_id "25MHz")
+    (at 90 50)
+    (uuid "93bbae61-0faf-54e4-8075-3b1a6a16868c")
+    (property "Reference" "Y1" (at 90 47 0))
+    (property "Value" "25MHz" (at 90 53 0))
+  )
+)
