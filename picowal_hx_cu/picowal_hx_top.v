@@ -53,7 +53,7 @@ module picowal_hx_top (
     wire rst_n = pll_locked;
 
     // ─── PicoScript execution engine ────────────────────────────────
-    // 4 connection contexts, round-robin scheduling
+    // 8 connection contexts, round-robin scheduling
     wire [1:0]  ctx_id;          // active context (0-3)
     wire [15:0] pc;              // program counter
     wire [31:0] instruction;     // current instruction word

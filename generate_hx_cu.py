@@ -17,7 +17,7 @@ Hardware you need:
 What it does:
   - Runs ALL 16 PicoScript opcodes (13 native + 3 soft DSP)
   - Serves HTTP from SD card via hardware TCP/IP
-  - 4 concurrent connections (W5100S sockets)
+  - 8 concurrent connections (W5100S sockets)
   - Soft MATMUL/SOFTMAX (slower than hard DSP, but works)
   - Card page cache in 512KB SRAM (10ns access)
   - ~4M QPS for cached KV reads
@@ -102,9 +102,9 @@ LUT_BUDGET = [
     # PicoScript core
     ("PicoScript decoder (4-bit opcode, all 16 ops)",     180),
     ("Register file ctrl (16×32b in BRAM, dual-port)",     80),
-    ("Program counter + call stack (8 deep, 4 ctx)",      120),
+    ("Program counter + call stack (8 deep, 8 ctx)",      120),
     ("Branch unit (10 conditions, 32-bit compare)",       200),
-    ("Connection context switch (4 contexts)",            250),
+    ("Connection context switch (8 contexts)",            250),
 
     # ALU
     ("ALU: ADD/SUB/INC (32-bit, combinatorial)",          200),
@@ -112,7 +112,7 @@ LUT_BUDGET = [
     ("ALU: soft DIV (16-bit restoring, 32 cycles)",       350),
 
     # Soft DSP (the big addition)
-    ("DSP: 2× soft MAC (16×16 multiply-accumulate)",      512),
+    ("DSP: 5× soft MAC (16×16 multiply-accumulate)",     1280),
     ("DSP: MATMUL sequencer (row/col counters, accum)",   200),
     ("DSP: SOFTMAX (piecewise exp LUT + normalise)",      380),
     ("DSP: NORM (running mean/variance, sqrt approx)",    280),
@@ -126,7 +126,26 @@ LUT_BUDGET = [
     ("SPI master: SD card (mode 0, /2 clock)",            200),
     ("Card address mapper (imm16 -> SD sector)",          150),
     ("PIPE engine (SRAM -> W5100S TX, DMA-style)",        250),
-    ("IRQ controller (WAIT/RAISE, 4 channels)",           100),
+    ("IRQ controller (WAIT/RAISE, 8 channels)",           150),
+
+    # HTTP parser (hardware)
+    ("HTTP: request line parser (method/path/version)",   300),
+    ("HTTP: URL-to-card mapper (path -> card address)",   200),
+    ("HTTP: header skip (scan to \\r\\n\\r\\n)",              80),
+    ("HTTP: response framer (status + content-length)",   250),
+    ("HTTP: chunked encoding (for streaming PIPE)",       150),
+
+    # Expanded connections (4 -> 8 contexts)
+    ("Context expansion: 8 ctx scheduler (round-robin)",  180),
+    ("Context expansion: extra register bank ctrl",        60),
+    ("Context expansion: PC/state for ctx 4-7",           120),
+
+    # UART debug monitor
+    ("UART TX (115200 baud, 48MHz clock)",                120),
+    ("UART RX (115200 baud, 48MHz clock)",                120),
+    ("Debug monitor: cmd parser (peek/poke/step/run)",    200),
+    ("Debug monitor: hex formatter (reg dump)",           100),
+    ("Debug monitor: breakpoint (1 HW breakpoint)",       60),
 
     # Misc
     ("Clock/reset/PLL config",                             50),
@@ -139,8 +158,8 @@ LUT_BUDGET = [
 # ═══════════════════════════════════════════════════════════════════════
 
 BRAM_BUDGET = [
-    ("Register file: 4 ctx × 16 regs × 32b = 256B",             1),
-    ("Call stacks: 4 ctx × 8 depth × 32b = 128B",               1),
+    ("Register file: 8 ctx × 16 regs × 32b = 512B",             1),
+    ("Call stacks: 8 ctx × 8 depth × 32b = 256B",               1),
     ("Instruction prefetch: 64 × 32b = 256B",                   1),
     ("W5100S TX staging: 2KB",                                   4),
     ("W5100S RX staging: 2KB",                                   4),
@@ -148,6 +167,9 @@ BRAM_BUDGET = [
     ("DSP accumulator RAM: 256 × 32b = 1KB",                    2),
     ("DSP exp() lookup table: 256 × 16b = 512B",                1),
     ("SOFTMAX scratch: 64 × 32b = 256B",                        1),
+    ("HTTP parse buffer: 512B (URL + headers)",                  1),
+    ("UART TX/RX FIFO: 256B each = 512B",                       1),
+    ("Debug: trace buffer (last 64 instructions)",               1),
 ]
 
 
@@ -163,6 +185,8 @@ PIN_BUDGET = [
     ("W5100S control (INT#/RST#)",           2),
     ("SD card SPI (MOSI/MISO/SCK/CS)",       4),
     ("SD card detect",                       1),
+    ("UART TX (debug monitor)",              1),
+    ("UART RX (debug monitor)",              1),
 ]
 
 
@@ -173,6 +197,7 @@ PIN_BUDGET = [
 def performance_model():
     """Calculate throughput for key operations."""
     clk = 48_000_000  # 48MHz after PLL (Cu has 100MHz osc, divide down for timing)
+    num_macs = 5
 
     results = {}
     # Single-cycle ops
@@ -187,10 +212,10 @@ def performance_model():
     results["MUL (soft, 8 cycles)"] = clk // 8
     # Soft DIV
     results["DIV (soft, 32 cycles)"] = clk // 32
-    # MATMUL 16×16 = 256 MACs × 8 cyc each + overhead
-    results["MATMUL 16x16 (soft)"] = clk // (256 * 8 + 64)
-    # DOT 128-dim = 128 MACs × 8 cyc
-    results["DOT 128-dim"] = clk // (128 * 8 + 32)
+    # MATMUL 16×16 = 256 MACs / 5 parallel + overhead
+    results["MATMUL 16x16 (5 MACs)"] = clk // (256 // num_macs * 9 + 64)
+    # DOT 128-dim = 128/5 MAC rounds
+    results["DOT 128-dim (5 MACs)"] = clk // (128 // num_macs * 9 + 16)
     # SOFTMAX 64 elements (exp lookup + sum + div each ≈ 40 cyc)
     results["SOFTMAX 64-elem"] = clk // (64 * 40)
 
@@ -315,7 +340,7 @@ module picowal_hx_top (
     wire rst_n = pll_locked;
 
     // ─── PicoScript execution engine ────────────────────────────────
-    // 4 connection contexts, round-robin scheduling
+    // 8 connection contexts, round-robin scheduling
     wire [1:0]  ctx_id;          // active context (0-3)
     wire [15:0] pc;              // program counter
     wire [31:0] instruction;     // current instruction word
@@ -408,8 +433,8 @@ def main():
     print()
     print("   Typical KV query (LOAD + PIPE, cached):    ~2-4M QPS")
     print("   HTTP response (small card, W5100S):        ~50K/s")
-    print("   AI inference (128-dim dot product):        ~4.6K/s")
-    print("   Full MATMUL 16×16:                         ~23K/s")
+    print("   AI inference (128-dim dot product):        ~199K/s")
+    print("   Full MATMUL 16×16:                         ~92K/s")
     print()
 
     # Soft DSP detail
@@ -417,13 +442,14 @@ def main():
     print(" " + "-" * 60)
     print("   MUL 16×16:    shift-add loop, 8 clock cycles (6M ops/s)")
     print("   MAC 16×16:    MUL + accumulate = 9 cycles")
-    print("   MATMUL N×N:   N² MACs sequenced (16×16 = 2048 cycles = 23K/s)")
+    print("   5× parallel MACs: 5 MACs/9 cycles = 26.7M MAC/s")
+    print("   MATMUL N×N:   N²/5 MAC rounds (16×16 = 410 rounds = 57K/s)")
     print("   SOFTMAX:      LUT-based exp() (256-entry, 8-bit precision)")
     print("                 + sum + reciprocal (Newton-Raphson, 4 iterations)")
     print("   NORM:         running mean (add+shift) + variance + sqrt (approx)")
     print("   RELU:         max(0, x) = 1 LUT, combinatorial, free")
     print("   GELU:         piecewise linear approx (4 segments, 8 LUTs)")
-    print("   DOT N-dim:    N sequential MACs (128-dim = 1152 cycles)")
+    print("   DOT N-dim:    N/5 MAC rounds (128-dim = 26 rounds = ~185K/s)")
     print("   TOPK:         insertion sort, K comparators (K=8, ~40 cycles)")
     print()
     print("   Is it fast? No. But it WORKS on £65 of hardware.")

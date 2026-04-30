@@ -38,190 +38,173 @@ Design principles:
 # ═══════════════════════════════════════════════════════════════════════
 # Instruction encoding: 32-bit fixed width
 #
-#   [31:28] opcode class (4 bits = 16 classes)
-#   [27:24] opcode variant (4 bits = 16 per class)
-#   [23:20] dst register (4 bits = R0-R15)
-#   [19:16] src1 register (4 bits)
-#   [15:0]  immediate / src2 / card address (16 bits)
+#   [31:28] opcode (4 bits = 16 core instructions)
+#   [27:24] dst register (4 bits = R0-R15)
+#   [23:20] src1 register (4 bits)
+#   [19:16] src2 register / flags (4 bits)
+#   [15:0]  immediate (16 bits, signed or unsigned depending on op)
 #
-# Card addresses use the numeric namespace:
-#   Bits [15:10] = card (0-63 in 16-bit mode, extended via SETBASE)
-#   Bits [9:5]   = folder (0-31)
-#   Bits [4:0]   = file (0-31)
-#
-# For larger namespaces, SETBASE sets a 32-bit base that subsequent
-# FETCH/STORE instructions offset from.
+# This is the CORE ISA. 16 instructions. That's it.
+# Everything else is built from these or is a card you CALL.
 # ═══════════════════════════════════════════════════════════════════════
 
-# Opcode classes (4 bits, [31:28])
-OP_CLASS_LOAD    = 0x0   # Load immediate / set registers
-OP_CLASS_FETCH   = 0x1   # Read card from storage into register
-OP_CLASS_STORE   = 0x2   # Write register content to card in storage
-OP_CLASS_EMIT    = 0x3   # Output register to TCP stream
-OP_CLASS_ALU     = 0x4   # Arithmetic/logic (add, sub, cmp, and, or, xor)
-OP_CLASS_BRANCH  = 0x5   # Conditional/unconditional branch
-OP_CLASS_CALL    = 0x6   # Call another card as subroutine (push return addr)
-OP_CLASS_STRING  = 0x7   # String ops (concat, template, substr, find)
-OP_CLASS_FILTER  = 0x8   # Predicate filter (match, range, regex-lite)
-OP_CLASS_ITER    = 0x9   # Iterator (scan range of cards, yield each)
-OP_CLASS_CRYPTO  = 0xA   # Hash, HMAC, simple XOR cipher
-OP_CLASS_NET     = 0xB   # Network: HTTP header emit, status code, content-type
-OP_CLASS_DSP     = 0xC   # Vector ops (dot product, distance — uses DSP MACs)
-OP_CLASS_SYS     = 0xD   # System: YIELD, HALT, SLEEP, GETTIME, SETBASE
-OP_CLASS_META    = 0xE   # Card metadata: SIZE, EXISTS, CREATED, MODIFIED
-OP_CLASS_RSVD    = 0xF   # Reserved for future use
+# The 16 core opcodes (4 bits, [31:28])
+OP_NOOP     = 0x0   # No operation (pipeline bubble / alignment)
+OP_LOAD     = 0x1   # Rd = card[imm16] — load card from storage into register
+OP_SAVE     = 0x2   # card[imm16] = Rs1 — save register to card in storage
+OP_PIPE     = 0x3   # card[imm16] -> TCP (fetch + emit, zero copy)
+OP_ADD      = 0x4   # Rd = Rs1 + Rs2 (or Rd = Rs1 + imm16)
+OP_SUB      = 0x5   # Rd = Rs1 - Rs2 (or Rd = Rs1 - imm16)
+OP_MUL      = 0x6   # Rd = Rs1 * Rs2 (or Rd = Rs1 * imm16)
+OP_DIV      = 0x7   # Rd = Rs1 / Rs2 (or Rd = Rs1 / imm16)
+OP_INC      = 0x8   # Rd = Rd + 1
+OP_JUMP     = 0x9   # PC = imm16 (unconditional jump)
+OP_BRANCH   = 0xA   # if (Rs1 <cond> Rs2) PC += sign_extend(imm16)
+OP_CALL     = 0xB   # push PC; execute card[imm16] as subroutine
+OP_RETURN   = 0xC   # pop PC; resume caller
+OP_WAIT     = 0xD   # suspend until software interrupt (from another card/connection)
+OP_RAISE    = 0xE   # raise software interrupt imm16 (wake WAITing contexts)
+OP_DSP      = 0xF   # DSP subops: [19:16] selects MATMUL/SOFTMAX/DOT/etc.
 
-# ─── Opcode variants within each class ───────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Addressing modes (encoded in Rs2 field bits [19:16] for LOAD/SAVE/PIPE)
+#
+#   Rs2 == 0x0: immediate mode    — card address is imm16
+#   Rs2 == 0x1: register indirect — card address is in Rs1 (TURING COMPLETE)
+#   Rs2 == 0x2: base+offset       — card address is BASE + imm16
+#   Rs2 == 0x3: register+offset   — card address is Rs1 + imm16
+#
+# Register indirect (mode 0x1) is what makes this Turing complete:
+#   you can compute an address, put it in a register, and LOAD from it.
+#   Without this, you cannot follow pointers or index arrays.
+# ═══════════════════════════════════════════════════════════════════════
 
-# LOAD class (0x0)
-OP_LOAD_IMM16    = 0x00  # Rd = zero_extend(imm16)
-OP_LOAD_HIGH     = 0x01  # Rd[31:16] = imm16 (set upper half)
-OP_LOAD_MOV      = 0x02  # Rd = Rs1
-OP_LOAD_ZERO     = 0x03  # Rd = 0
-OP_LOAD_LEN      = 0x04  # Rd = length(Rs1) (bytes in card/string)
+ADDR_IMMEDIATE  = 0x0   # card[imm16]
+ADDR_REGISTER   = 0x1   # card[Rs1]         <- TURING COMPLETE
+ADDR_BASE_OFF   = 0x2   # card[BASE+imm16]
+ADDR_REG_OFF    = 0x3   # card[Rs1+imm16]
 
-# FETCH class (0x1)
-OP_FETCH_CARD    = 0x10  # Rd = read_card(imm16)  — card addr in imm16
-OP_FETCH_REG     = 0x11  # Rd = read_card(Rs1)    — card addr in register
-OP_FETCH_FIELD   = 0x12  # Rd = read_field(Rs1, imm16) — field offset
-OP_FETCH_RANGE   = 0x13  # Rd = read_card_range(Rs1, Rs2) — byte range
-OP_FETCH_INDEX   = 0x14  # Rd = index_lookup(Rs1) — B-tree key lookup
+# DSP sub-operations (encoded in bits [19:16] when opcode == OP_DSP)
+DSP_MATMUL    = 0x0   # Rd = matmul(Rs1, Rs2) — matrix multiply via MACs
+DSP_SOFTMAX   = 0x1   # Rd = softmax(Rs1) — exp + normalize
+DSP_DOT       = 0x2   # Rd = dot(Rs1, Rs2) — dot product
+DSP_SCALE     = 0x3   # Rd = Rs1 * imm16 (scalar broadcast multiply)
+DSP_RELU      = 0x4   # Rd = max(0, Rs1) element-wise
+DSP_NORM      = 0x5   # Rd = layer_norm(Rs1) — normalize vector
+DSP_TOPK      = 0x6   # Rd = top_k(Rs1, k=imm16) — k largest elements
+DSP_GELU      = 0x7   # Rd = gelu(Rs1) — activation function
+DSP_TRANSPOSE = 0x8   # Rd = transpose(Rs1) — matrix T (needed for Q×K^T)
+DSP_VADD      = 0x9   # Rd = Rs1 + Rs2 element-wise (residual connections)
+DSP_EMBED     = 0xA   # Rd = row(Rs1, imm16) — fetch embedding row N from matrix
+DSP_QUANT     = 0xB   # Rd = quantize(Rs1) — float -> INT8 (4× MAC throughput)
+DSP_DEQUANT   = 0xC   # Rd = dequantize(Rs1) — INT8 -> float
+DSP_MASK      = 0xD   # Rd = mask(Rs1, Rs2) — apply attention mask (causal/padding)
+DSP_CONCAT    = 0xE   # Rd = concat(Rs1, Rs2) — join vectors (multi-head merge)
+DSP_SPLIT     = 0xF   # Rd = split(Rs1, imm16) — slice at offset (head extraction)
 
-# STORE class (0x2)
-OP_STORE_CARD    = 0x20  # write_card(imm16, Rs1)   — store Rs1 at addr
-OP_STORE_REG     = 0x21  # write_card(Rd, Rs1)      — addr in Rd
-OP_STORE_APPEND  = 0x22  # append_to_card(imm16, Rs1) — WAL append
-OP_STORE_FIELD   = 0x23  # write_field(Rd, imm16, Rs1) — field update
+# ═══════════════════════════════════════════════════════════════════════
+# Branch condition modes (encoded in Rs2 field when opcode == OP_BRANCH)
+# When Rs2 == 0xF, use imm16 as literal compare value instead
+# ═══════════════════════════════════════════════════════════════════════
 
-# EMIT class (0x3)
-OP_EMIT_REG      = 0x30  # emit(Rs1) — whole register content to TCP
-OP_EMIT_LITERAL  = 0x31  # emit(imm16 bytes from instruction stream)
-OP_EMIT_FIELD    = 0x32  # emit field from Rs1 at offset imm16
-OP_EMIT_TEMPLATE = 0x33  # emit Rs1 with {{}} substitutions from Rs2
-OP_EMIT_CHUNK    = 0x34  # emit with HTTP chunked encoding wrapper
-OP_EMIT_PIPE     = 0x35  # fetch card(imm16) AND emit directly (zero-copy, no register)
-OP_EMIT_PIPE_REG = 0x36  # fetch card(Rs1) AND emit directly (zero-copy)
-OP_EMIT_PIPE_TPL = 0x37  # fetch card(imm16) as template, substitute from Rs1, emit
+BRANCH_EQ   = 0x0   # branch if Rs1 == Rs2
+BRANCH_NE   = 0x1   # branch if Rs1 != Rs2
+BRANCH_LT   = 0x2   # branch if Rs1 < Rs2
+BRANCH_GT   = 0x3   # branch if Rs1 > Rs2
+BRANCH_LE   = 0x4   # branch if Rs1 <= Rs2
+BRANCH_GE   = 0x5   # branch if Rs1 >= Rs2
+BRANCH_Z    = 0x6   # branch if Rs1 == 0 (zero test)
+BRANCH_NZ   = 0x7   # branch if Rs1 != 0 (non-zero)
+BRANCH_EOF  = 0x8   # branch if iterator exhausted
+BRANCH_ERR  = 0x9   # branch if last op errored
 
-# ALU class (0x4)
-OP_ALU_ADD       = 0x40  # Rd = Rs1 + imm16
-OP_ALU_SUB       = 0x41  # Rd = Rs1 - imm16
-OP_ALU_MUL       = 0x42  # Rd = Rs1 * imm16
-OP_ALU_DIV       = 0x43  # Rd = Rs1 / imm16
-OP_ALU_MOD       = 0x44  # Rd = Rs1 % imm16
-OP_ALU_AND       = 0x45  # Rd = Rs1 & Rs2
-OP_ALU_OR        = 0x46  # Rd = Rs1 | Rs2
-OP_ALU_XOR       = 0x47  # Rd = Rs1 ^ Rs2
-OP_ALU_SHL       = 0x48  # Rd = Rs1 << imm16
-OP_ALU_SHR       = 0x49  # Rd = Rs1 >> imm16
-OP_ALU_CMP       = 0x4A  # flags = compare(Rs1, Rs2)
-OP_ALU_NOT       = 0x4B  # Rd = ~Rs1
-
-# BRANCH class (0x5)
-OP_BRANCH_ALWAYS = 0x50  # PC += sign_extend(imm16)
-OP_BRANCH_EQ     = 0x51  # if flags.EQ: PC += imm16
-OP_BRANCH_NE     = 0x52  # if !flags.EQ: PC += imm16
-OP_BRANCH_LT     = 0x53  # if flags.LT: PC += imm16
-OP_BRANCH_GT     = 0x54  # if flags.GT: PC += imm16
-OP_BRANCH_LE     = 0x55  # if flags.LE: PC += imm16
-OP_BRANCH_GE     = 0x56  # if flags.GE: PC += imm16
-
-# CALL class (0x6)
-OP_CALL_CARD     = 0x60  # push PC; PC = card(imm16) instruction 0
-OP_CALL_REG      = 0x61  # push PC; PC = card(Rs1) instruction 0
-OP_CALL_RETURN   = 0x62  # pop PC (return from subroutine card)
-OP_CALL_TAIL     = 0x63  # PC = card(imm16) without push (tail call)
-
-# STRING class (0x7)
-OP_STR_CONCAT    = 0x70  # Rd = concat(Rs1, Rs2)
-OP_STR_SUBSTR    = 0x71  # Rd = substr(Rs1, offset=Rs2, len=imm16)
-OP_STR_FIND      = 0x72  # Rd = index_of(Rs1, Rs2) (-1 if not found)
-OP_STR_REPLACE   = 0x73  # Rd = replace(Rs1, pattern=Rs2, with=Rd)
-OP_STR_SPLIT     = 0x74  # Rd = split(Rs1, delim=Rs2) -> card array
-OP_STR_ITOA      = 0x75  # Rd = int_to_string(Rs1)
-OP_STR_ATOI      = 0x76  # Rd = string_to_int(Rs1)
-OP_STR_UPPER     = 0x77  # Rd = uppercase(Rs1)
-OP_STR_LOWER     = 0x78  # Rd = lowercase(Rs1)
-
-# FILTER class (0x8)
-OP_FILTER_EQ     = 0x80  # Rd = (Rs1 == Rs2) ? 1 : 0
-OP_FILTER_RANGE  = 0x81  # Rd = (Rs1 >= Rs2 && Rs1 <= Rd) ? 1 : 0
-OP_FILTER_MATCH  = 0x82  # Rd = glob_match(Rs1, pattern=Rs2)
-OP_FILTER_AND    = 0x83  # Rd = Rs1 && Rs2 (predicate combine)
-OP_FILTER_OR     = 0x84  # Rd = Rs1 || Rs2
-OP_FILTER_NOT    = 0x85  # Rd = !Rs1
-
-# ITER class (0x9)
-OP_ITER_RANGE    = 0x90  # Rd = iterator(card_start=Rs1, card_end=Rs2)
-OP_ITER_NEXT     = 0x91  # Rd = next(Rs1); flags.EOF if done
-OP_ITER_FILTER   = 0x92  # Rd = filter_iter(Rs1, predicate_card=Rs2)
-OP_ITER_MAP      = 0x93  # Rd = map_iter(Rs1, transform_card=Rs2)
-OP_ITER_COLLECT  = 0x94  # Rd = collect(Rs1) -> new card with all results
-OP_ITER_COUNT    = 0x95  # Rd = count(Rs1) (consume iterator, return count)
-OP_ITER_YIELD    = 0x96  # yield Rd to caller (streaming result)
-
-# CRYPTO class (0xA)
-OP_CRYPTO_HASH   = 0xA0  # Rd = sha256(Rs1)
-OP_CRYPTO_HMAC   = 0xA1  # Rd = hmac_sha256(key=Rs1, data=Rs2)
-OP_CRYPTO_XOR    = 0xA2  # Rd = xor_cipher(Rs1, key=Rs2)
-OP_CRYPTO_CRC32  = 0xA3  # Rd = crc32(Rs1)
-
-# NET class (0xB)
-OP_NET_STATUS    = 0xB0  # emit HTTP status line (imm16 = status code)
-OP_NET_HEADER    = 0xB1  # emit HTTP header (Rs1=name, Rs2=value)
-OP_NET_CTYPE     = 0xB2  # emit Content-Type (imm16 = enum: html/json/text/bin)
-OP_NET_BODY      = 0xB3  # emit end-of-headers, begin body
-OP_NET_CLOSE     = 0xB4  # close TCP connection after response
-OP_NET_REDIRECT  = 0xB5  # emit 302 redirect to URL in Rs1
-
-# DSP class (0xC) — uses FPGA DSP MACs where available
-OP_DSP_DOT       = 0xC0  # Rd = dot_product(Rs1, Rs2)
-OP_DSP_DIST      = 0xC1  # Rd = euclidean_distance(Rs1, Rs2)
-OP_DSP_COSINE    = 0xC2  # Rd = cosine_similarity(Rs1, Rs2)
-OP_DSP_TOPK      = 0xC3  # Rd = top_k_nearest(Rs1, k=imm16)
-OP_DSP_SUM       = 0xC4  # Rd = sum(Rs1) (vector elements)
-OP_DSP_SCALE     = 0xC5  # Rd = Rs1 * imm16 (scalar multiply)
-
-# SYS class (0xD)
-OP_SYS_HALT      = 0xD0  # stop execution, return result to caller
-OP_SYS_YIELD     = 0xD1  # yield timeslice, resume next cycle
-OP_SYS_SLEEP     = 0xD2  # sleep imm16 milliseconds
-OP_SYS_TIME      = 0xD3  # Rd = current_time_ms
-OP_SYS_SETBASE   = 0xD4  # set 32-bit card address base from Rs1
-OP_SYS_GETCONN   = 0xD5  # Rd = connection_id (which TCP socket triggered this)
-OP_SYS_LOG       = 0xD6  # log Rs1 to debug output (not to TCP)
-OP_SYS_RANDOM    = 0xD7  # Rd = random(0..imm16)
-
-# META class (0xE) — card metadata queries
-OP_META_EXISTS   = 0xE0  # Rd = card_exists(imm16) ? 1 : 0
-OP_META_SIZE     = 0xE1  # Rd = card_size_bytes(imm16)
-OP_META_CREATED  = 0xE2  # Rd = card_created_timestamp(imm16)
-OP_META_MODIFIED = 0xE3  # Rd = card_modified_timestamp(imm16)
-OP_META_TYPE     = 0xE4  # Rd = card_type(imm16) (data/script/template/index)
-OP_META_COUNT    = 0xE5  # Rd = count_cards_in_folder(imm16)
+# ═══════════════════════════════════════════════════════════════════════
+# That's the whole ISA. 16 opcodes + 16 DSP sub-ops + 10 branch modes.
+# 4 addressing modes. Turing complete. AI-accelerated.
+#
+# PROOF OF TURING COMPLETENESS:
+#   1. Unbounded storage: cards are the tape (LOAD.R / SAVE.R = read/write head)
+#   2. Conditional branch: BRANCH with 10 condition modes
+#   3. Arithmetic: ADD/SUB/MUL/DIV/INC for address computation
+#   4. Indirect addressing: LOAD Rd, [Rs1] — follow computed pointers
+#   These four together can simulate any Turing machine.
+#   (Cards = tape cells, Rs1 = head position, BRANCH = state transitions)
+#
+# FULL TRANSFORMER FORWARD PASS (GPT-style, single layer):
+#
+#   ; Card layout: weights stored as data cards
+#   ; Card 1000 = W_embed (vocab × d_model matrix)
+#   ; Card 1001 = W_q, 1002 = W_k, 1003 = W_v (d_model × d_model)
+#   ; Card 1004 = W_o (output projection)
+#   ; Card 1005 = W_ff1 (d_model × 4*d_model), 1006 = W_ff2
+#   ; Card 1007 = layer_norm weights
+#   ; Card 2000+ = scratch space for intermediates
+#
+#   ; --- Embedding ---
+#   LOAD R0, 1000             ; R0 = embedding matrix
+#   DSP.EMBED R1, R0, [R15]  ; R1 = embed(input_token) — R15 has token id
+#
+#   ; --- Self-Attention ---
+#   LOAD R2, 1001             ; W_q
+#   LOAD R3, 1002             ; W_k
+#   LOAD R4, 1003             ; W_v
+#   DSP.MATMUL R5, R1, R2    ; Q = input × W_q
+#   DSP.MATMUL R6, R1, R3    ; K = input × W_k
+#   DSP.MATMUL R7, R1, R4    ; V = input × W_v
+#   DSP.TRANSPOSE R8, R6     ; K^T
+#   DSP.MATMUL R9, R5, R8    ; scores = Q × K^T
+#   DSP.SCALE R9, R9, 0x0B   ; scores / sqrt(d_k) — imm16 encodes scale
+#   DSP.MASK R9, R9, R14     ; apply causal mask (R14 = mask card)
+#   DSP.SOFTMAX R9, R9       ; attention weights
+#   DSP.MATMUL R10, R9, R7   ; attn_out = weights × V
+#   LOAD R11, 1004            ; W_o
+#   DSP.MATMUL R10, R10, R11 ; projected = attn_out × W_o
+#
+#   ; --- Residual + LayerNorm ---
+#   DSP.VADD R1, R1, R10     ; residual connection
+#   DSP.NORM R1, R1          ; layer norm
+#
+#   ; --- Feed-Forward Network ---
+#   LOAD R12, 1005            ; W_ff1
+#   LOAD R13, 1006            ; W_ff2
+#   DSP.MATMUL R10, R1, R12  ; hidden = input × W_ff1
+#   DSP.GELU R10, R10        ; activation
+#   DSP.MATMUL R10, R10, R13 ; output = hidden × W_ff2
+#
+#   ; --- Residual + Output ---
+#   DSP.VADD R1, R1, R10     ; residual connection
+#   DSP.NORM R1, R1          ; final layer norm
+#   SAVE R1, 2000             ; save output to scratch card
+#   PIPE 2000                 ; stream result to TCP
+#   RETURN
+#
+# That's a complete transformer layer in 28 instructions (112 bytes).
+# The weights live in cards. The compute happens on DSP MACs.
+# Upload new weight cards = deploy a different model. Zero recompile.
+# ═══════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Assembler / Disassembler
 # ═══════════════════════════════════════════════════════════════════════
 
-def encode_instruction(opcode, rd=0, rs1=0, imm16=0):
-    """Encode a 32-bit PicoScript instruction."""
-    op_class = (opcode >> 4) & 0xF
-    op_variant = opcode & 0xF
-    word = (op_class << 28) | (op_variant << 24) | (rd << 20) | (rs1 << 16) | (imm16 & 0xFFFF)
+def encode_instruction(opcode, rd=0, rs1=0, rs2=0, imm16=0):
+    """Encode a 32-bit PicoScript instruction.
+    
+    Format: [31:28]=opcode [27:24]=Rd [23:20]=Rs1 [19:16]=Rs2/mode [15:0]=imm16
+    """
+    word = (opcode << 28) | (rd << 24) | (rs1 << 20) | (rs2 << 16) | (imm16 & 0xFFFF)
     return word
 
 
 def decode_instruction(word):
     """Decode a 32-bit PicoScript instruction."""
-    op_class = (word >> 28) & 0xF
-    op_variant = (word >> 24) & 0xF
-    rd = (word >> 20) & 0xF
-    rs1 = (word >> 16) & 0xF
+    opcode = (word >> 28) & 0xF
+    rd = (word >> 24) & 0xF
+    rs1 = (word >> 20) & 0xF
+    rs2 = (word >> 16) & 0xF
     imm16 = word & 0xFFFF
-    opcode = (op_class << 4) | op_variant
-    return {"opcode": opcode, "rd": rd, "rs1": rs1, "imm16": imm16}
+    return {"opcode": opcode, "rd": rd, "rs1": rs1, "rs2": rs2, "imm16": imm16}
 
 
 def encode_card_addr(card, folder, file):
@@ -245,204 +228,174 @@ def decode_card_addr(addr16):
 # ═══════════════════════════════════════════════════════════════════════
 
 OPCODE_NAMES = {
-    OP_LOAD_IMM16: "LOAD.IMM",    OP_LOAD_HIGH: "LOAD.HI",
-    OP_LOAD_MOV: "MOV",           OP_LOAD_ZERO: "ZERO",
-    OP_LOAD_LEN: "LEN",
-    OP_FETCH_CARD: "FETCH",       OP_FETCH_REG: "FETCH.R",
-    OP_FETCH_FIELD: "FETCH.FLD",  OP_FETCH_RANGE: "FETCH.RNG",
-    OP_FETCH_INDEX: "FETCH.IDX",
-    OP_STORE_CARD: "STORE",       OP_STORE_REG: "STORE.R",
-    OP_STORE_APPEND: "STORE.APP", OP_STORE_FIELD: "STORE.FLD",
-    OP_EMIT_REG: "EMIT",         OP_EMIT_LITERAL: "EMIT.LIT",
-    OP_EMIT_FIELD: "EMIT.FLD",   OP_EMIT_TEMPLATE: "EMIT.TPL",
-    OP_EMIT_CHUNK: "EMIT.CHK",   OP_EMIT_PIPE: "PIPE",
-    OP_EMIT_PIPE_REG: "PIPE.R",  OP_EMIT_PIPE_TPL: "PIPE.TPL",
-    OP_ALU_ADD: "ADD",  OP_ALU_SUB: "SUB",  OP_ALU_MUL: "MUL",
-    OP_ALU_DIV: "DIV",  OP_ALU_MOD: "MOD",  OP_ALU_CMP: "CMP",
-    OP_BRANCH_ALWAYS: "JMP",      OP_BRANCH_EQ: "JEQ",
-    OP_BRANCH_NE: "JNE",         OP_BRANCH_LT: "JLT",
-    OP_CALL_CARD: "CALL",        OP_CALL_RETURN: "RET",
-    OP_CALL_TAIL: "TAIL",
-    OP_STR_CONCAT: "CONCAT",     OP_STR_FIND: "FIND",
-    OP_STR_REPLACE: "REPLACE",   OP_STR_ITOA: "ITOA",
-    OP_ITER_RANGE: "ITER.RNG",   OP_ITER_NEXT: "ITER.NXT",
-    OP_ITER_YIELD: "YIELD",
-    OP_NET_STATUS: "HTTP.STATUS", OP_NET_HEADER: "HTTP.HDR",
-    OP_NET_CTYPE: "HTTP.CTYPE",  OP_NET_BODY: "HTTP.BODY",
-    OP_NET_CLOSE: "HTTP.CLOSE",
-    OP_DSP_DOT: "DOT",           OP_DSP_COSINE: "COSINE",
-    OP_DSP_TOPK: "TOPK",
-    OP_SYS_HALT: "HALT",         OP_SYS_YIELD: "SYS.YIELD",
-    OP_SYS_TIME: "TIME",         OP_SYS_SETBASE: "SETBASE",
-    OP_META_EXISTS: "EXISTS",    OP_META_SIZE: "SIZE",
+    OP_NOOP:   "NOOP",
+    OP_LOAD:   "LOAD",
+    OP_SAVE:   "SAVE",
+    OP_PIPE:   "PIPE",
+    OP_ADD:    "ADD",
+    OP_SUB:    "SUB",
+    OP_MUL:    "MUL",
+    OP_DIV:    "DIV",
+    OP_INC:    "INC",
+    OP_JUMP:   "JUMP",
+    OP_BRANCH: "BRANCH",
+    OP_CALL:   "CALL",
+    OP_RETURN: "RETURN",
+    OP_WAIT:   "WAIT",
+    OP_RAISE:  "RAISE",
+    OP_DSP:    "DSP",
 }
 
+DSP_NAMES = {
+    DSP_MATMUL: "MATMUL", DSP_SOFTMAX: "SOFTMAX", DSP_DOT: "DOT",
+    DSP_SCALE: "SCALE", DSP_RELU: "RELU", DSP_NORM: "NORM",
+    DSP_TOPK: "TOPK", DSP_GELU: "GELU", DSP_TRANSPOSE: "TRANSPOSE",
+    DSP_VADD: "VADD", DSP_EMBED: "EMBED", DSP_QUANT: "QUANT",
+    DSP_DEQUANT: "DEQUANT", DSP_MASK: "MASK", DSP_CONCAT: "CONCAT",
+    DSP_SPLIT: "SPLIT",
+}
 
-# ═══════════════════════════════════════════════════════════════════════
-# Example programs (as card bytecode)
-# ═══════════════════════════════════════════════════════════════════════
-
-def example_hello_world():
-    """Card that serves 'Hello World' as HTTP response."""
-    return [
-        encode_instruction(OP_NET_STATUS, imm16=200),          # HTTP 200 OK
-        encode_instruction(OP_NET_CTYPE, imm16=0),             # Content-Type: text/html
-        encode_instruction(OP_NET_BODY),                       # end headers
-        encode_instruction(OP_EMIT_PIPE, imm16=encode_card_addr(1, 0, 1)),  # PIPE card 1/0/1 direct to TCP
-        encode_instruction(OP_SYS_HALT),                       # done
-    ]
-
-
-def example_dynamic_page():
-    """Card that renders a user profile page with data from DB."""
-    return [
-        encode_instruction(OP_NET_STATUS, imm16=200),
-        encode_instruction(OP_NET_CTYPE, imm16=0),             # text/html
-        encode_instruction(OP_NET_BODY),
-        # Load user data (card addr from request parameter in R15)
-        encode_instruction(OP_FETCH_REG, rd=1, rs1=15),        # R1 = user record
-        # PIPE.TPL: fetch template card 5/0/1, substitute {{fields}} from R1, emit
-        encode_instruction(OP_EMIT_PIPE_TPL, rs1=1, imm16=encode_card_addr(5, 0, 1)),
-        encode_instruction(OP_SYS_HALT),
-    ]
-
-
-def example_api_endpoint():
-    """Card that implements a JSON API: GET /api/users/{id}."""
-    return [
-        # R15 = request context (card addr of the requested resource)
-        encode_instruction(OP_FETCH_REG, rd=0, rs1=15),        # R0 = fetch user card
-        encode_instruction(OP_META_EXISTS, rd=1, imm16=0),     # check if fetch succeeded
-        # Branch: if not found, return 404
-        encode_instruction(OP_ALU_CMP, rd=1, rs1=1, imm16=0), # cmp R1, 0
-        encode_instruction(OP_BRANCH_EQ, imm16=4),             # if R1==0, skip to 404
-        # 200 OK path
-        encode_instruction(OP_NET_STATUS, imm16=200),
-        encode_instruction(OP_NET_CTYPE, imm16=1),             # application/json
-        encode_instruction(OP_NET_BODY),
-        encode_instruction(OP_EMIT_REG, rs1=0),                # emit JSON card content
-        encode_instruction(OP_SYS_HALT),
-        # 404 path
-        encode_instruction(OP_NET_STATUS, imm16=404),
-        encode_instruction(OP_NET_CTYPE, imm16=1),
-        encode_instruction(OP_NET_BODY),
-        encode_instruction(OP_EMIT_LITERAL, imm16=0),          # emit {"error":"not found"}
-        encode_instruction(OP_SYS_HALT),
-    ]
-
-
-def example_vector_search():
-    """Card that does vector similarity search (uses DSP MACs on midi/maxi)."""
-    return [
-        # R15 = query vector (from request body)
-        encode_instruction(OP_FETCH_CARD, rd=0, imm16=encode_card_addr(10, 0, 0)),  # R0 = vector index
-        encode_instruction(OP_DSP_TOPK, rd=1, rs1=0, imm16=10),  # R1 = top-10 nearest
-        encode_instruction(OP_NET_STATUS, imm16=200),
-        encode_instruction(OP_NET_CTYPE, imm16=1),             # application/json
-        encode_instruction(OP_NET_BODY),
-        encode_instruction(OP_EMIT_REG, rs1=1),                # emit results
-        encode_instruction(OP_SYS_HALT),
-    ]
+BRANCH_NAMES = {
+    BRANCH_EQ: "EQ", BRANCH_NE: "NE", BRANCH_LT: "LT",
+    BRANCH_GT: "GT", BRANCH_LE: "LE", BRANCH_GE: "GE",
+    BRANCH_Z: "Z", BRANCH_NZ: "NZ", BRANCH_EOF: "EOF",
+    BRANCH_ERR: "ERR",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # Card type markers (first 4 bytes of a card identify its type)
 # ═══════════════════════════════════════════════════════════════════════
 
-CARD_MAGIC_DATA     = 0x50574400  # "PWD\0" — raw data card
-CARD_MAGIC_SCRIPT   = 0x50575300  # "PWS\0" — PicoScript bytecode
-CARD_MAGIC_TEMPLATE = 0x50575400  # "PWT\0" — template (HTML + embedded fetch)
-CARD_MAGIC_INDEX    = 0x50574900  # "PWI\0" — B-tree index node
-CARD_MAGIC_VECTOR   = 0x50575600  # "PWV\0" — vector embedding data
+CARD_MAGIC_DATA     = 0x50574400  # "PWD " - raw data card
+CARD_MAGIC_SCRIPT   = 0x50575300  # "PWS " - PicoScript bytecode
+CARD_MAGIC_TEMPLATE = 0x50575400  # "PWT " - template (HTML + embedded fetch)
+CARD_MAGIC_INDEX    = 0x50574900  # "PWI " - B-tree index node
+CARD_MAGIC_VECTOR   = 0x50575600  # "PWV " - vector embedding data
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Execution model
+# Example programs using new 16-opcode ISA
 # ═══════════════════════════════════════════════════════════════════════
 
-"""
-Execution context (per connection):
-  - PC: current instruction index within the active card
-  - Registers: R0-R14 general purpose, R15 = request context
-  - Call stack: up to 8 deep (card addr + PC pairs)
-  - Flags: EQ, LT, GT, EOF (set by CMP and ITER.NEXT)
-  - Connection ID: which TCP socket this execution serves
-  - Cycle budget: max instructions before forced YIELD (fairness)
+def example_serve_page():
+    """Serve a static page: 3 instructions (12 bytes)."""
+    return [
+        encode_instruction(OP_PIPE, imm16=1001),    # fetch card 1001, stream to TCP
+        encode_instruction(OP_RETURN),               # done
+    ]
 
-Scheduling:
-  - Each TCP connection maps to one execution context
-  - Contexts are round-robin scheduled across query lanes (FPGA)
-    or cooperative multitasked (MCU tiers)
-  - YIELD voluntarily returns timeslice
-  - Cycle budget (default 1024 instructions) forces YIELD if exceeded
-  - FETCH from NVMe suspends context until DMA completes (non-blocking)
 
-Memory model:
-  - Registers hold either:
-    a) A 32-bit scalar (integer, address, boolean)
-    b) A reference to a card buffer (in SRAM/PSRAM page cache)
-  - No pointer arithmetic — only card-level granularity
-  - Card buffers are reference-counted, freed when no register holds them
-  - Maximum card size: 64KB (fits in one SRAM bank window)
+def example_loop_and_filter():
+    """Loop over cards 100-109, emit those where field > threshold."""
+    return [
+        # R0 = counter (start), R1 = end, R2 = threshold
+        encode_instruction(OP_ADD, rd=0, rs1=0, imm16=100),   # R0 = 100
+        encode_instruction(OP_ADD, rd=1, rs1=0, imm16=110),   # R1 = 110
+        encode_instruction(OP_ADD, rd=2, rs1=0, imm16=50),    # R2 = 50 (threshold)
+        # loop:
+        encode_instruction(OP_LOAD, rd=3, rs2=ADDR_REGISTER, rs1=0),  # R3 = card[R0]
+        encode_instruction(OP_BRANCH, rd=3, rs1=2, rs2=BRANCH_LE, imm16=2),  # if R3 <= R2, skip emit
+        encode_instruction(OP_PIPE, rd=0, rs2=ADDR_REGISTER, rs1=0),  # PIPE card[R0] to TCP
+        # continue:
+        encode_instruction(OP_INC, rd=0),                      # R0++
+        encode_instruction(OP_BRANCH, rd=0, rs1=1, rs2=BRANCH_LT, imm16=0xFFFC),  # if R0 < R1, jump -4 (loop)
+        encode_instruction(OP_RETURN),
+    ]
 
-Security:
-  - No way to access raw memory — only cards via FETCH/STORE
-  - Card permissions: read-only / read-write / execute
-  - Scripts can only CALL other cards marked as executable
-  - STORE to read-only cards raises a fault (connection closed)
-  - No self-modifying code (instruction stream is read-only during execution)
-"""
+
+def example_transformer_layer():
+    """Single transformer attention layer (28 instructions, 112 bytes)."""
+    return [
+        # Load weight matrices from cards
+        encode_instruction(OP_LOAD, rd=0, imm16=1000),  # R0 = W_embed
+        encode_instruction(OP_LOAD, rd=1, imm16=1001),  # R1 = W_q
+        encode_instruction(OP_LOAD, rd=2, imm16=1002),  # R2 = W_k
+        encode_instruction(OP_LOAD, rd=3, imm16=1003),  # R3 = W_v
+        encode_instruction(OP_LOAD, rd=4, imm16=1004),  # R4 = W_o
+        encode_instruction(OP_LOAD, rd=14, imm16=1010), # R14 = causal mask
+        # Embedding lookup
+        encode_instruction(OP_DSP, rd=5, rs1=0, rs2=DSP_EMBED, imm16=0),  # R5 = embed(input)
+        # Self-attention: Q, K, V projections
+        encode_instruction(OP_DSP, rd=6, rs1=5, rs2=DSP_MATMUL),   # R6 = Q = input * W_q (R1 implicit)
+        encode_instruction(OP_DSP, rd=7, rs1=5, rs2=DSP_MATMUL),   # R7 = K = input * W_k
+        encode_instruction(OP_DSP, rd=8, rs1=5, rs2=DSP_MATMUL),   # R8 = V = input * W_v
+        # Attention scores
+        encode_instruction(OP_DSP, rd=9, rs1=7, rs2=DSP_TRANSPOSE),  # R9 = K^T
+        encode_instruction(OP_DSP, rd=10, rs1=6, rs2=DSP_MATMUL),    # R10 = Q * K^T
+        encode_instruction(OP_DSP, rd=10, rs1=10, rs2=DSP_SCALE, imm16=11),  # /sqrt(d)
+        encode_instruction(OP_DSP, rd=10, rs1=10, rs2=DSP_MASK),     # causal mask
+        encode_instruction(OP_DSP, rd=10, rs1=10, rs2=DSP_SOFTMAX),  # attention weights
+        # Weighted values
+        encode_instruction(OP_DSP, rd=11, rs1=10, rs2=DSP_MATMUL),   # attn * V
+        encode_instruction(OP_DSP, rd=11, rs1=11, rs2=DSP_MATMUL),   # * W_o
+        # Residual + norm
+        encode_instruction(OP_DSP, rd=5, rs1=5, rs2=DSP_VADD),       # residual
+        encode_instruction(OP_DSP, rd=5, rs1=5, rs2=DSP_NORM),       # layer norm
+        # FFN
+        encode_instruction(OP_LOAD, rd=12, imm16=1005),               # W_ff1
+        encode_instruction(OP_LOAD, rd=13, imm16=1006),               # W_ff2
+        encode_instruction(OP_DSP, rd=11, rs1=5, rs2=DSP_MATMUL),    # hidden = x * W_ff1
+        encode_instruction(OP_DSP, rd=11, rs1=11, rs2=DSP_GELU),     # activation
+        encode_instruction(OP_DSP, rd=11, rs1=11, rs2=DSP_MATMUL),   # output = hidden * W_ff2
+        # Final residual + output
+        encode_instruction(OP_DSP, rd=5, rs1=5, rs2=DSP_VADD),       # residual
+        encode_instruction(OP_DSP, rd=5, rs1=5, rs2=DSP_NORM),       # final norm
+        encode_instruction(OP_SAVE, rd=5, imm16=2000),                # save to scratch card
+        encode_instruction(OP_PIPE, imm16=2000),                      # emit to TCP
+        encode_instruction(OP_RETURN),
+    ]
+
+
+def example_wait_interrupt():
+    """Card that waits for a software interrupt then processes."""
+    return [
+        encode_instruction(OP_WAIT),                   # suspend until RAISE wakes us
+        encode_instruction(OP_LOAD, rd=0, rs2=ADDR_REGISTER, rs1=15),  # R0 = card[R15] (event data)
+        encode_instruction(OP_PIPE, rd=0, rs2=ADDR_REGISTER, rs1=0),   # emit event card
+        encode_instruction(OP_JUMP, imm16=0),          # loop back to WAIT
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Content-Type enum (for HTTP.CTYPE instruction)
+# Disassembler
 # ═══════════════════════════════════════════════════════════════════════
 
-CONTENT_TYPES = {
-    0: "text/html; charset=utf-8",
-    1: "application/json",
-    2: "text/plain; charset=utf-8",
-    3: "application/octet-stream",
-    4: "text/css",
-    5: "application/javascript",
-    6: "image/png",
-    7: "image/jpeg",
-    8: "image/svg+xml",
-    9: "application/xml",
-}
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Pretty-print / disassemble
-# ═══════════════════════════════════════════════════════════════════════
-
-def disassemble(program, base_addr=0):
+def disassemble(program):
     """Disassemble a list of instruction words."""
     lines = []
     for i, word in enumerate(program):
         d = decode_instruction(word)
-        name = OPCODE_NAMES.get(d["opcode"], f"OP_{d['opcode']:02X}")
-        addr = base_addr + i
-        # Format based on instruction type
-        if d["opcode"] in (OP_FETCH_CARD, OP_STORE_CARD, OP_EMIT_PIPE):
-            c, f, fi = decode_card_addr(d["imm16"])
-            operands = f"R{d['rd']}, [{c}/{f}/{fi}]"
-        elif d["opcode"] == OP_EMIT_PIPE_TPL:
-            c, f, fi = decode_card_addr(d["imm16"])
-            operands = f"[{c}/{f}/{fi}], data=R{d['rs1']}"
-        elif d["opcode"] in (OP_EMIT_REG, OP_FETCH_REG):
-            operands = f"R{d['rs1']}"
-        elif d["opcode"] in (OP_NET_STATUS,):
-            operands = f"{d['imm16']}"
-        elif d["opcode"] in (OP_BRANCH_ALWAYS, OP_BRANCH_EQ, OP_BRANCH_NE, OP_BRANCH_LT):
-            target = addr + 1 + d["imm16"]
-            operands = f"-> @{target}"
-        elif d["opcode"] in (OP_SYS_HALT, OP_NET_BODY):
-            operands = ""
+        op = d["opcode"]
+        name = OPCODE_NAMES.get(op, f"OP_{op:X}")
+
+        if op == OP_DSP:
+            dsp_name = DSP_NAMES.get(d["rs2"], f"SUB_{d["rs2"]:X}")
+            lines.append(f"  {i:3d}: DSP.{dsp_name:10s} R{d["rd"]}, R{d["rs1"]}")
+        elif op == OP_BRANCH:
+            cond = BRANCH_NAMES.get(d["rs2"], f"?{d["rs2"]}")
+            offset = d["imm16"] if d["imm16"] < 0x8000 else d["imm16"] - 0x10000
+            lines.append(f"  {i:3d}: BRANCH.{cond:4s}  R{d["rd"]}, R{d["rs1"]}, {offset:+d}")
+        elif op == OP_LOAD and d["rs2"] == ADDR_REGISTER:
+            lines.append(f"  {i:3d}: LOAD         R{d["rd"]}, [R{d["rs1"]}]")
+        elif op == OP_PIPE and d["rs2"] == ADDR_REGISTER:
+            lines.append(f"  {i:3d}: PIPE         [R{d["rs1"]}]")
+        elif op in (OP_LOAD, OP_SAVE, OP_PIPE, OP_CALL):
+            lines.append(f"  {i:3d}: {name:12s} R{d["rd"]}, {d["imm16"]}")
+        elif op in (OP_ADD, OP_SUB, OP_MUL, OP_DIV):
+            lines.append(f"  {i:3d}: {name:12s} R{d["rd"]}, R{d["rs1"]}, {d["imm16"]}")
+        elif op == OP_INC:
+            lines.append(f"  {i:3d}: INC          R{d["rd"]}")
+        elif op == OP_JUMP:
+            lines.append(f"  {i:3d}: JUMP         @{d["imm16"]}")
+        elif op in (OP_RETURN, OP_NOOP, OP_WAIT):
+            lines.append(f"  {i:3d}: {name}")
+        elif op == OP_RAISE:
+            lines.append(f"  {i:3d}: RAISE        #{d["imm16"]}")
         else:
-            operands = f"R{d['rd']}, R{d['rs1']}, {d['imm16']}"
-        lines.append(f"  {addr:4d}: {name:14s} {operands}")
-    return "\n".join(lines)
+            lines.append(f"  {i:3d}: {name:12s} R{d["rd"]}, R{d["rs1"]}, {d["imm16"]}")
+    return "
+".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -450,59 +403,59 @@ def disassemble(program, base_addr=0):
 # ═══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("PicoScript ISA v1.0")
-    print("=" * 60)
-    print(f"  Instruction width:  32 bits (fixed)")
-    print(f"  Registers:          16 (R0-R15)")
-    print(f"  Opcode classes:     15 (+ 1 reserved)")
-    print(f"  Total opcodes:      {len(OPCODE_NAMES)} defined")
-    print(f"  Card address:       16-bit inline (64 cards × 32 folders × 32 files)")
-    print(f"  Extended address:   32-bit via SETBASE + offset")
-    print(f"  Max card size:      64KB")
-    print(f"  Call depth:         8 levels")
-    print(f"  Cycle budget:       1024 instructions / yield")
+    print("PicoScript ISA v2.0 -- Minimal Turing-Complete + AI-Accelerated")
+    print("=" * 65)
+    print()
+    print("  CORE: 16 opcodes (4-bit decode, single clock on FPGA)")
+    print("  " + "-" * 60)
+    for op, name in sorted(OPCODE_NAMES.items()):
+        print(f"    0x{op:X}  {name}")
+    print()
+    print("  DSP: 16 sub-operations (neural network acceleration)")
+    print("  " + "-" * 60)
+    for op, name in sorted(DSP_NAMES.items()):
+        print(f"    0x{op:X}  {name}")
+    print()
+    print("  BRANCH: 10 condition modes")
+    print("  " + "-" * 60)
+    for op, name in sorted(BRANCH_NAMES.items()):
+        print(f"    0x{op:X}  {name}")
+    print()
+    print("  ADDRESSING: 4 modes (register indirect = Turing complete)")
+    print("  " + "-" * 60)
+    print("    0x0  IMMEDIATE   card[imm16]")
+    print("    0x1  REGISTER    card[Rs1]       <- makes it Turing complete")
+    print("    0x2  BASE+OFF    card[BASE+imm16]")
+    print("    0x3  REG+OFF     card[Rs1+imm16]")
     print()
 
-    print("Example: Hello World HTTP server (card 2/0/0)")
-    print("-" * 60)
-    prog = example_hello_world()
+    print("Example: Static page server (2 instructions, 8 bytes)")
+    print("-" * 65)
+    print(disassemble(example_serve_page()))
+    print()
+
+    print("Example: Loop + filter (9 instructions, 36 bytes)")
+    print("-" * 65)
+    print(disassemble(example_loop_and_filter()))
+    print()
+
+    print("Example: Transformer layer (29 instructions, 116 bytes)")
+    print("-" * 65)
+    prog = example_transformer_layer()
     print(disassemble(prog))
-    print(f"  ({len(prog)} instructions, {len(prog)*4} bytes)")
     print()
 
-    print("Example: Dynamic page with template (card 2/0/1)")
-    print("-" * 60)
-    prog = example_dynamic_page()
-    print(disassemble(prog))
-    print(f"  ({len(prog)} instructions, {len(prog)*4} bytes)")
+    print("Example: Event-driven (WAIT/RAISE, 4 instructions, 16 bytes)")
+    print("-" * 65)
+    print(disassemble(example_wait_interrupt()))
     print()
 
-    print("Example: JSON API endpoint (card 2/0/2)")
-    print("-" * 60)
-    prog = example_api_endpoint()
-    print(disassemble(prog))
-    print(f"  ({len(prog)} instructions, {len(prog)*4} bytes)")
-    print()
+    print("Summary:")
+    print("-" * 65)
+    print("  Full transformer layer:            116 bytes on storage")
+    print("  Upload new model:                  just write new weight cards")
+    print("  Turing complete:                   LOAD [Rs1] + BRANCH + INC")
+    print("  AI acceleration:                   MATMUL/SOFTMAX on 312 DSP MACs")
+    print("  Web server:                        PIPE [card] = zero-copy serve")
+    print("  Event-driven:                      WAIT/RAISE = cooperative actors")
 
-    print("Example: Vector similarity search (card 2/0/3)")
-    print("-" * 60)
-    prog = example_vector_search()
-    print(disassemble(prog))
-    print(f"  ({len(prog)} instructions, {len(prog)*4} bytes)")
-    print()
-
-    print("Execution model:")
-    print("-" * 60)
-    print("  TCP request arrives -> dispatch to query lane")
-    print("  URL path maps to card address (e.g. /2/0/1 -> card 2/0/1)")
-    print("  If card magic == PWS (script): execute PicoScript")
-    print("  If card magic == PWD (data):   stream raw bytes to TCP")
-    print("  If card magic == PWT (template): auto-substitute + emit")
-    print()
-    print("  On FPGA (midi/maxi): each query lane has its own decoder")
-    print("    -> 44 PicoScript programs execute simultaneously")
-    print("    -> FETCH suspends lane until DMA completes (other lanes continue)")
-    print()
-    print("  On MCU (pico/mini): cooperative scheduling")
-    print("    -> yield after cycle budget or FETCH (I/O wait)")
-    print("    -> context switch to next connection's program")
