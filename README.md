@@ -57,11 +57,16 @@ Tenant → Pack → Card
 
 ### Storage Hierarchy
 
-| Tier | Medium | Capacity | Latency |
-|------|--------|----------|---------|
-| L0 | BRAM (on-chip) | 4KB | 1 cycle |
-| L1 | QSPI SRAM | 128KB-1MB | ~200ns |
-| L2 | SD Card | 2-32GB | ~48,000 cycles |
+| Tier | Medium | Capacity | Latency | Bandwidth | Cost | Required |
+|------|--------|----------|---------|-----------|------|----------|
+| L0 | BRAM (on-chip) | 4KB | 1 cycle | — | — | Yes |
+| L1 | QSPI SRAM | 128KB-1MB | ~200ns | ~6MB/s | £1.50 | Yes |
+| L2 | eMMC (4-bit) | 4-32GB | ~100µs | ~24MB/s | £3-8 | **Optional** |
+| L3 | SD Card (SPI) | 2-32GB | ~1ms | ~4MB/s | £3-8 | Yes |
+
+**eMMC auto-detection:** A detect pin (pulled HIGH via 10K resistor) is grounded by the eMMC module when present. At boot, the FPGA samples this pin — if LOW, the L2 tier is enabled and the eMMC is initialised. If HIGH, L2 is skipped and SRAM talks directly to SD.
+
+Cache policy: LRU eviction, write-back. Reads cascade L1→L2→L3. Writes hit L1 immediately, write-back on eviction.
 
 ---
 

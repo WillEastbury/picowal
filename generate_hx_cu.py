@@ -187,6 +187,11 @@ PIN_BUDGET = [
     ("SD card detect",                       1),
     ("UART TX (debug monitor)",              1),
     ("UART RX (debug monitor)",              1),
+    # Optional eMMC (L2 cache tier, auto-detected)
+    ("eMMC CLK",                             1),
+    ("eMMC CMD",                             1),
+    ("eMMC DAT[3:0]",                        4),
+    ("eMMC detect# (pulled HIGH, module grounds)", 1),
 ]
 
 
@@ -271,19 +276,95 @@ WIRING_GUIDE = """
    Total current: FPGA(~70mA) + SRAM(30mA) + W5100S(130mA) + SD(50mA)
                 = ~280mA @ 3.3V = 0.92W (well within USB 500mA @ 5V)
 
- Header D (all 20 pins spare)
+ Header D (20 pins: UART + optional eMMC + spare)
  ───────────────────────────────────────────────────────────────────────
-   Available for:
-     - UART debug TX/RX (connect USB-serial adapter)
-     - Logic analyzer probes (debug PicoScript execution)
-     - Future: second SRAM bank (doubles cache to 1MB)
+   D2→UART_TX   D3→UART_RX  (debug monitor)
+
+   Optional eMMC (L2 cache, auto-detected):
+     D5→eMMC_CLK   D6→eMMC_CMD   D8→eMMC_DAT0   D9→eMMC_DAT1
+     D11→eMMC_DAT2  D12→eMMC_DAT3  D14→eMMC_DET# (detect pin, active low)
+     (7 pins for 4-bit mode, directly on CMD/DAT protocol)
+     Detection: D14 is pulled HIGH by 10K resistor. eMMC module grounds it.
+     At boot, FPGA reads D14: LOW=eMMC present, HIGH=absent.
+     If absent, L2 tier is skipped (SRAM→SD direct path).
+
+   Remaining spare: D15-D31 (11 pins)
+     - Logic analyzer probes
+     - Future: second QSPI SRAM (doubles L1 cache)
      - Future: UP5K/ECP5 coprocessor SPI (4 pins)
 """
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Verilog module outline (top-level for synthesis)
+# Storage hierarchy (3-tier with optional eMMC L2 cache)
 # ═══════════════════════════════════════════════════════════════════════
+
+STORAGE_HIERARCHY = """
+══════════════════════════════════════════════════════════════════════
+ STORAGE HIERARCHY -- 3-Tier Cache with Optional eMMC
+══════════════════════════════════════════════════════════════════════
+
+ Detection:
+   eMMC_DET# pin (Header D14) has 10K pull-up to 3.3V.
+   If eMMC module is connected, it grounds the pin.
+   At boot (after PLL lock), FPGA samples D14:
+     LOW  → eMMC present → enable L2 tier, init eMMC (CMD0/CMD1 sequence)
+     HIGH → eMMC absent  → L2 disabled, SRAM talks directly to SD
+
+ ┌────────────────────────────────────────────────────────────────────┐
+ │ Tier │ Medium        │ Capacity  │ Latency │ Bandwidth │ Cost     │
+ ├──────┼───────────────┼───────────┼─────────┼───────────┼──────────┤
+ │ L1   │ QSPI SRAM     │ 128KB-1MB │ 200ns   │ ~6MB/s    │ £1.50    │
+ │ L2*  │ eMMC (4-bit)  │ 4-32GB    │ ~100µs  │ ~24MB/s   │ £3-8     │
+ │ L3   │ SD card (SPI) │ 2-32GB    │ ~1ms    │ ~4MB/s    │ £3-8     │
+ └────────────────────────────────────────────────────────────────────┘
+ * = optional, auto-detected at boot
+
+ Cache policy:
+   READ path:
+     1. Check L1 (SRAM) — hit → serve immediately (200ns)
+     2. Miss → check L2 (eMMC if present) — hit → copy to L1, serve (~100µs)
+     3. Miss → read L3 (SD) — copy to L2 + L1, serve (~1ms)
+
+   WRITE path:
+     1. Write to L1 (immediate)
+     2. Write-back to L2 on L1 eviction (if eMMC present)
+     3. Write-back to L3 on L2 eviction OR explicit SYNC
+
+   Eviction: LRU per tier (tiny counter per cache line, stored in BRAM)
+
+ Without eMMC:
+   L1 (SRAM) → L3 (SD), skip L2. Simple 2-tier cache.
+   Performance: ~800 req/s random, ~20K req/s cached.
+
+ With eMMC:
+   L1 (SRAM) → L2 (eMMC) → L3 (SD). Full 3-tier.
+   Performance: ~10K req/s warm, ~20K req/s hot, ~800 req/s cold.
+   The eMMC holds the entire working set for most applications.
+   Sequentially: 24MB/s = FOREACH scans at ~47K cards/sec (512B each).
+
+ eMMC initialisation (at boot, if detected):
+   1. Send CMD0 (GO_IDLE) — reset
+   2. Send CMD1 (SEND_OP_COND) — init, wait ready
+   3. Send CMD2 (ALL_SEND_CID) — get card ID
+   4. Send CMD3 (SET_RELATIVE_ADDR) — assign address
+   5. Send CMD7 (SELECT_CARD) — transfer mode
+   6. Send CMD6 (SWITCH) — set 4-bit bus width
+   7. Ready. ~50ms total boot time.
+
+ LUT cost for eMMC controller (4-bit mode):
+   CMD serialiser + CRC7:         60 LUTs
+   Response parser:               40 LUTs
+   DAT[3:0] read/write state:     50 LUTs
+   CRC16 per lane:                40 LUTs
+   Cache management (L2 tags):    30 LUTs
+   ─────────────────────────────────────────
+   Total:                         220 LUTs
+
+ NOTE: This 220 LUTs is ONLY instantiated if we go custom PCB.
+ For the Alchitry Cu breadboard build, eMMC in SPI mode reuses the
+ existing SD SPI master (0 extra LUTs, just slower: 4MB/s not 24MB/s).
+"""
 
 VERILOG_TOP = '''// picowal_hx_top.v -- PicoWAL on Alchitry Cu (iCE40HX8K)
 // Auto-generated module outline. Implement each submodule separately.
