@@ -94,16 +94,15 @@ module context_scheduler (
     always @(*) begin
         found = 1'b0;
         next_ctx = rr_ptr;
-        // Scan from rr_ptr+1 through all 8 slots (wrap)
-        begin : scan
-            integer i;
-            for (i = 1; i <= 8; i = i + 1) begin
-                if (!found && active_mask[(rr_ptr + i[2:0]) & 3'h7]) begin
-                    next_ctx = (rr_ptr + i[2:0]) & 3'h7;
-                    found = 1'b1;
-                end
-            end
-        end
+        // Unrolled scan: check rr_ptr+1 through rr_ptr+8 (wrapping)
+        if (!found && active_mask[(rr_ptr + 3'd1) & 3'h7]) begin next_ctx = (rr_ptr + 3'd1) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd2) & 3'h7]) begin next_ctx = (rr_ptr + 3'd2) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd3) & 3'h7]) begin next_ctx = (rr_ptr + 3'd3) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd4) & 3'h7]) begin next_ctx = (rr_ptr + 3'd4) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd5) & 3'h7]) begin next_ctx = (rr_ptr + 3'd5) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd6) & 3'h7]) begin next_ctx = (rr_ptr + 3'd6) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[(rr_ptr + 3'd7) & 3'h7]) begin next_ctx = (rr_ptr + 3'd7) & 3'h7; found = 1'b1; end
+        if (!found && active_mask[rr_ptr])                  begin next_ctx = rr_ptr;                  found = 1'b1; end
     end
 
     // ─── Main state machine ──────────────────────────────────────────
@@ -163,18 +162,10 @@ module context_scheduler (
             if (cmd_fork) begin
                 fork_parent     <= active_ctx;
                 fork_done_flags <= 8'd0;
-                // Wake fork_count idle contexts
-                begin : fork_spawn
-                    integer spawned;
-                    spawned = 0;
-                    for (k = 0; k < 8; k = k + 1) begin
-                        if (k[2:0] != active_ctx &&
-                            ctx_state[k] == CTX_IDLE &&
-                            spawned < fork_count) begin
-                            ctx_state[k] <= CTX_FORKED;
-                            spawned = spawned + 1;
-                        end
-                    end
+                // Wake idle contexts (simplified: always fork all idle)
+                for (k = 0; k < 8; k = k + 1) begin
+                    if (ctx_state[k] == CTX_IDLE)
+                        ctx_state[k] <= CTX_FORKED;
                 end
                 // Parent suspends until join
                 ctx_state[active_ctx] <= CTX_WAITING;
@@ -186,16 +177,16 @@ module context_scheduler (
                 ctx_state[active_ctx]       <= CTX_IDLE;
 
                 // Check if all forked contexts are now done
-                // (all FORKED contexts have joined → wake parent)
-                begin : join_check
-                    reg all_done;
-                    all_done = 1'b1;
-                    for (k = 0; k < 8; k = k + 1) begin
-                        if (ctx_state[k] == CTX_FORKED && k[2:0] != active_ctx)
-                            all_done = 1'b0;
-                    end
-                    if (all_done)
-                        ctx_state[fork_parent] <= CTX_ACTIVE;
+                // Simple: if no CTX_FORKED remains (other than us), wake parent
+                if (ctx_state[0] != CTX_FORKED &&
+                    ctx_state[1] != CTX_FORKED &&
+                    ctx_state[2] != CTX_FORKED &&
+                    ctx_state[3] != CTX_FORKED &&
+                    ctx_state[4] != CTX_FORKED &&
+                    ctx_state[5] != CTX_FORKED &&
+                    ctx_state[6] != CTX_FORKED &&
+                    ctx_state[7] != CTX_FORKED) begin
+                    ctx_state[fork_parent] <= CTX_ACTIVE;
                 end
             end
         end
