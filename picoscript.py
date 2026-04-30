@@ -267,11 +267,11 @@ BRANCH_NAMES = {
 # Card type markers (first 4 bytes of a card identify its type)
 # ═══════════════════════════════════════════════════════════════════════
 
-CARD_MAGIC_DATA     = 0x50574400  # "PWD " - raw data card
-CARD_MAGIC_SCRIPT   = 0x50575300  # "PWS " - PicoScript bytecode
-CARD_MAGIC_TEMPLATE = 0x50575400  # "PWT " - template (HTML + embedded fetch)
-CARD_MAGIC_INDEX    = 0x50574900  # "PWI " - B-tree index node
-CARD_MAGIC_VECTOR   = 0x50575600  # "PWV " - vector embedding data
+CARD_MAGIC_DATA     = 0x50574400  # "PWD." - raw data card
+CARD_MAGIC_SCRIPT   = 0x50575300  # "PWS." - PicoScript bytecode
+CARD_MAGIC_TEMPLATE = 0x50575400  # "PWT." - template (HTML + embedded fetch)
+CARD_MAGIC_INDEX    = 0x50574900  # "PWI." - B-tree index node
+CARD_MAGIC_VECTOR   = 0x50575600  # "PWV." - vector embedding data
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -394,8 +394,7 @@ def disassemble(program):
             lines.append(f"  {i:3d}: RAISE        #{d["imm16"]}")
         else:
             lines.append(f"  {i:3d}: {name:12s} R{d["rd"]}, R{d["rs1"]}, {d["imm16"]}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════
