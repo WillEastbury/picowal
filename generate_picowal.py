@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""generate_picowal.py -- PicoWAL Pure FPGA Storage Appliance
+"""generate_picowal.py -- PicoWAL Maxi Storage Appliance (FPGA + RK3588)
 
-Generates KiCad 8 schematic + PCB for PicoWAL pure-FPGA design:
+Generates KiCad 8 schematic + PCB for PicoWAL maxi design:
 
   - 2x ECP5-5G-85F (LFE5UM5G-85F-CABGA381): 170K LUT, 312 DSP, 8x SerDes
+  - RK3588 SoC: 4xA76+4xA55, 32GB LPDDR5, 6 TOPS NPU, PCIe 3.0
   - 5x M.2 M-key NVMe: 3 data + 1 WAL + 1 index (10TB with 2TB drives)
-  - 6x IS61WV25616BLL SRAM: 3MB page cache @ 10ns
+  - 4x IS61WV25616BLL SRAM: 2MB page cache @ 10ns
   - 2x IDT70V28L DPRAM: 1MB B-tree index cache @ 15ns (dual-port)
   - 2x RTL8221B + dual PoE: 2x 2.5GbE (5 Gbps aggregate, 51W power)
   - 44 parallel query lanes: hardwired B-tree walk + predicate filter
   - 312 DSP MACs: 62.4 GMAC/s vector similarity search
-  - Tile chain: SerDes daisy-chain for multi-card clusters
 
-Zero microcontrollers. All query processing in FPGA combinatorial logic.
+Hybrid architecture: FPGA handles wire-speed queries, SoC handles complex ops.
 
-Architecture:
-  - FPGA A: Network stack (TOE) + 22 query lanes + 2x NVMe DMA
-  - FPGA B: Index update engine + 22 query lanes + 3x NVMe DMA + tile chain
-  - DPRAM shared between FPGAs (port A=write by B, port B=read by A)
-  - No filesystem: numeric namespace (card/folder/file -> block address)
+FPGA duties (hardware query engine):
+  - 44 parallel query lanes for KV reads (220M QPS cached)
+  - Full TOE network stack (MAC/IP/TCP/SMB2/HTTP)
+  - NVMe DMA controllers (5 drives)
+  - B-tree index traversal in DPRAM
 
-Performance:
-  - Cache hit (DPRAM): 200ns -> 220M queries/sec (44 lanes)
-  - NVMe path: 15us -> 312K queries/sec
-  - Blended (80% hit): ~176M queries/sec
+RK3588 SoC duties (app compute):
+  - Complex query planning (JOINs, GROUP BY, aggregations)
+  - Application server (REST/gRPC/custom logic)
+  - CIFS metadata + extended attributes
+  - ML/AI inference via 6 TOPS NPU
+  - User-space drivers, orchestration, management
+  - Communicates with FPGA B via PCIe 3.0 x1 (~1 GB/s)
 
 NVMe role assignment:
   Slots 0,1 = DATA (FPGA A SerDes CH0,CH1)
@@ -289,16 +292,14 @@ QUERY_PLANNER_BOM = [
     {"ref": "U1",  "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA A: TOE + 22 query lanes + 2x NVMe + 2x 2.5GbE + DSP"},
     {"ref": "U3",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank A (FPGA A, page cache / query results)"},
     {"ref": "U4",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank B (FPGA A, TCP buffers / hot data)"},
-    {"ref": "U40", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank C (FPGA A, page cache)"},
-    {"ref": "U41", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank D (FPGA B, page cache)"},
     {"ref": "U7",  "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA A config flash"},
     {"ref": "U10", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V FPGA A core buck"},
     # ── FPGA B (WAL + Index + Query Lanes + Chain) ──
-    {"ref": "U18", "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA B: 22 query lanes + 3x NVMe + index engine + tile chain"},
+    {"ref": "U18", "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA B: 22 query lanes + 3x NVMe + index engine + PCIe to RK3588"},
     {"ref": "U19", "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA B config flash"},
     {"ref": "U20", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V FPGA B core buck"},
-    {"ref": "U21", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank E (FPGA B, WAL buffer)"},
-    {"ref": "U42", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank F (FPGA B, index node cache)"},
+    {"ref": "U21", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank C (FPGA B, page cache / WAL buffer)"},
+    {"ref": "U42", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank D (FPGA B, index node cache)"},
     # ── Dual-port SRAM (B-tree index cache, read from both FPGAs) ──
     # Port A: FPGA B writes (index update engine)
     # Port B: FPGA A reads (query lane B-tree traversal)
@@ -326,6 +327,13 @@ QUERY_PLANNER_BOM = [
     {"ref": "J1",  "value": "CONN_2x10",         "pkg": "2x10-2.54", "cost": 0.30, "desc": "Inter-board expansion (SPI + power)"},
     {"ref": "J3",  "value": "CONN_1x4",          "pkg": "1x4-2.54",  "cost": 0.10, "desc": "UART debug (FPGA A)"},
     {"ref": "J4",  "value": "CONN_1x6",          "pkg": "1x6-1.27",  "cost": 0.10, "desc": "JTAG (shared, active-low select)"},
+    # ── RK3588 SoC (Cortex-A76/A55, 32GB LPDDR5) ──
+    {"ref": "U50", "value": "RK3588",            "pkg": "FCBGA-796", "cost": 35.00, "desc": "RK3588: 4xA76+4xA55, PCIe3.0x1 to FPGA B CH3, 6 TOPS NPU"},
+    {"ref": "U51", "value": "MT62F2G32D4DS",     "pkg": "FBGA-200",  "cost": 45.00, "desc": "32GB LPDDR5-5500 (4x 8GB die, PoP on RK3588)"},
+    {"ref": "U52", "value": "RK806-1",           "pkg": "QFN-68",    "cost": 4.50, "desc": "RK3588 companion PMIC (8 buck + 7 LDO)"},
+    {"ref": "U53", "value": "W25Q256JVEIQ",      "pkg": "SOIC-8",    "cost": 2.50, "desc": "RK3588 SPI NOR flash (U-Boot + ATF)"},
+    {"ref": "U54", "value": "EMMC 32GB",         "pkg": "BGA-153",   "cost": 8.00, "desc": "eMMC for RK3588 rootfs (Linux/OS)"},
+    {"ref": "U55", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "0.9V RK3588 NPU/GPU core rail"},
 ]
 
 
@@ -693,13 +701,12 @@ def pin_budget_report():
     pins_a = [
         ("SRAM bank A (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("SRAM bank B (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("SRAM bank C (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("DPRAM 0 port B read (A[17:0]+D[15:0]+CE/OE)", 36),
         ("DPRAM 1 port B read (A[17:0]+D[15:0]+CE/OE)", 36),
+        ("2x RTL8221B PHY (MDC/MDIO/RST/INT each)", 8),
         ("Config flash SPI (MSPI boot)", 4),
         ("DONE/INITN/PROGRAMN", 3),
         ("NVMe PERST# x 2", 2),
-        ("2x RTL8221B PHY (MDC/MDIO/RST/INT each)", 8),
         ("Status LEDs", 4),
     ]
     total_a = 0
@@ -710,13 +717,13 @@ def pin_budget_report():
     print(f"    {'TOTAL FPGA A I/O':56s} {total_a:3d} / 205  ({'OK' if total_a <= 205 else 'OVER'})")
     print(f"    SerDes: CH0=NVMe0, CH1=NVMe1, CH2=2.5GbE portA, CH3=2.5GbE portB")
     print()
-    print("  FPGA B (WAL + Index Engine + Query Lanes + Chain):")
+    print("  FPGA B (WAL + Index Engine + Query Lanes + SoC link):")
     pins_b = [
+        ("SRAM bank C (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("SRAM bank D (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("SRAM bank E (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("SRAM bank F (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("DPRAM 0 port A write (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("DPRAM 1 port A write (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("RK3588 misc GPIO (reset/IRQ/status)", 4),
         ("Config flash SPI (MSPI boot)", 4),
         ("DONE/INITN/PROGRAMN", 3),
         ("NVMe PERST# x 3", 3),
@@ -728,7 +735,7 @@ def pin_budget_report():
         total_b += n
     print(f"    {'-'*56} {'-'*3}")
     print(f"    {'TOTAL FPGA B I/O':56s} {total_b:3d} / 205  ({'OK' if total_b <= 205 else 'OVER'})")
-    print(f"    SerDes: CH0=NVMe2(data), CH1=NVMe3(WAL), CH2=NVMe4(idx), CH3=tile chain")
+    print(f"    SerDes: CH0=NVMe2(data), CH1=NVMe3(WAL), CH2=NVMe4(idx), CH3=PCIe to RK3588")
 
 
 def power_budget_report():
@@ -736,20 +743,24 @@ def power_budget_report():
     print("  " + "-" * 60)
     rails = [
         ("ECP5-5G-85F A core (1.1V, 500mA, high util)", 0.550),
-        ("ECP5-5G-85F A I/O (3.3V, 150mA, 4x SRAM + DPRAM)", 0.495),
+        ("ECP5-5G-85F A I/O (3.3V, 100mA, 2x SRAM + 2x DPRAM)", 0.330),
         ("ECP5-5G-85F A aux (2.5V, 20mA)", 0.050),
         ("ECP5-5G-85F A SerDes (TX+RX, 4ch)", 0.616),
         ("ECP5-5G-85F B core (1.1V, 450mA, high util)", 0.495),
-        ("ECP5-5G-85F B I/O (3.3V, 150mA, 2x SRAM + 2x DPRAM)", 0.495),
+        ("ECP5-5G-85F B I/O (3.3V, 100mA, 2x SRAM + 2x DPRAM)", 0.330),
         ("ECP5-5G-85F B aux (2.5V, 20mA)", 0.050),
         ("ECP5-5G-85F B SerDes (TX+RX, 4ch)", 0.616),
         ("FPGA A TOE + query lanes (44K LUTs active)", 0.400),
         ("FPGA B index engine + query lanes (44K LUTs)", 0.400),
         ("FPGA DSP array (312 MACs active)", 0.200),
-        ("6x IS61WV25616BLL SRAM (3.3V, 40mA each)", 0.792),
+        ("4x IS61WV25616BLL SRAM (3.3V, 40mA each)", 0.528),
         ("2x IDT70V28L DPRAM (3.3V, 120mA each)", 0.792),
+        ("RK3588 SoC (4xA76+4xA55, typical)", 5.000),
+        ("32GB LPDDR5 (4 channels, active)", 2.400),
+        ("RK3588 PMIC (RK806 overhead)", 0.150),
+        ("eMMC 32GB", 0.200),
         ("2x RTL8221B 2.5GbE PHY (~800mW each)", 1.600),
-        ("Flash chips x2 (config, 3.3V)", 0.066),
+        ("Flash chips x3 (config + RK3588 SPI NOR)", 0.099),
         ("2x 100MHz LVDS oscillator", 0.198),
         ("25MHz crystal osc", 0.010),
         ("2x PoE PD controller overhead", 0.300),
@@ -800,15 +811,16 @@ def main():
 
     # Summary
     print(f"\n{'='*70}")
-    print(f" PicoWAL v{VERSION} -- Pure FPGA Storage Appliance (Zero MCU)")
+    print(f" PicoWAL v{VERSION} -- FPGA + RK3588 Storage Appliance (Maxi)")
     print(f"{'='*70}")
     print()
-    print(" Architecture: 100% FPGA. No microcontrollers. 44 parallel query lanes.")
+    print(" Architecture: Dual FPGA + RK3588 SoC. 44 query lanes + 8 CPU cores.")
     print()
     print("   2x ECP5-5G-85F     170K LUT, 312 DSP MACs, 8x SerDes")
+    print("   RK3588 SoC         4xA76 + 4xA55, 32GB LPDDR5, 6 TOPS NPU")
     print("   44 query lanes     Hardwired B-tree walk + predicate filter")
     print("   5x M.2 M-Key NVMe  10TB with 2TB drives")
-    print("   6x SRAM (512KB ea)  3MB page cache @ 10ns")
+    print("   4x SRAM (512KB ea)  2MB page cache @ 10ns")
     print("   2x DPRAM (512KB ea) 1MB B-tree index cache @ 15ns (dual-port)")
     print("   2x RTL8221B        2x 2.5GbE (5 Gbps aggregate)")
     print("   2x TPS23753A       Dual PoE 802.3at (51W)")
@@ -823,7 +835,7 @@ def main():
     print()
     print(" Memory hierarchy:")
     print("   DPRAM (1MB, 15ns)  Hot B-tree root + L1 index nodes")
-    print("   SRAM  (3MB, 10ns)  Page cache, TCP buffers, query results")
+    print("   SRAM  (2MB, 10ns)  Page cache, TCP buffers, query results")
     print("   NVMe  (10TB, 15us) Cold storage (3 data + 1 WAL + 1 index)")
     print()
     print(" Query lane pipeline (per lane, ~2300 LUTs):")
@@ -843,7 +855,7 @@ def main():
     print("   TOTAL:                   171,200 / 170,000 (tight fit)")
     print()
     print(" FPGA A: TOE + socket mux + 22 query lanes + 2x NVMe DMA")
-    print(" FPGA B: Index engine + 22 query lanes + 3x NVMe DMA + tile chain")
+    print(" FPGA B: Index engine + 22 query lanes + 3x NVMe DMA + PCIe to RK3588")
     print()
     print(" Deterministic data paths:")
     print("   PATH 1 (KV hit):   TCP -> parse -> DPRAM lookup -> SRAM -> TCP")
@@ -863,11 +875,20 @@ def main():
     print("   FPGA B CH0 -> NVMe slot 2 (data)")
     print("   FPGA B CH1 -> NVMe slot 3 (WAL)")
     print("   FPGA B CH2 -> NVMe slot 4 (indexes)")
-    print("   FPGA B CH3 -> Tile chain (next card)")
+    print("   FPGA B CH3 -> PCIe 3.0 x1 to RK3588 (~1 GB/s)")
     print()
-    print(" Inter-FPGA link: 8-bit parallel GPIO bus + handshake (11 pins)")
-    print("   FPGA A query lanes request index lookups via FPGA B DPRAM")
-    print("   FPGA B streams WAL/index updates to FPGA A page cache")
+    print(" Inter-FPGA link: DPRAMs bridge both FPGAs (no bus needed)")
+    print("   FPGA B writes index updates to DPRAM port A")
+    print("   FPGA A reads hot B-tree nodes from DPRAM port B")
+    print()
+    print(" RK3588 SoC (via PCIe 3.0 x1 to FPGA B):")
+    print("   4x Cortex-A76 @ 2.4GHz + 4x Cortex-A55 @ 1.8GHz")
+    print("   32GB LPDDR5-5500 (44 GB/s bandwidth)")
+    print("   6 TOPS NPU (INT8 inference)")
+    print("   32GB eMMC (Linux rootfs)")
+    print("   Roles: complex query planning, JOIN/GROUP BY, app server,")
+    print("          ML inference, CIFS metadata, user-space drivers")
+    print("   PCIe link: SoC submits queries to FPGA, reads results from DPRAM")
     print()
 
     print(" BOM (board only, excl. NVMe SSDs):")
