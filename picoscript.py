@@ -99,6 +99,9 @@ OP_EMIT_LITERAL  = 0x31  # emit(imm16 bytes from instruction stream)
 OP_EMIT_FIELD    = 0x32  # emit field from Rs1 at offset imm16
 OP_EMIT_TEMPLATE = 0x33  # emit Rs1 with {{}} substitutions from Rs2
 OP_EMIT_CHUNK    = 0x34  # emit with HTTP chunked encoding wrapper
+OP_EMIT_PIPE     = 0x35  # fetch card(imm16) AND emit directly (zero-copy, no register)
+OP_EMIT_PIPE_REG = 0x36  # fetch card(Rs1) AND emit directly (zero-copy)
+OP_EMIT_PIPE_TPL = 0x37  # fetch card(imm16) as template, substitute from Rs1, emit
 
 # ALU class (0x4)
 OP_ALU_ADD       = 0x40  # Rd = Rs1 + imm16
@@ -252,7 +255,8 @@ OPCODE_NAMES = {
     OP_STORE_APPEND: "STORE.APP", OP_STORE_FIELD: "STORE.FLD",
     OP_EMIT_REG: "EMIT",         OP_EMIT_LITERAL: "EMIT.LIT",
     OP_EMIT_FIELD: "EMIT.FLD",   OP_EMIT_TEMPLATE: "EMIT.TPL",
-    OP_EMIT_CHUNK: "EMIT.CHK",
+    OP_EMIT_CHUNK: "EMIT.CHK",   OP_EMIT_PIPE: "PIPE",
+    OP_EMIT_PIPE_REG: "PIPE.R",  OP_EMIT_PIPE_TPL: "PIPE.TPL",
     OP_ALU_ADD: "ADD",  OP_ALU_SUB: "SUB",  OP_ALU_MUL: "MUL",
     OP_ALU_DIV: "DIV",  OP_ALU_MOD: "MOD",  OP_ALU_CMP: "CMP",
     OP_BRANCH_ALWAYS: "JMP",      OP_BRANCH_EQ: "JEQ",
@@ -284,8 +288,7 @@ def example_hello_world():
         encode_instruction(OP_NET_STATUS, imm16=200),          # HTTP 200 OK
         encode_instruction(OP_NET_CTYPE, imm16=0),             # Content-Type: text/html
         encode_instruction(OP_NET_BODY),                       # end headers
-        encode_instruction(OP_FETCH_CARD, rd=0, imm16=encode_card_addr(1, 0, 1)),  # R0 = card 1/0/1 (hello.html)
-        encode_instruction(OP_EMIT_REG, rs1=0),                # emit R0 to TCP
+        encode_instruction(OP_EMIT_PIPE, imm16=encode_card_addr(1, 0, 1)),  # PIPE card 1/0/1 direct to TCP
         encode_instruction(OP_SYS_HALT),                       # done
     ]
 
@@ -296,12 +299,10 @@ def example_dynamic_page():
         encode_instruction(OP_NET_STATUS, imm16=200),
         encode_instruction(OP_NET_CTYPE, imm16=0),             # text/html
         encode_instruction(OP_NET_BODY),
-        # Load template card
-        encode_instruction(OP_FETCH_CARD, rd=0, imm16=encode_card_addr(5, 0, 1)),  # R0 = template
         # Load user data (card addr from request parameter in R15)
         encode_instruction(OP_FETCH_REG, rd=1, rs1=15),        # R1 = user record
-        # Template substitution: replace {{fields}} in R0 with values from R1
-        encode_instruction(OP_EMIT_TEMPLATE, rd=0, rs1=1),     # emit templated HTML
+        # PIPE.TPL: fetch template card 5/0/1, substitute {{fields}} from R1, emit
+        encode_instruction(OP_EMIT_PIPE_TPL, rs1=1, imm16=encode_card_addr(5, 0, 1)),
         encode_instruction(OP_SYS_HALT),
     ]
 
@@ -423,9 +424,12 @@ def disassemble(program, base_addr=0):
         name = OPCODE_NAMES.get(d["opcode"], f"OP_{d['opcode']:02X}")
         addr = base_addr + i
         # Format based on instruction type
-        if d["opcode"] in (OP_FETCH_CARD, OP_STORE_CARD):
+        if d["opcode"] in (OP_FETCH_CARD, OP_STORE_CARD, OP_EMIT_PIPE):
             c, f, fi = decode_card_addr(d["imm16"])
             operands = f"R{d['rd']}, [{c}/{f}/{fi}]"
+        elif d["opcode"] == OP_EMIT_PIPE_TPL:
+            c, f, fi = decode_card_addr(d["imm16"])
+            operands = f"[{c}/{f}/{fi}], data=R{d['rs1']}"
         elif d["opcode"] in (OP_EMIT_REG, OP_FETCH_REG):
             operands = f"R{d['rs1']}"
         elif d["opcode"] in (OP_NET_STATUS,):
