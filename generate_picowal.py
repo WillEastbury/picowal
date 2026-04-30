@@ -297,20 +297,24 @@ QUERY_PLANNER_BOM = [
     {"ref": "U19", "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA B config flash"},
     {"ref": "U20", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V FPGA B core buck"},
     {"ref": "U21", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank C (FPGA B write staging)"},
-    # ── Session picos on FPGA A (5x, network-facing) ──
+    # ── Shared dual-port SRAM (index cache: 1 writer, N readers) ──
+    # Port A wired DIRECT to index pico (no FPGA pins needed!)
+    # Port B wired to FPGA B (read port for all session picos)
+    {"ref": "U36", "value": "IDT70V28L",         "pkg": "TQFP-100",  "cost": 12.00, "desc": "DPRAM 256Kx16 (512KB) shared index cache, portA=idx_pico, portB=FPGA_B"},
+    # ── Session picos on FPGA A (6x, network-facing) ──
     {"ref": "U2",  "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 0 (FPGA A)"},
     {"ref": "U25", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 1 (FPGA A)"},
     {"ref": "U26", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 2 (FPGA A)"},
     {"ref": "U27", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 3 (FPGA A)"},
     {"ref": "U28", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 4 (FPGA A)"},
-    # ── Session picos on FPGA B (7x, storage-facing) ──
-    {"ref": "U29", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 5 (FPGA B)"},
-    {"ref": "U30", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 6 (FPGA B)"},
-    {"ref": "U31", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 7 (FPGA B)"},
-    {"ref": "U32", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 8 (FPGA B)"},
-    {"ref": "U33", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 9 (FPGA B)"},
-    {"ref": "U34", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 10 (FPGA B)"},
-    {"ref": "U35", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 11 (FPGA B)"},
+    {"ref": "U38", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 5 (FPGA A)"},
+    # ── Session picos on FPGA B (6x, storage-facing) ──
+    {"ref": "U29", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 6 (FPGA B)"},
+    {"ref": "U30", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 7 (FPGA B)"},
+    {"ref": "U31", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 8 (FPGA B)"},
+    {"ref": "U32", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 9 (FPGA B)"},
+    {"ref": "U33", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 10 (FPGA B)"},
+    {"ref": "U34", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 11 (FPGA B)"},
     # ── Index pico (FPGA B, dedicated write path) ──
     {"ref": "U11", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Index pico (FPGA B, WAL+idx exclusive)"},
     # ── Pico support (shared flash/PSRAM per pico) ──
@@ -705,9 +709,9 @@ def gen_project():
 def pin_budget_report():
     print("\n  Pin Budget -- Dual ECP5-5G-85F CABGA381 (~205 user I/O + 4x SerDes each)")
     print("  " + "-" * 60)
-    print("  FPGA A (Network + Data) -- 5 session picos attached:")
+    print("  FPGA A (Network + Data) -- 6 session picos attached:")
     pins_a = [
-        ("Session picos x5 (15 pins each: D[7:0]+ctrl)", 75),
+        ("Session picos x6 (15 pins each: D[7:0]+ctrl)", 90),
         ("SRAM bank A (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("SRAM bank B (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("Inter-FPGA parallel bus (D[7:0]+RDY+ACK+DIR)", 11),
@@ -726,11 +730,12 @@ def pin_budget_report():
     print(f"    {'TOTAL FPGA A I/O':56s} {total_a:3d} / 205  ({'OK' if total_a <= 205 else 'OVER'})")
     print(f"    SerDes: CH0=NVMe0, CH1=NVMe1, CH2=2.5GbE portA, CH3=2.5GbE portB")
     print()
-    print("  FPGA B (WAL + Index + Chain) -- 7 session + 1 index pico:")
+    print("  FPGA B (WAL + Index + Chain) -- 6 session + 1 index pico + DPRAM:")
     pins_b = [
-        ("Session picos x7 (15 pins each: D[7:0]+ctrl)", 105),
+        ("Session picos x6 (15 pins each: D[7:0]+ctrl)", 90),
         ("Index pico 8-bit bus (15 pins)", 15),
         ("SRAM bank C (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("DPRAM port B (A[17:0]+D[15:0]+CE/OE, read-only)", 37),
         ("Inter-FPGA parallel bus (D[7:0]+RDY+ACK+DIR)", 11),
         ("Config flash SPI (MSPI boot)", 4),
         ("DONE/INITN/PROGRAMN", 3),
@@ -765,6 +770,7 @@ def power_budget_report():
         ("FPGA DSP array (312 MACs active)", 0.200),
         ("13x RP2354B (1.1V+3.3V, ~275mW each)", 3.575),
         ("3x IS61WV25616BLL (3.3V, 40mA each)", 0.396),
+        ("1x IDT70V28L DPRAM (3.3V, 120mA active)", 0.396),
         ("13x LY68L6400 PSRAM (3.3V, 25mA each)", 1.073),
         ("2x RTL8221B 2.5GbE PHY (~800mW each)", 1.600),
         ("Flash chips x15 (3.3V, ~200mA total)", 0.660),
