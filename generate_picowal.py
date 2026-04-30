@@ -1,37 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""generate_picowal.py -- PicoWAL Uber Storage Appliance
+"""generate_picowal.py -- PicoWAL Pure FPGA Storage Appliance
 
-Generates KiCad 8 schematic + PCB for PicoWAL uber config:
+Generates KiCad 8 schematic + PCB for PicoWAL pure-FPGA design:
 
-  - 2x ECP5-5G-85F (LFE5UM5G-85F-CABGA381): dual FPGA, 8x SerDes total
+  - 2x ECP5-5G-85F (LFE5UM5G-85F-CABGA381): 170K LUT, 312 DSP, 8x SerDes
   - 5x M.2 M-key NVMe: 3 data + 1 WAL + 1 index (10TB with 2TB drives)
-  - 13x RP2354B: 12 session picos + 1 index pico (52 cores total)
+  - 6x IS61WV25616BLL SRAM: 3MB page cache @ 10ns
+  - 2x IDT70V28L DPRAM: 1MB B-tree index cache @ 15ns (dual-port)
   - 2x RTL8221B + dual PoE: 2x 2.5GbE (5 Gbps aggregate, 51W power)
-  - 312 DSP MACs: vector similarity search at wire speed
+  - 44 parallel query lanes: hardwired B-tree walk + predicate filter
+  - 312 DSP MACs: 62.4 GMAC/s vector similarity search
   - Tile chain: SerDes daisy-chain for multi-card clusters
 
-Session picos are role-agnostic -- firmware determines function:
-  - CIFS/SMB: pico implements SMB2 protocol, serves file shares
-  - DB query: pico parses SQL, plans queries, streams results
-  - App server: pico runs custom application logic (REST/gRPC)
-  - All share same 8-bit parallel bus interface to FPGA
+Zero microcontrollers. All query processing in FPGA combinatorial logic.
 
-Deterministic architecture:
-  - FPGA handles MAC/IP/TCP in hardware (TOE), routes streams to picos
-  - Direct block reads bypass picos (FPGA -> NVMe -> TCP)
-  - Writes serialized through index pico (WAL + B-tree maintenance)
-  - FPGA A: network + data reads (5 session picos attached)
-  - FPGA B: WAL + indexes + chain (7 session + 1 index pico)
+Architecture:
+  - FPGA A: Network stack (TOE) + 22 query lanes + 2x NVMe DMA
+  - FPGA B: Index update engine + 22 query lanes + 3x NVMe DMA + tile chain
+  - DPRAM shared between FPGAs (port A=write by B, port B=read by A)
+  - No filesystem: numeric namespace (card/folder/file -> block address)
 
-8-bit parallel bus (15 pins per pico):
-  DATA[7:0] + RDY + ACK + DIR + SOF + EOF + SOCK[1:0]
-  ~50 MB/s per bus @ 50MHz. PIO+DMA on pico side.
+Performance:
+  - Cache hit (DPRAM): 200ns -> 220M queries/sec (44 lanes)
+  - NVMe path: 15us -> 312K queries/sec
+  - Blended (80% hit): ~176M queries/sec
 
 NVMe role assignment:
-  Slots 0,1,2 = DATA (3 shards, striped reads via FPGA A+B)
-  Slot 3 = WAL (write-ahead log, FPGA B, index pico exclusive)
-  Slot 4 = INDEX (B-tree/LSM, FPGA B, index pico exclusive)
+  Slots 0,1 = DATA (FPGA A SerDes CH0,CH1)
+  Slot 2 = DATA (FPGA B SerDes CH0)
+  Slot 3 = WAL (FPGA B SerDes CH1)
+  Slot 4 = INDEX (FPGA B SerDes CH2)
 
 Target: <£1000 all-in including 5x 2TB NVMe SSDs.
 Board: ~200x120mm, 4-layer, BGA/TSOP/M.2 -- requires reflow.
@@ -286,42 +285,25 @@ def sym_generic(ref_prefix, value, fp, pin_names):
 # ═══════════════════════════════════════════════════════════════════════
 
 QUERY_PLANNER_BOM = [
-    # ── FPGA A (Network + Data reads) ──
-    {"ref": "U1",  "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA A: 2x data NVMe + 2x 2.5GbE + TOE + DSP"},
-    {"ref": "U3",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank A (FPGA A query FIFO)"},
-    {"ref": "U4",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank B (FPGA A page staging)"},
+    # ── FPGA A (Network + Query Lanes + Data NVMe) ──
+    {"ref": "U1",  "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA A: TOE + 22 query lanes + 2x NVMe + 2x 2.5GbE + DSP"},
+    {"ref": "U3",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank A (FPGA A, page cache / query results)"},
+    {"ref": "U4",  "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank B (FPGA A, TCP buffers / hot data)"},
+    {"ref": "U40", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank C (FPGA A, page cache)"},
+    {"ref": "U41", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank D (FPGA B, page cache)"},
     {"ref": "U7",  "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA A config flash"},
     {"ref": "U10", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V FPGA A core buck"},
-    # ── FPGA B (WAL + Index + Chain) ──
-    {"ref": "U18", "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA B: 3x NVMe (data+WAL+idx) + tile chain"},
+    # ── FPGA B (WAL + Index + Query Lanes + Chain) ──
+    {"ref": "U18", "value": "LFE5UM5G-85F",     "pkg": "CABGA-381", "cost": 15.00, "desc": "ECP5-5G FPGA B: 22 query lanes + 3x NVMe + index engine + tile chain"},
     {"ref": "U19", "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "FPGA B config flash"},
     {"ref": "U20", "value": "TPS62A02",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "1.1V FPGA B core buck"},
-    {"ref": "U21", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank C (FPGA B write staging)"},
-    # ── Shared dual-port SRAM (index cache: 1 writer, N readers) ──
-    # Port A wired DIRECT to index pico (no FPGA pins needed!)
-    # Port B wired to FPGA B (read port for all session picos)
-    {"ref": "U36", "value": "IDT70V28L",         "pkg": "TQFP-100",  "cost": 12.00, "desc": "DPRAM 256Kx16 (512KB) shared index cache, portA=idx_pico, portB=FPGA_B"},
-    # ── Session picos on FPGA A (6x, network-facing) ──
-    {"ref": "U2",  "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 0 (FPGA A)"},
-    {"ref": "U25", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 1 (FPGA A)"},
-    {"ref": "U26", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 2 (FPGA A)"},
-    {"ref": "U27", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 3 (FPGA A)"},
-    {"ref": "U28", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 4 (FPGA A)"},
-    {"ref": "U38", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 5 (FPGA A)"},
-    # ── Session picos on FPGA B (6x, storage-facing) ──
-    {"ref": "U29", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 6 (FPGA B)"},
-    {"ref": "U30", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 7 (FPGA B)"},
-    {"ref": "U31", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 8 (FPGA B)"},
-    {"ref": "U32", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 9 (FPGA B)"},
-    {"ref": "U33", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 10 (FPGA B)"},
-    {"ref": "U34", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Session pico 11 (FPGA B)"},
-    # ── Index pico (FPGA B, dedicated write path) ──
-    {"ref": "U11", "value": "RP2354B",           "pkg": "QFN-80",    "cost": 0.70, "desc": "Index pico (FPGA B, WAL+idx exclusive)"},
-    # ── Pico support (shared flash/PSRAM per pico) ──
-    {"ref": "U5",  "value": "LY68L6400_8MB",     "pkg": "SOP-8",     "cost": 0.85, "desc": "PSRAM x13 (one per pico, 8MB each = 104MB total)"},
-    {"ref": "U6",  "value": "W25Q128JVSIQ",      "pkg": "SOIC-8",    "cost": 1.20, "desc": "Flash x13 (one per pico, boot + firmware)"},
-    {"ref": "U8",  "value": "TPS62A01",          "pkg": "SOT-23-6",  "cost": 0.90, "desc": "DVDD buck x7 (shared pairs, OC: 1.1-1.25V)"},
-    {"ref": "U9",  "value": "AP2112K-3.3",       "pkg": "SOT-23-5",  "cost": 0.30, "desc": "3.3V IOVDD LDO x4 (shared groups)"},
+    {"ref": "U21", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank E (FPGA B, WAL buffer)"},
+    {"ref": "U42", "value": "IS61WV25616BLL",    "pkg": "TSOP-44",   "cost": 1.90, "desc": "SRAM bank F (FPGA B, index node cache)"},
+    # ── Dual-port SRAM (B-tree index cache, read from both FPGAs) ──
+    # Port A: FPGA B writes (index update engine)
+    # Port B: FPGA A reads (query lane B-tree traversal)
+    {"ref": "U36", "value": "IDT70V28L",         "pkg": "TQFP-100",  "cost": 12.00, "desc": "DPRAM 0: 256Kx16 (512KB) B-tree hot nodes, portA=FPGA_B, portB=FPGA_A"},
+    {"ref": "U37", "value": "IDT70V28L",         "pkg": "TQFP-100",  "cost": 12.00, "desc": "DPRAM 1: 256Kx16 (512KB) B-tree hot nodes, portA=FPGA_B, portB=FPGA_A"},
     # ── NVMe storage (5 slots) ──
     {"ref": "J7",  "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 0 data (FPGA A CH0)"},
     {"ref": "J8",  "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 1 data (FPGA A CH1)"},
@@ -330,22 +312,20 @@ QUERY_PLANNER_BOM = [
     {"ref": "J11", "value": "M2_M_KEY",          "pkg": "M2-M-Key",  "cost": 1.50, "desc": "NVMe slot 4 indexes (FPGA B CH2)"},
     {"ref": "Y3",  "value": "100MHz_DIFF",       "pkg": "3225",      "cost": 1.80, "desc": "PCIe refclk A (FPGA A)"},
     {"ref": "Y4",  "value": "100MHz_DIFF",       "pkg": "3225",      "cost": 1.80, "desc": "PCIe refclk B (FPGA B)"},
-    {"ref": "U16", "value": "TPS54331",          "pkg": "SOIC-8",    "cost": 1.20, "desc": "3.3V 3A buck for NVMe drives 0+1"},
-    {"ref": "U22", "value": "TPS54331",          "pkg": "SOIC-8",    "cost": 1.20, "desc": "3.3V 3A buck for NVMe drives 2+3+4"},
-    # ── 2x 2.5GbE + PoE (FPGA A TOE via SerDes CH2+CH3) ──
-    {"ref": "U13", "value": "RTL8221B",          "pkg": "QFN-56",    "cost": 3.50, "desc": "2.5GbE PHY A, 2500BASE-X to FPGA A SerDes CH2"},
-    {"ref": "U23", "value": "RTL8221B",          "pkg": "QFN-56",    "cost": 3.50, "desc": "2.5GbE PHY B, 2500BASE-X to FPGA A SerDes CH3"},
+    {"ref": "U16", "value": "TPS54331",          "pkg": "SOIC-8",    "cost": 1.20, "desc": "3.3V 3A NVMe buck (drives 0+1)"},
+    {"ref": "U22", "value": "TPS54331",          "pkg": "SOIC-8",    "cost": 1.20, "desc": "3.3V 3A NVMe buck (drives 2+3+4)"},
+    # ── 2x 2.5GbE + PoE ──
+    {"ref": "U13", "value": "RTL8221B",          "pkg": "QFN-56",    "cost": 3.50, "desc": "2.5GbE PHY A (2500BASE-X to FPGA A SerDes CH2)"},
+    {"ref": "U23", "value": "RTL8221B",          "pkg": "QFN-56",    "cost": 3.50, "desc": "2.5GbE PHY B (2500BASE-X to FPGA A SerDes CH3)"},
     {"ref": "U17", "value": "TPS23753A",         "pkg": "TSSOP-20",  "cost": 2.50, "desc": "802.3at PoE PD port A (25.5W)"},
     {"ref": "U24", "value": "TPS23753A",         "pkg": "TSSOP-20",  "cost": 2.50, "desc": "802.3at PoE PD port B (25.5W)"},
     {"ref": "J5",  "value": "RJ45_POE_MAGJACK",  "pkg": "RJ45",      "cost": 4.00, "desc": "RJ45 PoE MagJack port A"},
     {"ref": "J12", "value": "RJ45_POE_MAGJACK",  "pkg": "RJ45",      "cost": 4.00, "desc": "RJ45 PoE MagJack port B"},
     # ── Shared ──
-    {"ref": "Y1",  "value": "12MHz",             "pkg": "3215",      "cost": 0.20, "desc": "RP crystal (shared, all picos)"},
-    {"ref": "Y2",  "value": "25MHz",             "pkg": "3215",      "cost": 0.20, "desc": "RTL8221B PHY crystal (shared)"},
-    {"ref": "J1",  "value": "CONN_2x10",         "pkg": "2x10-2.54", "cost": 0.30, "desc": "Upstream SPI + power (legacy)"},
-    {"ref": "J2",  "value": "CONN_2x10",         "pkg": "2x10-2.54", "cost": 0.30, "desc": "Downstream SPI + power (legacy)"},
-    {"ref": "J3",  "value": "CONN_1x4",          "pkg": "1x4-2.54",  "cost": 0.10, "desc": "UART debug"},
-    {"ref": "J4",  "value": "CONN_1x5",          "pkg": "1x5-1.27",  "cost": 0.10, "desc": "SWD pico (shared via mux)"},
+    {"ref": "Y2",  "value": "25MHz",             "pkg": "3215",      "cost": 0.20, "desc": "RTL8221B PHY crystal"},
+    {"ref": "J1",  "value": "CONN_2x10",         "pkg": "2x10-2.54", "cost": 0.30, "desc": "Inter-board expansion (SPI + power)"},
+    {"ref": "J3",  "value": "CONN_1x4",          "pkg": "1x4-2.54",  "cost": 0.10, "desc": "UART debug (FPGA A)"},
+    {"ref": "J4",  "value": "CONN_1x6",          "pkg": "1x6-1.27",  "cost": 0.10, "desc": "JTAG (shared, active-low select)"},
 ]
 
 
@@ -709,16 +689,16 @@ def gen_project():
 def pin_budget_report():
     print("\n  Pin Budget -- Dual ECP5-5G-85F CABGA381 (~205 user I/O + 4x SerDes each)")
     print("  " + "-" * 60)
-    print("  FPGA A (Network + Data) -- 6 session picos attached:")
+    print("  FPGA A (Network + Query Lanes + Data):")
     pins_a = [
-        ("Session picos x6 (15 pins each: D[7:0]+ctrl)", 90),
         ("SRAM bank A (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("SRAM bank B (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("Inter-FPGA parallel bus (D[7:0]+RDY+ACK+DIR)", 11),
+        ("SRAM bank C (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("DPRAM 0 port B read (A[17:0]+D[15:0]+CE/OE)", 36),
+        ("DPRAM 1 port B read (A[17:0]+D[15:0]+CE/OE)", 36),
         ("Config flash SPI (MSPI boot)", 4),
         ("DONE/INITN/PROGRAMN", 3),
-        ("NVMe PERST# x 2 (slots 0,1)", 2),
-        ("NVMe CLKREQ# x 2", 2),
+        ("NVMe PERST# x 2", 2),
         ("2x RTL8221B PHY (MDC/MDIO/RST/INT each)", 8),
         ("Status LEDs", 4),
     ]
@@ -730,17 +710,16 @@ def pin_budget_report():
     print(f"    {'TOTAL FPGA A I/O':56s} {total_a:3d} / 205  ({'OK' if total_a <= 205 else 'OVER'})")
     print(f"    SerDes: CH0=NVMe0, CH1=NVMe1, CH2=2.5GbE portA, CH3=2.5GbE portB")
     print()
-    print("  FPGA B (WAL + Index + Chain) -- 6 session + 1 index pico + DPRAM:")
+    print("  FPGA B (WAL + Index Engine + Query Lanes + Chain):")
     pins_b = [
-        ("Session picos x6 (15 pins each: D[7:0]+ctrl)", 90),
-        ("Index pico 8-bit bus (15 pins)", 15),
-        ("SRAM bank C (A[17:0]+D[15:0]+CE/OE/WE)", 37),
-        ("DPRAM port B (A[17:0]+D[15:0]+CE/OE, read-only)", 37),
-        ("Inter-FPGA parallel bus (D[7:0]+RDY+ACK+DIR)", 11),
+        ("SRAM bank D (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("SRAM bank E (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("SRAM bank F (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("DPRAM 0 port A write (A[17:0]+D[15:0]+CE/OE/WE)", 37),
+        ("DPRAM 1 port A write (A[17:0]+D[15:0]+CE/OE/WE)", 37),
         ("Config flash SPI (MSPI boot)", 4),
         ("DONE/INITN/PROGRAMN", 3),
-        ("NVMe PERST# x 3 (slots 2,3,4)", 3),
-        ("NVMe CLKREQ# x 3", 3),
+        ("NVMe PERST# x 3", 3),
         ("Status LEDs", 2),
     ]
     total_b = 0
@@ -756,28 +735,24 @@ def power_budget_report():
     print("\n  Power Budget -- Dual PoE 802.3at (51W total available)")
     print("  " + "-" * 60)
     rails = [
-        ("ECP5-5G-85F A core (1.1V, 400mA)", 0.440),
-        ("ECP5-5G-85F A I/O (3.3V, 80mA)", 0.264),
+        ("ECP5-5G-85F A core (1.1V, 500mA, high util)", 0.550),
+        ("ECP5-5G-85F A I/O (3.3V, 150mA, 4x SRAM + DPRAM)", 0.495),
         ("ECP5-5G-85F A aux (2.5V, 20mA)", 0.050),
-        ("ECP5-5G-85F A SerDes TX (1.1V, 80mA x 4ch)", 0.352),
-        ("ECP5-5G-85F A SerDes RX (1.1V, 60mA x 4ch)", 0.264),
-        ("ECP5-5G-85F B core (1.1V, 350mA)", 0.385),
-        ("ECP5-5G-85F B I/O (3.3V, 50mA)", 0.165),
+        ("ECP5-5G-85F A SerDes (TX+RX, 4ch)", 0.616),
+        ("ECP5-5G-85F B core (1.1V, 450mA, high util)", 0.495),
+        ("ECP5-5G-85F B I/O (3.3V, 150mA, 2x SRAM + 2x DPRAM)", 0.495),
         ("ECP5-5G-85F B aux (2.5V, 20mA)", 0.050),
-        ("ECP5-5G-85F B SerDes TX (1.1V, 80mA x 4ch)", 0.352),
-        ("ECP5-5G-85F B SerDes RX (1.1V, 60mA x 4ch)", 0.264),
-        ("FPGA A TOE logic (~8K LUTs x 2 ports)", 0.080),
+        ("ECP5-5G-85F B SerDes (TX+RX, 4ch)", 0.616),
+        ("FPGA A TOE + query lanes (44K LUTs active)", 0.400),
+        ("FPGA B index engine + query lanes (44K LUTs)", 0.400),
         ("FPGA DSP array (312 MACs active)", 0.200),
-        ("13x RP2354B (1.1V+3.3V, ~275mW each)", 3.575),
-        ("3x IS61WV25616BLL (3.3V, 40mA each)", 0.396),
-        ("1x IDT70V28L DPRAM (3.3V, 120mA active)", 0.396),
-        ("13x LY68L6400 PSRAM (3.3V, 25mA each)", 1.073),
+        ("6x IS61WV25616BLL SRAM (3.3V, 40mA each)", 0.792),
+        ("2x IDT70V28L DPRAM (3.3V, 120mA each)", 0.792),
         ("2x RTL8221B 2.5GbE PHY (~800mW each)", 1.600),
-        ("Flash chips x15 (3.3V, ~200mA total)", 0.660),
+        ("Flash chips x2 (config, 3.3V)", 0.066),
         ("2x 100MHz LVDS oscillator", 0.198),
         ("25MHz crystal osc", 0.010),
         ("2x PoE PD controller overhead", 0.300),
-        ("OC headroom (+25% DVDD all picos)", 0.900),
         ("-- NVMe Drives --", 0),
         ("NVMe SSD x5 (3.3V, ~1A each typical)", 16.500),
     ]
@@ -825,41 +800,60 @@ def main():
 
     # Summary
     print(f"\n{'='*70}")
-    print(f" PicoWAL v{VERSION} -- Uber Storage Appliance (Pico-Only, No ARM SoC)")
+    print(f" PicoWAL v{VERSION} -- Pure FPGA Storage Appliance (Zero MCU)")
     print(f"{'='*70}")
     print()
-    print(" Architecture: 13x RP2354B + dual ECP5-85F. Pure pico. 52 cores total.")
+    print(" Architecture: 100% FPGA. No microcontrollers. 44 parallel query lanes.")
     print()
-    print("   2x ECP5-5G-85F     8x SerDes (170K LUT, 312 DSP MACs)")
-    print("   5x M.2 M-Key NVMe  10TB with 2TB drives (~1.25 GB/s aggregate)")
-    print("   13x RP2354B        12 session + 1 index (52 cores: 26xM33 + 26xRISC-V)")
+    print("   2x ECP5-5G-85F     170K LUT, 312 DSP MACs, 8x SerDes")
+    print("   44 query lanes     Hardwired B-tree walk + predicate filter")
+    print("   5x M.2 M-Key NVMe  10TB with 2TB drives")
+    print("   6x SRAM (512KB ea)  3MB page cache @ 10ns")
+    print("   2x DPRAM (512KB ea) 1MB B-tree index cache @ 15ns (dual-port)")
     print("   2x RTL8221B        2x 2.5GbE (5 Gbps aggregate)")
     print("   2x TPS23753A       Dual PoE 802.3at (51W)")
-    print("   FPGA TOE           Hardware TCP/IP on both ports")
-    print("   312 DSP MACs       62.4 GMAC/s INT18 vector search")
-    print("   Tile chain         SerDes daisy-chain for multi-card clusters")
+    print("   312 DSP MACs       62.4 GMAC/s vector search")
     print("   Board:             200x120mm, 4-layer")
     print()
-    print(" Session pico roles (firmware-assigned at boot):")
-    print("   CIFS/SMB:  Minimal SMB2 implementation -- file shares over network")
-    print("   DB Query:  SQL parse + plan + stream results")
-    print("   App Serve: REST/gRPC custom application logic")
-    print("   Any pico can run any role -- hot-reassign via management bus")
+    print(" Performance (@ 125MHz clock):")
+    print("   Cache hit:    200ns per query -> 220M queries/sec (44 lanes)")
+    print("   NVMe path:    15us per query  -> 312K queries/sec (NVMe-bound)")
+    print("   Blend (80%):  ~176M queries/sec sustained")
+    print("   Network:      5 Gbps line-rate (2x 2.5GbE)")
     print()
-    print(" Pico bus: 8-bit parallel, 15 pins per pico, ~50 MB/s each")
-    print("   DATA[7:0] + RDY + ACK + DIR + SOF + EOF + SOCK[1:0]")
-    print("   12 session buses = 600 MB/s aggregate (saturates 2x 2.5GbE)")
+    print(" Memory hierarchy:")
+    print("   DPRAM (1MB, 15ns)  Hot B-tree root + L1 index nodes")
+    print("   SRAM  (3MB, 10ns)  Page cache, TCP buffers, query results")
+    print("   NVMe  (10TB, 15us) Cold storage (3 data + 1 WAL + 1 index)")
     print()
-    print(" FPGA A (network-facing): 5 session picos")
-    print("   - Receives TCP streams from TOE, dispatches to session picos")
-    print("   - Direct block reads bypass picos (zero-copy NVMe -> TCP)")
-    print("   - Session picos handle CIFS/query/app logic")
+    print(" Query lane pipeline (per lane, ~2300 LUTs):")
+    print("   1. Parse request: extract key + predicates (8 clk)")
+    print("   2. B-tree walk: traverse DPRAM index nodes (8 clk)")
+    print("   3. Fetch: read SRAM cache or issue NVMe DMA (1-1875 clk)")
+    print("   4. Filter: apply predicate in 1 clock (pipelined)")
+    print("   5. Stream: frame result back to TCP (8 clk)")
     print()
-    print(" FPGA B (storage-facing): 7 session + 1 index pico")
-    print("   - Manages WAL + index NVMe drives")
-    print("   - Index pico = sole write authority (serialized commits)")
-    print("   - Additional session picos for read-heavy storage queries")
-    print("   - Tile chain output for multi-card clusters")
+    print(" LUT allocation (170K total across 2 FPGAs):")
+    print("   Network stack (2 ports):  44,000 LUTs")
+    print("   NVMe controllers (5x):    15,000 LUTs")
+    print("   DMA + SRAM arbitration:    5,000 LUTs")
+    print("   Index update engine:       3,000 LUTs")
+    print("   DSP glue (vector):         3,000 LUTs")
+    print("   44 query lanes:          101,200 LUTs (2,300 each)")
+    print("   TOTAL:                   171,200 / 170,000 (tight fit)")
+    print()
+    print(" FPGA A: TOE + socket mux + 22 query lanes + 2x NVMe DMA")
+    print(" FPGA B: Index engine + 22 query lanes + 3x NVMe DMA + tile chain")
+    print()
+    print(" Deterministic data paths:")
+    print("   PATH 1 (KV hit):   TCP -> parse -> DPRAM lookup -> SRAM -> TCP")
+    print("                      200ns end-to-end, zero NVMe")
+    print("   PATH 2 (KV miss):  TCP -> parse -> DPRAM -> NVMe fetch -> TCP")
+    print("                      ~15us (NVMe latency dominates)")
+    print("   PATH 3 (Write):    TCP -> parse -> NVMe WAL -> index update")
+    print("   PATH 4 (Scan):     TCP -> NVMe stream -> filter pipeline -> TCP")
+    print("   PATH 5 (Vector):   TCP -> NVMe stream -> DSP systolic -> top-K -> TCP")
+    print("   PATH 6 (CIFS):     SMB2 parse -> same as PATH 1/2")
     print()
     print(" SerDes allocation (8 channels):")
     print("   FPGA A CH0 -> NVMe slot 0 (data)")
@@ -872,31 +866,8 @@ def main():
     print("   FPGA B CH3 -> Tile chain (next card)")
     print()
     print(" Inter-FPGA link: 8-bit parallel GPIO bus + handshake (11 pins)")
-    print("   Allows session picos on FPGA B to read data from FPGA A drives")
-    print("   And FPGA A picos to request WAL/index ops via FPGA B")
-    print()
-    print(" Deterministic data paths:")
-    print("   PATH 1 (Direct KV): Client -> TCP -> FPGA A -> NVMe -> TCP (zero pico)")
-    print("   PATH 2 (Query):     Client -> TCP -> Session pico -> FPGA -> NVMe -> TCP")
-    print("   PATH 3 (Write):     Client -> TCP -> Index pico -> WAL -> index update")
-    print("   PATH 4 (Vector):    Client -> TCP -> FPGA DSP array -> top-K -> TCP")
-    print("   PATH 5 (CIFS):      Client -> SMB2 -> Session pico -> FPGA -> NVMe -> SMB2")
-    print()
-    print(" DSP acceleration: 312 MACs @ 200MHz = 62.4 GMAC/s INT18")
-    print("   Vector similarity search at NVMe wire speed")
-    print()
-    print(" Dual PoE: 2x 802.3at = 51W budget")
-    print(f"   Board logic ~{11.1:.1f}W + 5x NVMe ~16.5W = ~{27.6:.1f}W (margin ~{23.4:.1f}W)")
-    print()
-    print(" Pico command interface (8-bit parallel bus, frame-based):")
-    print("   SOF byte = command opcode, payload follows, EOF terminates")
-    print("   CMD_FIFO_POP   0x10  Query pico reads next descriptor from FIFO")
-    print("   CMD_IDX_READ   0x01  Read index block from NVMe via FPGA")
-    print("   CMD_IDX_WRITE  0x05  Write index block to NVMe via FPGA")
-    print("   CMD_COPY_OUT   0x02  FPGA reads data block -> streams to TCP")
-    print("   CMD_MULTI_START 0x03 Begin multi-block gather")
-    print("   CMD_MULTI_END  0x04  Flush gathered response")
-    print("   CMD_NOTIFY_ACK 0x11  Index pico acks write notification")
+    print("   FPGA A query lanes request index lookups via FPGA B DPRAM")
+    print("   FPGA B streams WAL/index updates to FPGA A page cache")
     print()
 
     print(" BOM (board only, excl. NVMe SSDs):")
@@ -918,29 +889,6 @@ def main():
     print(f"   GRAND TOTAL:                         {chr(163)}{grand:.2f}")
     print(f"   Budget remaining:                    {chr(163)}{1000.0 - grand:.2f}")
     print()
-
-    print(" OC Configuration (both picos):")
-    print("   TPS62A01 DVDD: R_FB1=100kΩ, R_FB2=91kΩ → 1.1V (stock)")
-    print("   OC mode:       R_FB2=82kΩ → 1.15V | R_FB2=68kΩ → 1.25V")
-    print("   RP2354B PLL:   stock 150MHz | OC target 200MHz")
-    print("   Extra decoupling: 10μF + 100nF per DVDD pin")
-    print()
-
-    print(" Data flow:")
-    print("   ┌─ FAST PATH (addr[52]=0) ─────────────────────────┐")
-    print("   │ upstream SPI → FPGA → PCIe NVMe read/write       │")
-    print("   │ zero copy, zero pico, FPGA drives PCIe directly  │")
-    print("   └──────────────────────────────────────────────────┘")
-    print("   ┌─ QUERY PATH (addr[52]=1) ────────────────────────┐")
-    print("   │ upstream → FPGA SRAM FIFO → qry_irq              │")
-    print("   │ query pico: FIFO_POP → IDX_READ → COPY_OUT       │")
-    print("   │ FPGA does all data movement, pico just commands   │")
-    print("   └──────────────────────────────────────────────────┘")
-    print("   ┌─ INDEX UPDATE (on data writes) ──────────────────┐")
-    print("   │ FPGA NVMe write + idx_irq                        │")
-    print("   │ index pico: IDX_READ → update → IDX_WRITE        │")
-    print("   │ indexes stored as blocks with addr[52]=1 on NVMe │")
-    print("   └──────────────────────────────────────────────────┘")
 
     pin_budget_report()
     power_budget_report()
