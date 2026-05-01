@@ -1,52 +1,76 @@
-# PicoCluster — Node Pinout Diagrams
+# PicoCluster — Pinout Diagrams (Star/Snowflake Topology)
 
-All nodes use a **single unified firmware image**. Hardware detection at boot
-determines role. Pins are physically wired differently per node type.
+PIO on the head nodes acts as a **switching fabric**. Workers connect
+point-to-point to their head with just 2 wires. No relay, no forwarding
+on worker nodes.
+
+## Architecture Overview
+
+```
+                 ┌─────────────────────┐
+    Ethernet ────┤      HEAD 1         ├──── Interlink ────┐
+    (W5500)      │  PIO Switch Fabric  │                   │
+                 │  6 ports × 20 Mbps  │                   │
+                 └─┬──┬──┬──┬──┬──┬───┘                   │
+                   │  │  │  │  │  │                        │
+                   ▼  ▼  ▼  ▼  ▼  ▼                       │
+                  W1 W2 W3 S1 W4 W5                        │
+                                                           │
+                 ┌─────────────────────┐                   │
+    Ethernet ────┤      HEAD 2         ├───────────────────┘
+    (W5500)      │  PIO Switch Fabric  │
+                 │  6 ports × 20 Mbps  │
+                 └─┬──┬──┬──┬──┬──┬───┘
+                   │  │  │  │  │  │
+                   ▼  ▼  ▼  ▼  ▼  ▼
+                  W6 W7 W8 S2 S3 W9
+```
 
 ## Pin Map Summary
 
-| GPIO | Worker | Head (W5500) | Storage (SD) |
-|------|--------|--------------|--------------|
-| 0 | Ring 0 TX | Ring 0 TX | Ring 0 TX |
-| 1 | Ring 0 RX | Ring 0 RX | Ring 0 RX |
-| 2 | Ring 1 TX | Ring 1 TX | Ring 1 TX |
-| 3 | Ring 1 RX | Ring 1 RX | Ring 1 RX |
-| 4 | Ring 2 TX | Ring 2 TX | Ring 2 TX |
-| 5 | Ring 2 RX | Ring 2 RX | Ring 2 RX |
-| 6 | Ring 3 TX | Ring 3 TX | Ring 3 TX |
-| 7 | Ring 3 RX | Ring 3 RX | Ring 3 RX |
-| 8 | — | — | — |
-| 9 | — | — | — |
-| 10 | — | — | — |
-| 11 | — | — | — |
-| 12 | — | — | SD MISO |
-| 13 | — | — | SD CS |
-| 14 | — | — | SD SCK |
-| 15 | — | — | SD MOSI |
-| 16 | — | W5500 MISO | — |
-| 17 | — | W5500 CS | — |
-| 18 | — | W5500 SCK | — |
-| 19 | — | W5500 MOSI | — |
-| 20 | — | W5500 RST | — |
-| 21 | — | W5500 INT | — |
-| 22-28 | — | — | — |
+| GPIO | Worker | Storage | Head |
+|------|--------|---------|------|
+| 0 | Link TX | Link TX | Port 0 TX |
+| 1 | Link RX | Link RX | Port 0 RX |
+| 2 | — | — | Port 1 TX |
+| 3 | — | — | Port 1 RX |
+| 4 | — | — | Port 2 TX |
+| 5 | — | — | Port 2 RX |
+| 6 | — | — | Port 3 TX |
+| 7 | — | — | Port 3 RX |
+| 8 | — | — | Port 4 TX |
+| 9 | — | — | Port 4 RX |
+| 10 | — | — | Port 5 TX |
+| 11 | — | — | Port 5 RX |
+| 12 | — | SD MISO | — |
+| 13 | — | SD CS | — |
+| 14 | — | SD SCK | — |
+| 15 | — | SD MOSI | — |
+| 16 | — | — | W5500 MISO |
+| 17 | — | — | W5500 CS |
+| 18 | — | — | W5500 SCK |
+| 19 | — | — | W5500 MOSI |
+| 20 | — | — | W5500 RST |
+| 21 | — | — | W5500 INT |
+| 26 | — | — | Interlink TX |
+| 27 | — | — | Interlink RX |
 
 ---
 
-## 1. Worker Node (Pico2 — bare compute)
+## 1. Worker Node (Pico2 — 2 wires only!)
 
 ```
                     ┌──────────────────────┐
                     │     Pico2 (RP2350)   │
                     │                      │
-          Ring0 TX ─┤ GP0            GP28  ├─ (ADC2)
-          Ring0 RX ─┤ GP1            GP27  ├─ (ADC1)
-          Ring1 TX ─┤ GP2            GP26  ├─ (ADC0)
-          Ring1 RX ─┤ GP3            RUN   ├─
-          Ring2 TX ─┤ GP4            GP22  ├─
-          Ring2 RX ─┤ GP5            GP21  ├─
-          Ring3 TX ─┤ GP6            GP20  ├─
-          Ring3 RX ─┤ GP7            GP19  ├─
+       Link TX  ───┤ GP0            GP28  ├─
+       Link RX  ───┤ GP1            GP27  ├─
+                    │ GP2            GP26  ├─
+                    │ GP3            RUN   ├─
+                    │ GP4            GP22  ├─
+                    │ GP5            GP21  ├─
+                    │ GP6            GP20  ├─
+                    │ GP7            GP19  ├─
                     ├──────────────────────┤
                GND ─┤ GND            GP18  ├─
                     │                GP17  ├─
@@ -60,196 +84,129 @@ determines role. Pins are physically wired differently per node type.
                     │                GP9   ├─
                     │                GP8   ├─
                3V3 ─┤ 3V3            GND   ├─ GND
-              VBUS ─┤ VBUS           VSYS  ├─ 5V in
+              VBUS ─┤ VBUS           VSYS  ├─ 5V
                     └──────────────────────┘
 
-    Wiring: 8 signal wires (GP0-GP7) + GND to ring bus
-    Power:  USB from hub (5V via VBUS)
-    Notes:  GP8-GP28 unused, leave floating or pull down
+    Wiring: GP0 → head port TX, GP1 ← head port RX, GND
+    Power:  USB from hub
+    PIO:    Only 2 SMs used (TX + RX), 10 SMs free!
+    GPIOs:  Only 2 used, 26 free for future expansion
 ```
 
-**Connections:**
-- GP0 → next node's GP1 (Ring 0: Express 1)
-- GP2 → next node's GP3 (Ring 1: Express 2)
-- GP4 → next node's GP5 (Ring 2: Normal)
-- GP6 → next node's GP7 (Ring 3: Storage)
-- GND → shared ground bus
+**The simplest node. Two wires + ground + USB power.**
 
 ---
 
-## 2. Head Node (Pico2W + W5500 Ethernet)
+## 2. Storage Node (Pico2 + SD Card — 6 wires)
 
 ```
                     ┌──────────────────────┐
-                    │   Pico2W (RP2350)    │
+                    │     Pico2 (RP2350)   │
                     │                      │
-          Ring0 TX ─┤ GP0            GP28  ├─ (ADC2)
-          Ring0 RX ─┤ GP1            GP27  ├─ (ADC1)
-          Ring1 TX ─┤ GP2            GP26  ├─ (ADC0)
-          Ring1 RX ─┤ GP3            RUN   ├─
-          Ring2 TX ─┤ GP4            GP22  ├─
-          Ring2 RX ─┤ GP5        ┌── GP21  ├─ W5500 INT
-          Ring3 TX ─┤ GP6        │   GP20  ├─ W5500 RST
-          Ring3 RX ─┤ GP7        │   GP19  ├─ W5500 MOSI (SPI0 TX)
-                    ├───────────────────────┤
-               GND ─┤ GND        │   GP18  ├─ W5500 SCK  (SPI0 SCK)
-                    │            │   GP17  ├─ W5500 CS   (SPI0 CSn)
-                    │            └── GP16  ├─ W5500 MISO (SPI0 RX)
-                    │                GP15  ├─
-                    │                GP14  ├─
-                    │                GP13  ├─
-                    │                GP12  ├─
-                    │                GP11  ├─
-                    │                GP10  ├─
-                    │                GP9   ├─
-                    │                GP8   ├─
-               3V3 ─┤ 3V3            GND   ├─ GND
-              VBUS ─┤ VBUS           VSYS  ├─ 5V in
-                    └──────────────────────┘
-
-                    ┌──────────────────────┐
-                    │   W5500 Module       │
-                    ├──────────────────────┤
-                    │ MISO ──────── GP16   │
-                    │ MOSI ──────── GP19   │
-                    │ SCK  ──────── GP18   │
-                    │ CS   ──────── GP17   │
-                    │ RST  ──────── GP20   │
-                    │ INT  ──────── GP21   │
-                    │ 3V3  ──────── 3V3    │
-                    │ GND  ──────── GND    │
-                    │ RJ45 ──────── LAN    │
-                    └──────────────────────┘
-
-    SPI0 @ 40 MHz — W5500 Ethernet controller
-    Wiring: 8 ring wires + 6 SPI wires + power
-    Power:  USB from hub (5V via VBUS)
-    WiFi:   CYW43 onboard (Pico2W) — available as backup
-```
-
-**Connections:**
-- GP0-GP7 → Ring bus (same as worker)
-- GP16-GP21 → W5500 module (SPI0)
-- Ethernet cable → network switch/router
-- GND → shared ground bus
-
----
-
-## 3. Storage Node (Pico2W + SD Card Reader)
-
-```
-                    ┌──────────────────────┐
-                    │   Pico2W (RP2350)    │
-                    │                      │
-          Ring0 TX ─┤ GP0            GP28  ├─ (ADC2)
-          Ring0 RX ─┤ GP1            GP27  ├─ (ADC1)
-          Ring1 TX ─┤ GP2            GP26  ├─ (ADC0)
-          Ring1 RX ─┤ GP3            RUN   ├─
-          Ring2 TX ─┤ GP4            GP22  ├─
-          Ring2 RX ─┤ GP5            GP21  ├─
-          Ring3 TX ─┤ GP6            GP20  ├─
-          Ring3 RX ─┤ GP7            GP19  ├─
+       Link TX  ───┤ GP0            GP28  ├─
+       Link RX  ───┤ GP1            GP27  ├─
+                    │ GP2            GP26  ├─
+                    │ GP3            RUN   ├─
+                    │ GP4            GP22  ├─
+                    │ GP5            GP21  ├─
+                    │ GP6            GP20  ├─
+                    │ GP7            GP19  ├─
                     ├──────────────────────┤
                GND ─┤ GND            GP18  ├─
                     │                GP17  ├─
                     │                GP16  ├─
-                    │   SD MOSI ──── GP15  ├─ SD MOSI (SPI1 TX)
-                    │   SD SCK  ──── GP14  ├─ SD SCK  (SPI1 SCK)
-                    │   SD CS   ──── GP13  ├─ SD CS   (SPI1 CSn)
-                    │   SD MISO ──── GP12  ├─ SD MISO (SPI1 RX)
-                    │                GP11  ├─
-                    │                GP10  ├─
-                    │                GP9   ├─
-                    │                GP8   ├─
+        SD MOSI ───┤ GP15           GP11  ├─
+        SD SCK  ───┤ GP14           GP10  ├─
+        SD CS   ───┤ GP13           GP9   ├─
+        SD MISO ───┤ GP12           GP8   ├─
                3V3 ─┤ 3V3            GND   ├─ GND
-              VBUS ─┤ VBUS           VSYS  ├─ 5V in
+              VBUS ─┤ VBUS           VSYS  ├─ 5V
                     └──────────────────────┘
 
-                    ┌──────────────────────┐
-                    │   SD Card Module     │
-                    ├──────────────────────┤
-                    │ MISO ──────── GP12   │
-                    │ MOSI ──────── GP15   │
-                    │ SCK  ──────── GP14   │
-                    │ CS   ──────── GP13   │
-                    │ 3V3  ──────── 3V3    │
-                    │ GND  ──────── GND    │
-                    └──────────────────────┘
-
-    SPI1 @ 25 MHz — SD card (SDHC, SPI mode)
-    Wiring: 8 ring wires + 4 SPI wires + power
-    Power:  USB from hub (5V via VBUS)
-    WiFi:   CYW43 onboard (Pico2W) — available for OTA/debug
+    Wiring: 2 link wires + 4 SD SPI wires + GND
+    Power:  USB from hub
+    SPI1:   SD card @ 25 MHz
 ```
-
-**Connections:**
-- GP0-GP7 → Ring bus (same as worker)
-- GP12-GP15 → SD card module (SPI1)
-- GND → shared ground bus
 
 ---
 
-## Ring Bus Wiring (All Nodes)
-
-The 4 rings form a **unidirectional chain**. Each node's TX connects to the
-next node's RX on the same ring:
+## 3. Head Node (Pico2W + W5500 — central switch)
 
 ```
-    ┌────────┐     ┌────────┐     ┌────────┐     ┌────────┐
-    │  HEAD  │     │ NODE 1 │     │ NODE 2 │     │ NODE N │
-    │        │     │        │     │        │     │        │
-    │ GP0 TX─┼────►│GP1 RX  │     │        │     │        │
-    │        │     │GP0 TX──┼────►│GP1 RX  │     │        │
-    │        │     │        │     │GP0 TX──┼─···─►GP1 RX  │
-    │ GP1 RX │◄────────────────────────────────────GP0 TX──┤  ← ring wraps back
-    │        │     │        │     │        │     │        │
-    └────────┘     └────────┘     └────────┘     └────────┘
+                    ┌──────────────────────────────────┐
+                    │        Pico2W (RP2350)           │
+                    │     PIO SWITCHING FABRIC         │
+                    │                                  │
+     Port 0 TX  ───┤ GP0                      GP28  ├─
+     Port 0 RX  ───┤ GP1                      GP27  ├─ Interlink RX
+     Port 1 TX  ───┤ GP2                      GP26  ├─ Interlink TX
+     Port 1 RX  ───┤ GP3                      RUN   ├─
+     Port 2 TX  ───┤ GP4                      GP22  ├─
+     Port 2 RX  ───┤ GP5                  ┌── GP21  ├─ W5500 INT
+     Port 3 TX  ───┤ GP6                  │   GP20  ├─ W5500 RST
+     Port 3 RX  ───┤ GP7                  │   GP19  ├─ W5500 MOSI
+     Port 4 TX  ───┤ GP8                  │   GP18  ├─ W5500 SCK
+     Port 4 RX  ───┤ GP9                  │   GP17  ├─ W5500 CS
+     Port 5 TX  ───┤ GP10                 └── GP16  ├─ W5500 MISO
+     Port 5 RX  ───┤ GP11                     GP15  ├─
+                    ├──────────────────────────────────┤
+               GND ─┤ GND                      GP14  ├─
+               3V3 ─┤ 3V3                      GP13  ├─
+              VBUS ─┤ VBUS                     GP12  ├─
+                    └──────────────────────────────────┘
 
-    Ring 0 (Express 1):  GP0→GP1  (20 Mbps Manchester)
-    Ring 1 (Express 2):  GP2→GP3  (20 Mbps Manchester)
-    Ring 2 (Normal):     GP4→GP5  (20 Mbps Manchester)
-    Ring 3 (Storage):    GP6→GP7  (20 Mbps Manchester)
+    PIO allocation (12 SMs total):
+      PIO0: SM0=Port0 TX, SM1=Port0 RX, SM2=Port1 TX, SM3=Port1 RX
+      PIO1: SM0=Port2 TX, SM1=Port2 RX, SM2=Port3 TX, SM3=Port3 RX
+      PIO2: SM0=Port4 TX, SM1=Port4 RX, SM2=Port5 TX, SM3=Port5 RX
+
+    SPI0:  W5500 Ethernet @ 40 MHz (GP16-GP21)
+    WiFi:  CYW43 onboard (backup/OTA)
 ```
 
-**Each wire is a single GPIO-to-GPIO connection (3.3V logic, Manchester encoded).**
-
-Last node in the chain wraps all TX outputs back to the head's RX inputs.
+**All 12 PIO state machines used as a 6-port crossbar switch.**
 
 ---
 
-## Physical Layout Example (14 nodes)
+## Wiring Diagram (Physical)
 
 ```
     USB Hub (20-port, powered)
-    ┌─────────────────────────────────────────────────┐
-    │ ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ●   │
-    └─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬─┬───┘
-      │ │ │ │ │ │ │ │ │ │ │ │ │ │
-      ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼
-    ┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐
-    │H1││H2││S1││S2││S3││W1││W2││W3││W4││W5││W6││W7││W8││W9│
-    └─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘
-     ▲   │                                      │
-     │   H1 = Head #1 (Pico2W + W5500, ingress) │
-     │   H2 = Head #2 (Pico2W + W5500, egress)  │
-     │   S1-S3 = Storage (Pico2 + SD reader)    │
-     │   W1-W9 = Workers (Pico2, bare)          │
-     │                                           │
-     └──── Ring wires (GP0-GP7) daisy-chain ─────┘
+    ════════════════════════════════════════════════════
+    │ │ │ │ │ │ │ │ │ │ │ │ │ │
+    ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼
+
+    HEAD 1 ─────────── Interlink ──────────── HEAD 2
+    ╔══╗                                      ╔══╗
+    ║  ║─── 2 wires ──→ Worker 1             ║  ║─── 2 wires ──→ Worker 6
+    ║  ║─── 2 wires ──→ Worker 2             ║  ║─── 2 wires ──→ Worker 7
+    ║  ║─── 2 wires ──→ Worker 3             ║  ║─── 2 wires ──→ Worker 8
+    ║  ║─── 2 wires ──→ Storage 1            ║  ║─── 2 wires ──→ Storage 2
+    ║  ║─── 2 wires ──→ Worker 4             ║  ║─── 2 wires ──→ Storage 3
+    ║  ║─── 2 wires ──→ Worker 5             ║  ║─── 2 wires ──→ Worker 9
+    ╚══╝                                      ╚══╝
+     │                                          │
+     └── Ethernet (W5500) ──→ Switch ←── Ethernet (W5500) ──┘
+
+    Total wires per worker: 2 signal + 1 GND = 3 wires
+    Total wires per head:   12 signal + 2 interlink + 6 SPI + GND
 ```
 
 ---
 
-## Bill of Materials (Per Node Type)
+## Comparison: Star vs Ring
 
-| Component | Worker | Head | Storage |
-|-----------|--------|------|---------|
-| Pico2 / Pico2W | Pico2 | Pico2W | Pico2 or Pico2W |
-| W5500 module | — | 1 | — |
-| SD card reader | — | — | 1 |
-| Ring wires (30AWG) | 8 + GND | 8 + GND | 8 + GND |
-| SPI wires | — | 6 | 4 |
-| USB cable | 1 | 1 | 1 |
+| Property | Star (current) | Ring (old) |
+|----------|----------------|------------|
+| Worker GPIOs | 2 | 8 |
+| Worker PIO SMs | 2 | 8 |
+| Worker firmware | Simple (no relay) | Complex (relay+snoop) |
+| Latency to any node | O(1) — 1 hop | O(N) — up to N hops |
+| Head PIO SMs | 12 (all used) | 8 |
+| Max nodes per head | 6 | Unlimited (ring) |
+| Total cluster max | 12 workers + 2 heads | Unlimited |
+| Single point of failure | Head (mitigated by 2) | None |
+| Wiring complexity | Simple (star cables) | Complex (daisy-chain) |
 
 ---
 
@@ -257,11 +214,24 @@ Last node in the chain wraps all TX outputs back to the head's RX inputs.
 
 | Parameter | Value |
 |-----------|-------|
-| Ring encoding | Manchester (IEEE 802.3) |
-| Ring bit rate | 20 Mbps |
-| Ring symbol rate | 10 MHz |
-| Ring logic levels | 3.3V CMOS |
-| W5500 SPI clock | 40 MHz |
-| SD SPI clock | 25 MHz |
-| Wire length (max) | ~20 cm recommended |
+| Encoding | Manchester (IEEE 802.3) |
+| Bit rate | 20 Mbps per link |
+| Symbol rate | 10 MHz |
+| Logic levels | 3.3V CMOS |
+| W5500 SPI | 40 MHz |
+| SD SPI | 25 MHz |
+| Max wire length | ~30 cm (star cables shorter than ring) |
 | System clock | 450 MHz (overclock) |
+
+---
+
+## Bill of Materials
+
+| Component | Worker | Storage | Head |
+|-----------|--------|---------|------|
+| Pico2 | 1 | 1 | — |
+| Pico2W | — | — | 1 |
+| W5500 module | — | — | 1 |
+| SD reader | — | 1 | — |
+| Signal wires | 2 | 2 | 14 (12 ports + 2 interlink) |
+| USB cable | 1 | 1 | 1 |

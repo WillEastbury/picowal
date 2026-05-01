@@ -6,75 +6,39 @@
 #include "packet.h"
 
 // ============================================================
-// Ring interconnect driver — PIO + DMA based
+// PIO Link Driver — Star topology point-to-point links
 // ============================================================
+//
+// Workers: single link (2 GPIOs) to their head node
+// Heads: 6 ports (12 GPIOs) + 1 interlink (2 GPIOs) = crossbar
+//
 
-// Ring configuration per link
-typedef struct {
-    uint8_t  pio_block;    // 0, 1, or 2
-    uint8_t  sm_tx;        // TX state machine index
-    uint8_t  sm_rx;        // RX state machine index
-    uint8_t  pin_tx;       // GPIO for TX
-    uint8_t  pin_rx;       // GPIO for RX
-    uint8_t  dma_ch_tx;    // DMA channel for TX
-    uint8_t  dma_ch_rx;    // DMA channel for RX
-    uint32_t baud_rate;    // Target baud (bit rate / 2 for manchester)
-} ring_config_t;
+// --- Worker API (single point-to-point link to head) ---
+void link_worker_init(void);
+bool link_worker_poll_rx(pkt_header_t *hdr, uint8_t **payload);
+void link_worker_send(const pkt_header_t *hdr, const uint8_t *payload, uint16_t len);
 
-// Ring state
-typedef struct {
-    ring_config_t config;
-    // RX buffer (double-buffered)
-    uint8_t  rx_buf[2][PKT_MAX_PAYLOAD + PKT_HEADER_SIZE];
-    uint8_t  rx_active_buf;   // Which buffer DMA is writing to
-    uint32_t rx_len;          // Bytes received in current packet
-    bool     rx_ready;        // Packet ready for processing
-    // TX buffer
-    uint8_t  tx_buf[PKT_MAX_PAYLOAD + PKT_HEADER_SIZE];
-    uint32_t tx_len;
-    bool     tx_busy;
-    // Stats
-    uint32_t packets_rx;
-    uint32_t packets_tx;
-    uint32_t packets_forwarded;
-    uint32_t crc_errors;
-} ring_state_t;
+// --- Head API (PIO switch fabric — 6 ports + interlink) ---
+void link_head_init(void);
 
-// Global ring array
-extern ring_state_t rings[RING_COUNT];
+// Poll a specific port for incoming packet
+bool link_head_poll_port(uint8_t port, pkt_header_t *hdr, uint8_t **payload);
 
-// Initialise all ring hardware (PIO programs, DMA, GPIOs)
-void ring_init_all(const ring_config_t configs[RING_COUNT]);
+// Send packet out a specific port
+void link_head_send_port(uint8_t port, const pkt_header_t *hdr,
+                         const uint8_t *payload, uint16_t len);
 
-// Initialise a single ring
-void ring_init(uint8_t ring_id, const ring_config_t *config);
+// Broadcast to all connected ports (except source)
+void link_head_broadcast(const pkt_header_t *hdr, const uint8_t *payload,
+                         uint16_t len, uint8_t except_port);
 
-// Poll for received packets (call from main loop or ISR)
-// Returns true if a packet is ready, fills header and payload pointer
-bool ring_poll_rx(uint8_t ring_id, pkt_header_t *hdr, uint8_t **payload);
+// Route a packet: look up dest -> port -> send (or interlink if not local)
+bool link_head_route(const pkt_header_t *hdr, const uint8_t *payload, uint16_t len);
 
-// Mark RX buffer as consumed (re-arm DMA)
-void ring_rx_done(uint8_t ring_id);
+// Register a node ID on a port (called during discovery)
+void link_head_set_port_node(uint8_t port, uint8_t node_id);
 
-// Send a packet on a ring (non-blocking, queues to DMA)
-bool ring_send(uint8_t ring_id, const pkt_header_t *hdr,
-               const uint8_t *payload, uint32_t payload_len);
-
-// Forward a raw packet to another ring (zero-copy if possible)
-void ring_forward(uint8_t src_ring, uint8_t dst_ring);
-
-// Check if TX is idle
-bool ring_tx_ready(uint8_t ring_id);
-
-// --- Snooping / caching hook ---
-// Called by RX ISR for every packet that passes through
-typedef void (*ring_snoop_cb)(uint8_t ring_id, const pkt_header_t *hdr,
-                              const uint8_t *payload);
-void ring_set_snoop_callback(ring_snoop_cb cb);
-
-// --- Relay logic ---
-// Process incoming packet: consume if for us, forward otherwise
-// Returns true if packet was consumed locally
-bool ring_process_packet(uint8_t ring_id, uint8_t my_node_id);
+// Get port index for a node_id (0xFF if not found)
+uint8_t link_head_find_port(uint8_t node_id);
 
 #endif // PICOCLUSTER_RING_H

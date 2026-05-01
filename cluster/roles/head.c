@@ -9,360 +9,210 @@
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "hardware/watchdog.h"
 
 #include <string.h>
 
 // ============================================================
-// Head Role — Network gateway + scheduler
-// Core 0: W5500 network I/O + scheduling
-// Core 1: Ring management + result collection
+// Head Role — PIO switch fabric + network gateway + scheduler
+// Core 0: Switch fabric (poll all 6 ports, route packets)
+// Core 1: W5500 network I/O + scheduling logic
 // ============================================================
 
-#define MAX_WORKER_NODES    14
-#define MAX_PENDING_JOBS    64
+// --- State ---
+static card_cache_t g_card_cache;
+static lease_table_t g_lease_table;
 
-// --- Worker tracking ---
+// --- Scheduler state ---
 typedef struct {
     uint8_t  node_id;
-    uint8_t  state;          // 0=idle, 1=busy, 2=offline
+    uint8_t  port;
+    uint8_t  state;       // 0=idle, 1=busy
     uint8_t  queue_depth;
     uint16_t card_count;
-    uint32_t last_seen;
-    uint32_t bloom[8];       // Card residency bloom filter
-} worker_info_t;
+    uint32_t exec_count;
+    uint32_t last_seen;   // time_us_32
+} node_info_t;
 
-static worker_info_t g_workers[MAX_WORKER_NODES];
-static uint8_t g_worker_count = 0;
+static node_info_t g_nodes[MAX_NODES];
+static uint8_t g_node_count = 0;
 
-// --- Pending job tracking ---
-typedef struct {
-    uint8_t  active;
-    uint8_t  dest_node;
-    uint8_t  card_major;
-    uint8_t  card_minor;
-    uint8_t  sock;           // Network socket waiting for response
-    uint32_t timestamp;
-} pending_job_t;
-
-static pending_job_t g_jobs[MAX_PENDING_JOBS];
-
-// --- Network config ---
-static const w5500_net_config_t net_config = {
-    .mac     = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01},
-    .ip      = {192, 168, 1, 100},
-    .gateway = {192, 168, 1, 1},
-    .subnet  = {255, 255, 255, 0},
-};
-
-// --- Card cache (head also caches for fast distribution) ---
-static card_cache_t g_card_cache;
-static volatile uint8_t g_node_id = ADDR_MASTER;
-
-// --- Ring config (same as worker) ---
-static const ring_config_t head_ring_configs[RING_COUNT] = {
-    { .pio_block = 0, .sm_tx = 0, .sm_rx = 1,
-      .pin_tx = RING0_PIN_TX, .pin_rx = RING0_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING0_TX, .dma_ch_rx = DMA_CH_RING0_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 0, .sm_tx = 2, .sm_rx = 3,
-      .pin_tx = RING1_PIN_TX, .pin_rx = RING1_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING1_TX, .dma_ch_rx = DMA_CH_RING1_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 1, .sm_tx = 0, .sm_rx = 1,
-      .pin_tx = RING2_PIN_TX, .pin_rx = RING2_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING2_TX, .dma_ch_rx = DMA_CH_RING2_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 1, .sm_tx = 2, .sm_rx = 3,
-      .pin_tx = RING3_PIN_TX, .pin_rx = RING3_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING3_TX, .dma_ch_rx = DMA_CH_RING3_RX,
-      .baud_rate = RING_BAUD_RATE },
-};
-
-// --- Bloom filter helpers ---
-static inline void bloom_set(uint32_t bloom[8], uint8_t major, uint8_t minor) {
-    uint32_t h = (uint32_t)major * 31 + minor;
-    bloom[h >> 5] |= (1u << (h & 31));
-}
-
-static inline bool bloom_test(const uint32_t bloom[8], uint8_t major, uint8_t minor) {
-    uint32_t h = (uint32_t)major * 31 + minor;
-    return (bloom[h >> 5] & (1u << (h & 31))) != 0;
-}
-
-// --- Scheduler ---
-static uint8_t schedule_worker(uint8_t card_major, uint8_t card_minor) {
+// --- Find least-loaded idle worker ---
+static uint8_t schedule_worker(void) {
     uint8_t best = 0xFF;
-    uint8_t best_score = 0xFF;
+    uint8_t best_depth = 0xFF;
 
-    for (uint8_t i = 0; i < g_worker_count; i++) {
-        if (g_workers[i].state == 2) continue;  // Skip offline
-
-        uint8_t score = g_workers[i].queue_depth;
-        if (!bloom_test(g_workers[i].bloom, card_major, card_minor)) {
-            score += 4;  // Cache miss penalty
-        }
-
-        if (score < best_score) {
-            best_score = score;
-            best = i;
+    for (uint8_t i = 0; i < g_node_count; i++) {
+        if (g_nodes[i].state == 0 && g_nodes[i].queue_depth < best_depth) {
+            best = g_nodes[i].node_id;
+            best_depth = g_nodes[i].queue_depth;
         }
     }
-
-    return (best != 0xFF) ? g_workers[best].node_id : 1;
+    return best;
 }
 
-// --- Push card to ring if target likely doesn't have it ---
-static void ensure_card_on_ring(uint8_t target, uint8_t major, uint8_t minor) {
-    // Check target's bloom filter
-    for (uint8_t i = 0; i < g_worker_count; i++) {
-        if (g_workers[i].node_id == target) {
-            if (bloom_test(g_workers[i].bloom, major, minor)) return;
-            break;
+// --- Update node info from STATUS packet ---
+static void update_node_status(uint8_t src_port, uint8_t src_id,
+                               const pkt_status_t *st) {
+    for (uint8_t i = 0; i < g_node_count; i++) {
+        if (g_nodes[i].node_id == src_id) {
+            g_nodes[i].state = st->node_state;
+            g_nodes[i].queue_depth = st->queue_depth;
+            g_nodes[i].card_count = st->card_count;
+            g_nodes[i].exec_count = st->exec_count;
+            g_nodes[i].last_seen = time_us_32();
+            return;
         }
     }
-
-    uint32_t card_len;
-    uint32_t *card = card_cache_get(&g_card_cache, major, minor, &card_len);
-    if (!card) return;
-
-    static uint8_t card_buf[PKT_MAX_PAYLOAD];
-    pkt_card_data_t *cpkt = (pkt_card_data_t *)card_buf;
-    cpkt->card_major = major;
-    cpkt->card_minor = minor;
-    cpkt->version = 1;
-    cpkt->bytecode_len = card_len * 4;
-    memcpy(cpkt->bytecode, card, card_len * 4);
-
-    uint16_t plen = sizeof(pkt_card_data_t) + card_len * 4;
-    pkt_header_t hdr = {
-        .dest = ADDR_BROADCAST,
-        .src = ADDR_MASTER,
-        .type = PKT_CARD_DATA,
-        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 0),
-        .payload_len = plen,
-    };
-    hdr.crc16 = crc16_ccitt(card_buf, plen);
-    ring_send(RING_NORMAL, &hdr, card_buf, plen);
-
-    // Update all bloom filters
-    for (uint8_t i = 0; i < g_worker_count; i++) {
-        bloom_set(g_workers[i].bloom, major, minor);
+    // New node
+    if (g_node_count < MAX_NODES) {
+        g_nodes[g_node_count] = (node_info_t){
+            .node_id = src_id,
+            .port = src_port,
+            .state = st->node_state,
+            .queue_depth = st->queue_depth,
+            .card_count = st->card_count,
+            .exec_count = st->exec_count,
+            .last_seen = time_us_32(),
+        };
+        g_node_count++;
     }
 }
 
-// --- Dispatch exec to cluster ---
-static int dispatch_exec(uint8_t card_major, uint8_t card_minor,
-                         const uint8_t *data, uint16_t data_len, uint8_t sock) {
-    uint8_t target = schedule_worker(card_major, card_minor);
-    ensure_card_on_ring(target, card_major, card_minor);
+// --- Core 0: PIO switch fabric ---
+// Polls all 6 ports + interlink, routes packets by destination
+static void core0_switch_loop(void) {
+    link_head_init();
 
-    static uint8_t exec_buf[PKT_MAX_PAYLOAD];
-    pkt_exec_t *exec = (pkt_exec_t *)exec_buf;
-    exec->card_major = card_major;
-    exec->card_minor = card_minor;
-    exec->data_len = data_len;
-    if (data_len > 0) memcpy(exec->data, data, data_len);
+    // Run discovery — accept ADDR_REQ from nodes, assign IDs
+    disc_master_init(&g_lease_table);
 
-    uint16_t plen = sizeof(pkt_exec_t) + data_len;
-    pkt_header_t hdr = {
-        .dest = target,
-        .src = ADDR_MASTER,
-        .type = PKT_EXEC,
-        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 1),
-        .payload_len = plen,
-    };
-    hdr.crc16 = crc16_ccitt(exec_buf, plen);
-    ring_send(RING_EXPRESS_1, &hdr, exec_buf, plen);
-
-    // Track pending job
-    for (int i = 0; i < MAX_PENDING_JOBS; i++) {
-        if (!g_jobs[i].active) {
-            g_jobs[i] = (pending_job_t){
-                .active = 1, .dest_node = target,
-                .card_major = card_major, .card_minor = card_minor,
-                .sock = sock, .timestamp = time_us_32(),
-            };
-            return i;
-        }
-    }
-    return -1;
-}
-
-// --- Handle result from worker ---
-static void handle_ring_result(const pkt_header_t *hdr, const uint8_t *payload) {
-    const pkt_result_t *result = (const pkt_result_t *)payload;
-
-    // Find matching pending job
-    for (int i = 0; i < MAX_PENDING_JOBS; i++) {
-        if (!g_jobs[i].active) continue;
-        if (g_jobs[i].dest_node == hdr->src &&
-            g_jobs[i].card_major == result->card_major &&
-            g_jobs[i].card_minor == result->card_minor) {
-
-            // Send result back via network
-            if (result->data_len > 0) {
-                w5500_socket_send(g_jobs[i].sock, result->data, result->data_len);
-            }
-            g_jobs[i].active = 0;
-
-            // Update worker state
-            for (uint8_t w = 0; w < g_worker_count; w++) {
-                if (g_workers[w].node_id == hdr->src) {
-                    if (g_workers[w].queue_depth > 0) g_workers[w].queue_depth--;
-                    break;
+    // Discovery phase: poll ports and handle REQs until settled
+    while (!disc_master_settled(&g_lease_table)) {
+        watchdog_update();
+        for (uint8_t p = 0; p <= PORTS_PER_HEAD; p++) {
+            pkt_header_t hdr;
+            uint8_t *payload;
+            if (link_head_poll_port(p, &hdr, &payload)) {
+                if (disc_master_handle(&g_lease_table, p, &hdr, payload)) {
+                    // REQ handled — register port mapping
+                    if (g_lease_table.count > 0) {
+                        lease_entry_t *last = &g_lease_table.entries[g_lease_table.count - 1];
+                        link_head_set_port_node(p, last->node_id);
+                    }
                 }
             }
-            return;
         }
-    }
-}
-
-// --- Handle NAK (cache miss) ---
-static void handle_ring_nak(const pkt_header_t *hdr, const uint8_t *payload) {
-    const pkt_nak_t *nak = (const pkt_nak_t *)payload;
-    ensure_card_on_ring(hdr->src, nak->card_major, nak->card_minor);
-}
-
-// --- Handle STATUS heartbeat ---
-static void handle_ring_status(const pkt_header_t *hdr, const uint8_t *payload) {
-    const pkt_status_t *st = (const pkt_status_t *)payload;
-
-    for (uint8_t i = 0; i < g_worker_count; i++) {
-        if (g_workers[i].node_id == hdr->src) {
-            g_workers[i].state = st->node_state;
-            g_workers[i].queue_depth = st->queue_depth;
-            g_workers[i].card_count = st->card_count;
-            g_workers[i].last_seen = time_us_32();
-            return;
-        }
+        sleep_ms(1);
     }
 
-    // New worker — add to list
-    if (g_worker_count < MAX_WORKER_NODES) {
-        worker_info_t *w = &g_workers[g_worker_count++];
-        w->node_id = hdr->src;
-        w->state = st->node_state;
-        w->queue_depth = st->queue_depth;
-        w->card_count = st->card_count;
-        w->last_seen = time_us_32();
-        memset(w->bloom, 0, sizeof(w->bloom));
-    }
-}
-
-// --- Core 1: Ring polling ---
-static void core1_ring_entry(void) {
-    ring_init_all(head_ring_configs);
-    ring_set_snoop_callback(NULL);  // Head doesn't snoop-cache
-
+    // Main switching loop
     while (1) {
-        for (uint8_t r = 0; r < RING_COUNT; r++) {
+        watchdog_update();
+
+        for (uint8_t p = 0; p <= PORTS_PER_HEAD; p++) {
             pkt_header_t hdr;
             uint8_t *payload;
 
-            if (!ring_poll_rx(r, &hdr, &payload)) continue;
+            if (!link_head_poll_port(p, &hdr, &payload)) continue;
 
-            // CRC
-            uint16_t expected = hdr.crc16;
-            if (hdr.payload_len > 0 &&
-                crc16_ccitt(payload, hdr.payload_len) != expected) {
-                ring_rx_done(r);
-                continue;
-            }
-
-            if (hdr.dest == ADDR_MASTER || hdr.dest == ADDR_BROADCAST) {
+            // Packets addressed to head (ADDR_MASTER = 0x00)
+            if (hdr.dest == ADDR_MASTER) {
                 switch (hdr.type) {
+                case PKT_STATUS:
+                    update_node_status(p, hdr.src, (pkt_status_t *)payload);
+                    break;
                 case PKT_RESULT:
-                case PKT_BATCH_RES:
-                    handle_ring_result(&hdr, payload);
+                    // Store result for network egress (Core 1 picks up)
+                    // TODO: intercore result queue
                     break;
                 case PKT_NAK:
-                    handle_ring_nak(&hdr, payload);
+                    // Node needs a card — serve from cache or SD
+                    {
+                        const pkt_nak_t *nak = (const pkt_nak_t *)payload;
+                        uint32_t card_len;
+                        uint32_t *card = card_cache_get(&g_card_cache,
+                                                        nak->card_major, nak->card_minor,
+                                                        &card_len);
+                        if (card) {
+                            // Build CARD_DATA and send to requesting port
+                            static uint8_t card_pkt[PKT_MAX_PAYLOAD];
+                            pkt_card_data_t *cpkt = (pkt_card_data_t *)card_pkt;
+                            cpkt->card_major = nak->card_major;
+                            cpkt->card_minor = nak->card_minor;
+                            cpkt->version = 1;
+                            cpkt->bytecode_len = card_len;
+                            memcpy(cpkt->bytecode, card, card_len);
+
+                            uint16_t plen = sizeof(pkt_card_data_t) + card_len;
+                            pkt_header_t chdr = {
+                                .dest = hdr.src,
+                                .src = ADDR_MASTER,
+                                .type = PKT_CARD_DATA,
+                                .flags = 0,
+                                .payload_len = plen,
+                            };
+                            chdr.crc16 = crc16_ccitt(card_pkt, plen);
+                            link_head_send_port(p, &chdr, card_pkt, plen);
+                        }
+                    }
                     break;
-                case PKT_STATUS:
-                    handle_ring_status(&hdr, payload);
+                case PKT_ADDR_REQ:
+                    // Late discovery REQ (node rebooted)
+                    if (disc_master_handle(&g_lease_table, p, &hdr, payload)) {
+                        lease_entry_t *last = &g_lease_table.entries[g_lease_table.count - 1];
+                        link_head_set_port_node(p, last->node_id);
+                    }
                     break;
                 default:
                     break;
                 }
+            } else {
+                // Route to destination (another node or broadcast)
+                link_head_route(&hdr, payload, hdr.payload_len);
             }
-
-            ring_rx_done(r);
         }
     }
 }
 
-// --- Core 0: Network I/O ---
-static void core0_network_loop(void) {
-    // Init W5500
-    if (!w5500_init(&net_config)) {
-        // Fatal: W5500 detected but init failed
-        while (1) sleep_ms(1000);
-    }
+// --- Core 1: Network I/O + job dispatch ---
+static void core1_network(void) {
+    w5500_init();
+    card_cache_init(&g_card_cache);
+    card_cache_warm_from_flash(&g_card_cache);
 
-    // Open TCP listener on port 8080
-    int listen_sock = w5500_socket_open(W5500_PROTO_TCP, 8080);
-    if (listen_sock >= 0) {
-        w5500_socket_listen((uint8_t)listen_sock);
-    }
+    // Open UDP socket for job ingress
+    w5500_socket_open(0, W5500_PROTO_UDP, 8002);
 
-    // Open UDP socket on port 9000 (fast command channel)
-    int udp_sock = w5500_socket_open(W5500_PROTO_UDP, 9000);
-
-    // Run discovery
-    discovery_run_master();
-
-    // Main loop
     static uint8_t net_buf[PKT_MAX_PAYLOAD];
 
     while (1) {
-        // Check TCP connections
-        if (listen_sock >= 0 && w5500_socket_connected((uint8_t)listen_sock)) {
-            int n = w5500_socket_recv((uint8_t)listen_sock, net_buf, sizeof(net_buf));
-            if (n > 0) {
-                // Parse: [card_major][card_minor][data...]
-                if (n >= 2) {
-                    uint8_t major = net_buf[0];
-                    uint8_t minor = net_buf[1];
-                    dispatch_exec(major, minor, net_buf + 2, (uint16_t)(n - 2),
-                                  (uint8_t)listen_sock);
-                }
+        watchdog_update();
+
+        // Receive network packets
+        uint16_t len = w5500_socket_recv(0, net_buf, sizeof(net_buf));
+        if (len > 0) {
+            // Parse as EXEC request, schedule to a worker
+            uint8_t target = schedule_worker();
+            if (target != 0xFF) {
+                pkt_header_t hdr = {
+                    .dest = target,
+                    .src = ADDR_MASTER,
+                    .type = PKT_EXEC,
+                    .flags = 0,
+                    .payload_len = len,
+                };
+                hdr.crc16 = crc16_ccitt(net_buf, len);
+                link_head_route(&hdr, net_buf, len);
             }
         }
 
-        // Check UDP
-        if (udp_sock >= 0) {
-            uint8_t src_ip[4];
-            uint16_t src_port;
-            int n = w5500_socket_recvfrom((uint8_t)udp_sock, net_buf, sizeof(net_buf),
-                                          src_ip, &src_port);
-            if (n >= 2) {
-                uint8_t major = net_buf[0];
-                uint8_t minor = net_buf[1];
-                dispatch_exec(major, minor, net_buf + 2, (uint16_t)(n - 2),
-                              (uint8_t)udp_sock);
-            }
-        }
-
-        // Timeout check for pending jobs
-        uint32_t now = time_us_32();
-        for (int i = 0; i < MAX_PENDING_JOBS; i++) {
-            if (g_jobs[i].active && (now - g_jobs[i].timestamp) > 5000000) {
-                // 5 second timeout — mark worker as slow/offline
-                g_jobs[i].active = 0;
-            }
-        }
-
-        sleep_us(100);  // Yield briefly
+        sleep_us(10);
     }
 }
 
 // --- Entry point ---
 void role_head_run(void) {
-    card_cache_init(&g_card_cache);
-    card_cache_warm_from_flash(&g_card_cache);
-
-    g_node_id = ADDR_MASTER;
-
-    multicore_launch_core1(core1_ring_entry);
-    core0_network_loop();  // Never returns
+    multicore_launch_core1(core1_network);
+    core0_switch_loop();
 }
