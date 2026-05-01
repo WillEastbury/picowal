@@ -4,7 +4,6 @@
 #include "../common/card_cache.h"
 #include "../common/ring.h"
 #include "../drivers/sd.h"
-#include "../discovery/discovery.h"
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -27,7 +26,6 @@ static link_port_t g_xconn_ports[STORE_XCONN_COUNT];   // Master (we pull/push t
 
 // --- State ---
 static card_cache_t g_card_cache;
-static volatile uint8_t g_node_id = 0xFF;
 
 // --- SD card index (maps card_major:minor → sector on SD) ---
 #define SD_INDEX_MAX 1024
@@ -105,7 +103,7 @@ static bool xconn_fetch_card(uint8_t major, uint8_t minor) {
     pkt_nak_t req = { .card_major = major, .card_minor = minor, .version = 0 };
     pkt_header_t hdr = {
         .dest = ADDR_BROADCAST,
-        .src = g_node_id,
+        .src = 0,
         .type = PKT_CARD_REQ,
         .flags = 0,
         .payload_len = sizeof(req),
@@ -166,7 +164,7 @@ static void handle_card_request(link_port_t *port, const pkt_header_t *hdr,
         uint16_t plen = sizeof(pkt_card_data_t) + card_len;
         pkt_header_t reply_hdr = {
             .dest = hdr->src,
-            .src = g_node_id,
+            .src = 0,
             .type = PKT_CARD_DATA,
             .flags = 0,
             .payload_len = plen,
@@ -178,7 +176,7 @@ static void handle_card_request(link_port_t *port, const pkt_header_t *hdr,
         pkt_nak_t nak = { .card_major = major, .card_minor = minor, .version = 0 };
         pkt_header_t nak_hdr = {
             .dest = hdr->src,
-            .src = g_node_id,
+            .src = 0,
             .type = PKT_NAK,
             .flags = 0,
             .payload_len = sizeof(nak),
@@ -214,7 +212,7 @@ static void handle_xconn_request(link_port_t *port, const pkt_header_t *hdr,
         uint16_t plen = sizeof(pkt_card_data_t) + card_len;
         pkt_header_t reply_hdr = {
             .dest = hdr->src,
-            .src = g_node_id,
+            .src = 0,
             .type = PKT_CARD_DATA,
             .flags = 0,
             .payload_len = plen,
@@ -284,8 +282,6 @@ void role_storage_run(void) {
     sd_init();
     sd_load_index();
 
-    g_node_id = disc_participant_run(2);  // ROLE_STORAGE
-    if (g_node_id == 0) g_node_id = ADDR_STORAGE_BASE;
 
     multicore_launch_core1(core1_prefetch);
     core0_loop();

@@ -16,7 +16,7 @@
 #include "common/config.h"
 #include "detect/detect.h"
 #include "roles/roles.h"
-#include "discovery/discovery.h"
+
 
 #include <stdio.h>
 

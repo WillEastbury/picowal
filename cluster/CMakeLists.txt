@@ -33,8 +33,6 @@ add_executable(picocluster
     roles/worker.c
     roles/head.c
     roles/storage.c
-    # Discovery
-    discovery/discovery.c
 )
 
 target_include_directories(picocluster PRIVATE
@@ -43,7 +41,6 @@ target_include_directories(picocluster PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/detect
     ${CMAKE_CURRENT_LIST_DIR}/drivers
     ${CMAKE_CURRENT_LIST_DIR}/roles
-    ${CMAKE_CURRENT_LIST_DIR}/discovery
 )
 
 target_link_libraries(picocluster
