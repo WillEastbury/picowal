@@ -11,6 +11,10 @@
 
 // --- Clock ---
 #define SYS_CLOCK_KHZ       300000   // 300 MHz (safe overclock)
+#define SYS_CLOCK_IDLE_KHZ  12000   // 12 MHz idle (5 mA)
+#define SYS_CLOCK_LOW_KHZ   48000   // 48 MHz light work
+#define SYS_CLOCK_MID_KHZ  150000   // 150 MHz moderate
+#define SYS_CLOCK_MAX_KHZ  300000   // 300 MHz full blast
 
 // --- Node limits ---
 #define MAX_NODES           16

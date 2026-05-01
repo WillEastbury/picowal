@@ -8,6 +8,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "hardware/watchdog.h"
+#include "hardware/clocks.h"
 
 #include <string.h>
 
@@ -165,6 +166,21 @@ static void core0_loop(void) {
                         .crc16 = crc16_ccitt((uint8_t *)&st, sizeof(st)),
                     };
                     link_send(&g_head_link, &reply, (uint8_t *)&st, sizeof(st));
+                }
+                break;
+            case PKT_CLOCK_SET:
+                {
+                    if (hdr.payload_len >= sizeof(pkt_clock_set_t)) {
+                        const pkt_clock_set_t *clk = (const pkt_clock_set_t *)payload;
+                        set_sys_clock_khz(clk->target_khz, true);
+                    }
+                    // ACK with PONG
+                    pkt_header_t ack = {
+                        .type = PKT_PONG,
+                        .payload_len = 0,
+                        .crc16 = 0,
+                    };
+                    link_send(&g_head_link, &ack, NULL, 0);
                 }
                 break;
             default:

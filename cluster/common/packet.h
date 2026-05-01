@@ -23,6 +23,7 @@
 #define PKT_NAK        0x08  // Card not found (storage → worker)
 #define PKT_PING       0x09  // Health check (any direction)
 #define PKT_PONG       0x0A  // Health response
+#define PKT_CLOCK_SET  0x0B  // Set system clock (head → worker)
 
 // --- Packet header (5 bytes, minimal) ---
 typedef struct __attribute__((packed)) {
@@ -75,6 +76,11 @@ typedef struct __attribute__((packed)) {
     uint16_t item_size;    // 0 = variable
     uint8_t  data[];
 } pkt_batch_t;
+
+// --- CLOCK_SET payload ---
+typedef struct __attribute__((packed)) {
+    uint32_t target_khz;   // Target clock in KHz (12000, 48000, 150000, 300000)
+} pkt_clock_set_t;
 
 // --- STATUS payload ---
 typedef struct __attribute__((packed)) {
