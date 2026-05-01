@@ -1,452 +1,292 @@
 #include "roles.h"
 #include "../common/config.h"
-#include "../common/isa.h"
 #include "../common/packet.h"
 #include "../common/card_cache.h"
 #include "../common/ring.h"
 #include "../drivers/sd.h"
+#include "../discovery/discovery.h"
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-#include "hardware/flash.h"
+#include "hardware/watchdog.h"
 
 #include <string.h>
 
 // ============================================================
-// Storage Role — SD-backed card server + compute when idle
-// Core 0: Ring relay + card serving from SD
-// Core 1: VM execution (dual-role compute)
+// Storage Role — Card server with cross-connects
+// GP0-GP3: slave ports (workers request cards from us)
+// GP4-GP5: master cross-connect ports (replicate/fetch from peers)
+// SPI1: SD card (persistent card storage)
+// Core 0: Serve card requests from workers + cross-connect I/O
+// Core 1: SD card reads (background prefetch)
 // ============================================================
 
-// --- SD card layout for card storage ---
-// Sector 0: Storage header (magic, card count, version)
-// Sector 1-N: Card index (major, minor, version, start_sector, sector_count)
-// Sector N+1...: Card bytecode data
+// --- Links ---
+static link_port_t g_worker_ports[STORE_WORKER_COUNT];  // Slave (workers pull from us)
+static link_port_t g_xconn_ports[STORE_XCONN_COUNT];   // Master (we pull/push to peers)
 
-#define SD_HEADER_SECTOR     0
-#define SD_INDEX_START       1
-#define SD_INDEX_SECTORS     8        // 8 sectors = 4KB = ~256 card entries
-#define SD_DATA_START        (SD_INDEX_START + SD_INDEX_SECTORS)
+// --- State ---
+static card_cache_t g_card_cache;
+static volatile uint8_t g_node_id = 0xFF;
 
-#define SD_MAGIC             0x50434453  // "PCDS"
-#define SD_MAX_CARDS         256
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint16_t card_count;
-    uint16_t version;
-    uint32_t next_data_sector;   // Next free sector for card data
-    uint8_t  reserved[500];      // Pad to 512 bytes
-} sd_storage_header_t;
-
-typedef struct __attribute__((packed)) {
+// --- SD card index (maps card_major:minor → sector on SD) ---
+#define SD_INDEX_MAX 1024
+typedef struct {
     uint8_t  major;
     uint8_t  minor;
     uint16_t version;
-    uint32_t start_sector;
-    uint32_t byte_len;
-    uint32_t reserved;
-} sd_card_index_entry_t;  // 16 bytes each, 32 per sector
+    uint32_t sector;    // Starting sector on SD
+    uint32_t length;    // Bytecode length in bytes
+} sd_card_entry_t;
 
-// --- State ---
-static sd_info_t g_sd_info;
-static sd_storage_header_t g_sd_header;
-static sd_card_index_entry_t g_sd_index[SD_MAX_CARDS];
-static card_cache_t g_card_cache;   // SRAM cache
-static volatile uint8_t g_node_id = 0xFF;
+static sd_card_entry_t g_sd_index[SD_INDEX_MAX];
+static uint16_t g_sd_index_count = 0;
 
-// VM state (for dual-role compute)
-static uint8_t __attribute__((aligned(4))) vm_data_mem[MEM_VM_DATA_SIZE];
-static uint8_t __attribute__((aligned(4))) vm_stack_mem[MEM_VM_STACK_SIZE];
-static uint8_t __attribute__((aligned(4))) result_buf[MEM_RESULT_BUF_SIZE];
-static vm_context_t g_vm_ctx;
+// --- Load SD index from first sectors ---
+static void sd_load_index(void) {
+    // Index stored at sector 0-7 (4KB)
+    uint8_t buf[512];
+    g_sd_index_count = 0;
 
-typedef struct {
-    uint8_t  card_major;
-    uint8_t  card_minor;
-    uint16_t data_len;
-    uint8_t  src_node;
-    uint8_t  ring_id;
-    uint32_t data_offset;
-} exec_request_t;
+    for (uint32_t s = 0; s < 8 && g_sd_index_count < SD_INDEX_MAX; s++) {
+        if (!sd_read_sector(s, buf)) break;
 
-static volatile exec_request_t g_exec_queue[VM_EXEC_QUEUE_SIZE];
-static volatile uint8_t g_exec_head = 0;
-static volatile uint8_t g_exec_tail = 0;
-static volatile uint32_t g_data_write_offset = 0;
-
-// Ring config
-static const ring_config_t storage_ring_configs[RING_COUNT] = {
-    { .pio_block = 0, .sm_tx = 0, .sm_rx = 1,
-      .pin_tx = RING0_PIN_TX, .pin_rx = RING0_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING0_TX, .dma_ch_rx = DMA_CH_RING0_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 0, .sm_tx = 2, .sm_rx = 3,
-      .pin_tx = RING1_PIN_TX, .pin_rx = RING1_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING1_TX, .dma_ch_rx = DMA_CH_RING1_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 1, .sm_tx = 0, .sm_rx = 1,
-      .pin_tx = RING2_PIN_TX, .pin_rx = RING2_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING2_TX, .dma_ch_rx = DMA_CH_RING2_RX,
-      .baud_rate = RING_BAUD_RATE },
-    { .pio_block = 1, .sm_tx = 2, .sm_rx = 3,
-      .pin_tx = RING3_PIN_TX, .pin_rx = RING3_PIN_RX,
-      .dma_ch_tx = DMA_CH_RING3_TX, .dma_ch_rx = DMA_CH_RING3_RX,
-      .baud_rate = RING_BAUD_RATE },
-};
-
-// ============================================================
-// SD card management
-// ============================================================
-
-static bool sd_storage_init(void) {
-    if (!sd_init(&g_sd_info)) return false;
-
-    // Read header
-    uint8_t sector_buf[512];
-    if (!sd_read_sector(SD_HEADER_SECTOR, sector_buf)) return false;
-
-    memcpy(&g_sd_header, sector_buf, sizeof(g_sd_header));
-
-    if (g_sd_header.magic != SD_MAGIC) {
-        // Fresh card — format
-        memset(&g_sd_header, 0, sizeof(g_sd_header));
-        g_sd_header.magic = SD_MAGIC;
-        g_sd_header.card_count = 0;
-        g_sd_header.version = 1;
-        g_sd_header.next_data_sector = SD_DATA_START;
-
-        memset(sector_buf, 0, 512);
-        memcpy(sector_buf, &g_sd_header, sizeof(g_sd_header));
-        sd_write_sector(SD_HEADER_SECTOR, sector_buf);
-        return true;
-    }
-
-    // Load index
-    uint16_t count = g_sd_header.card_count;
-    if (count > SD_MAX_CARDS) count = SD_MAX_CARDS;
-
-    for (uint32_t s = 0; s < SD_INDEX_SECTORS && count > 0; s++) {
-        if (!sd_read_sector(SD_INDEX_START + s, sector_buf)) break;
-        uint32_t entries_in_sector = 512 / sizeof(sd_card_index_entry_t);  // 32
-        for (uint32_t e = 0; e < entries_in_sector && count > 0; e++) {
-            uint32_t idx = s * entries_in_sector + e;
-            memcpy(&g_sd_index[idx], sector_buf + e * sizeof(sd_card_index_entry_t),
-                   sizeof(sd_card_index_entry_t));
-            count--;
+        // Each entry is 12 bytes: [major:1][minor:1][version:2][sector:4][length:4]
+        for (uint32_t off = 0; off < 512 && g_sd_index_count < SD_INDEX_MAX; off += 12) {
+            sd_card_entry_t *e = &g_sd_index[g_sd_index_count];
+            e->major = buf[off];
+            e->minor = buf[off + 1];
+            if (e->major == 0xFF) return;  // End marker
+            memcpy(&e->version, &buf[off + 2], 2);
+            memcpy(&e->sector, &buf[off + 4], 4);
+            memcpy(&e->length, &buf[off + 8], 4);
+            g_sd_index_count++;
         }
     }
-
-    return true;
 }
 
-// Find card on SD by major/minor
-static int sd_find_card(uint8_t major, uint8_t minor) {
-    for (uint16_t i = 0; i < g_sd_header.card_count; i++) {
+// --- Find card in SD index ---
+static sd_card_entry_t *sd_find_card(uint8_t major, uint8_t minor) {
+    for (uint16_t i = 0; i < g_sd_index_count; i++) {
         if (g_sd_index[i].major == major && g_sd_index[i].minor == minor) {
-            return (int)i;
+            return &g_sd_index[i];
         }
     }
-    return -1;
+    return NULL;
 }
 
-// Load card from SD into buffer
-static bool sd_load_card(uint8_t major, uint8_t minor, uint8_t *buf, uint32_t *len) {
-    int idx = sd_find_card(major, minor);
-    if (idx < 0) return false;
+// --- Load card from SD into cache ---
+static bool sd_load_card_to_cache(uint8_t major, uint8_t minor) {
+    sd_card_entry_t *entry = sd_find_card(major, minor);
+    if (!entry) return false;
 
-    sd_card_index_entry_t *entry = &g_sd_index[idx];
-    uint32_t sectors_needed = (entry->byte_len + 511) / 512;
+    // Read sectors into temp buffer
+    static uint8_t card_buf[PKT_MAX_PAYLOAD];
+    uint32_t remaining = entry->length;
+    uint32_t offset = 0;
+    uint32_t sector = entry->sector;
 
-    if (!sd_read_sectors(entry->start_sector, sectors_needed, buf)) return false;
-    *len = entry->byte_len;
+    while (remaining > 0 && offset < sizeof(card_buf)) {
+        uint8_t sec_buf[512];
+        if (!sd_read_sector(sector++, sec_buf)) return false;
+        uint32_t chunk = (remaining > 512) ? 512 : remaining;
+        memcpy(card_buf + offset, sec_buf, chunk);
+        offset += chunk;
+        remaining -= chunk;
+    }
+
+    card_cache_store(&g_card_cache, major, minor, entry->version,
+                     card_buf, entry->length);
     return true;
 }
 
-// Store card to SD
-static bool sd_store_card(uint8_t major, uint8_t minor, uint16_t version,
-                          const uint8_t *bytecode, uint32_t len) {
-    // Check if already exists
-    int idx = sd_find_card(major, minor);
-    if (idx >= 0 && g_sd_index[idx].version >= version) {
-        return true;  // Already have same or newer
-    }
-
-    uint32_t sectors_needed = (len + 511) / 512;
-    uint32_t start = g_sd_header.next_data_sector;
-
-    // Write bytecode
-    // Pad last sector
-    static uint8_t pad_buf[512];
-    for (uint32_t s = 0; s < sectors_needed; s++) {
-        uint32_t offset = s * 512;
-        uint32_t chunk = (len - offset > 512) ? 512 : (len - offset);
-        if (chunk == 512) {
-            sd_write_sector(start + s, bytecode + offset);
-        } else {
-            memset(pad_buf, 0xFF, 512);
-            memcpy(pad_buf, bytecode + offset, chunk);
-            sd_write_sector(start + s, pad_buf);
-        }
-    }
-
-    // Update index
-    if (idx < 0) {
-        idx = g_sd_header.card_count++;
-    }
-    g_sd_index[idx] = (sd_card_index_entry_t){
-        .major = major, .minor = minor, .version = version,
-        .start_sector = start, .byte_len = len,
+// --- Try to fetch card from peer storage via cross-connect ---
+static bool xconn_fetch_card(uint8_t major, uint8_t minor) {
+    pkt_nak_t req = { .card_major = major, .card_minor = minor, .version = 0 };
+    pkt_header_t hdr = {
+        .dest = ADDR_BROADCAST,
+        .src = g_node_id,
+        .type = PKT_CARD_REQ,
+        .flags = 0,
+        .payload_len = sizeof(req),
     };
+    hdr.crc16 = crc16_ccitt((uint8_t *)&req, sizeof(req));
 
-    g_sd_header.next_data_sector = start + sectors_needed;
+    // Try each cross-connect peer
+    for (uint8_t x = 0; x < STORE_XCONN_COUNT; x++) {
+        pkt_header_t reply_hdr;
+        uint8_t *reply_payload;
 
-    // Write index sector
-    uint32_t idx_sector = SD_INDEX_START + (idx / 32);
-    uint8_t sector_buf[512];
-    sd_read_sector(idx_sector, sector_buf);
-    memcpy(sector_buf + (idx % 32) * sizeof(sd_card_index_entry_t),
-           &g_sd_index[idx], sizeof(sd_card_index_entry_t));
-    sd_write_sector(idx_sector, sector_buf);
-
-    // Write header
-    memset(sector_buf, 0, 512);
-    memcpy(sector_buf, &g_sd_header, sizeof(g_sd_header));
-    sd_write_sector(SD_HEADER_SECTOR, sector_buf);
-
-    return true;
-}
-
-// ============================================================
-// Ring handlers
-// ============================================================
-
-// Snoop: cache cards + store to SD
-static void storage_snoop_cb(uint8_t ring_id, const pkt_header_t *hdr,
-                             const uint8_t *payload) {
-    (void)ring_id;
-    if (hdr->type == PKT_CARD_DATA && payload) {
-        const pkt_card_data_t *cpkt = (const pkt_card_data_t *)payload;
-
-        // Cache in SRAM
-        if (!card_cache_has(&g_card_cache, cpkt->card_major, cpkt->card_minor)) {
-            card_cache_store(&g_card_cache, cpkt->card_major, cpkt->card_minor,
-                            cpkt->version, cpkt->bytecode, cpkt->bytecode_len);
+        if (link_master_transact(&g_xconn_ports[x], &hdr, (uint8_t *)&req, sizeof(req),
+                                 &reply_hdr, &reply_payload, 30000)) {
+            if (reply_hdr.type == PKT_CARD_DATA) {
+                const pkt_card_data_t *cpkt = (const pkt_card_data_t *)reply_payload;
+                card_cache_store(&g_card_cache, cpkt->card_major, cpkt->card_minor,
+                                 cpkt->version, cpkt->bytecode, cpkt->bytecode_len);
+                return true;
+            }
         }
-
-        // Persist to SD
-        sd_store_card(cpkt->card_major, cpkt->card_minor,
-                      cpkt->version, cpkt->bytecode, cpkt->bytecode_len);
     }
+    return false;
 }
 
-// Handle CARD_REQ: someone needs a card we might have on SD
-static void handle_card_request(uint8_t ring_id, const pkt_header_t *hdr,
+// --- Handle card request from a worker ---
+static void handle_card_request(link_port_t *port, const pkt_header_t *hdr,
                                 const uint8_t *payload) {
     const pkt_nak_t *req = (const pkt_nak_t *)payload;
+    uint8_t major = req->card_major;
+    uint8_t minor = req->card_minor;
 
     // Try SRAM cache first
     uint32_t card_len;
-    uint32_t *card = card_cache_get(&g_card_cache, req->card_major, req->card_minor,
-                                    &card_len);
+    uint32_t *card = card_cache_get(&g_card_cache, major, minor, &card_len);
 
-    static uint8_t sd_buf[CARD_MAX_SIZE];
+    // Cache miss — try SD
     if (!card) {
-        // Try SD
-        uint32_t byte_len;
-        if (!sd_load_card(req->card_major, req->card_minor, sd_buf, &byte_len)) {
-            return;  // We don't have it either
-        }
-        // Cache it
-        card_cache_store(&g_card_cache, req->card_major, req->card_minor,
-                         0, sd_buf, byte_len);
+        sd_load_card_to_cache(major, minor);
+        card = card_cache_get(&g_card_cache, major, minor, &card_len);
+    }
+
+    // Still miss — try cross-connect peers
+    if (!card) {
+        xconn_fetch_card(major, minor);
+        card = card_cache_get(&g_card_cache, major, minor, &card_len);
+    }
+
+    if (card) {
+        // Reply with CARD_DATA
+        static uint8_t reply_buf[PKT_MAX_PAYLOAD];
+        pkt_card_data_t *cpkt = (pkt_card_data_t *)reply_buf;
+        cpkt->card_major = major;
+        cpkt->card_minor = minor;
+        cpkt->version = 1;
+        cpkt->bytecode_len = card_len;
+        memcpy(cpkt->bytecode, card, card_len);
+
+        uint16_t plen = sizeof(pkt_card_data_t) + card_len;
+        pkt_header_t reply_hdr = {
+            .dest = hdr->src,
+            .src = g_node_id,
+            .type = PKT_CARD_DATA,
+            .flags = 0,
+            .payload_len = plen,
+        };
+        reply_hdr.crc16 = crc16_ccitt(reply_buf, plen);
+        link_slave_reply(port, &reply_hdr, reply_buf, plen);
+    } else {
+        // NAK — card not found anywhere
+        pkt_nak_t nak = { .card_major = major, .card_minor = minor, .version = 0 };
+        pkt_header_t nak_hdr = {
+            .dest = hdr->src,
+            .src = g_node_id,
+            .type = PKT_NAK,
+            .flags = 0,
+            .payload_len = sizeof(nak),
+        };
+        nak_hdr.crc16 = crc16_ccitt((uint8_t *)&nak, sizeof(nak));
+        link_slave_reply(port, &nak_hdr, (uint8_t *)&nak, sizeof(nak));
+    }
+}
+
+// --- Handle cross-connect request from peer storage ---
+static void handle_xconn_request(link_port_t *port, const pkt_header_t *hdr,
+                                 const uint8_t *payload) {
+    // Same as worker request but don't recurse to cross-connect
+    const pkt_nak_t *req = (const pkt_nak_t *)payload;
+
+    uint32_t card_len;
+    uint32_t *card = card_cache_get(&g_card_cache, req->card_major, req->card_minor, &card_len);
+
+    if (!card) {
+        sd_load_card_to_cache(req->card_major, req->card_minor);
         card = card_cache_get(&g_card_cache, req->card_major, req->card_minor, &card_len);
-        if (!card) return;
     }
 
-    // Send card on ring
-    static uint8_t card_pkt_buf[PKT_MAX_PAYLOAD];
-    pkt_card_data_t *cpkt = (pkt_card_data_t *)card_pkt_buf;
-    cpkt->card_major = req->card_major;
-    cpkt->card_minor = req->card_minor;
-    cpkt->version = 1;
-    cpkt->bytecode_len = card_len * 4;
-    memcpy(cpkt->bytecode, card, card_len * 4);
+    if (card) {
+        static uint8_t reply_buf[PKT_MAX_PAYLOAD];
+        pkt_card_data_t *cpkt = (pkt_card_data_t *)reply_buf;
+        cpkt->card_major = req->card_major;
+        cpkt->card_minor = req->card_minor;
+        cpkt->version = 1;
+        cpkt->bytecode_len = card_len;
+        memcpy(cpkt->bytecode, card, card_len);
 
-    uint16_t plen = sizeof(pkt_card_data_t) + card_len * 4;
-    pkt_header_t resp = {
-        .dest = ADDR_BROADCAST,
-        .src = g_node_id,
-        .type = PKT_CARD_DATA,
-        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 0),
-        .payload_len = plen,
-    };
-    resp.crc16 = crc16_ccitt(card_pkt_buf, plen);
-    ring_send(ring_id, &resp, card_pkt_buf, plen);
+        uint16_t plen = sizeof(pkt_card_data_t) + card_len;
+        pkt_header_t reply_hdr = {
+            .dest = hdr->src,
+            .src = g_node_id,
+            .type = PKT_CARD_DATA,
+            .flags = 0,
+            .payload_len = plen,
+        };
+        reply_hdr.crc16 = crc16_ccitt(reply_buf, plen);
+        link_slave_reply(port, &reply_hdr, reply_buf, plen);
+    }
 }
 
-// Handle EXEC (storage nodes also compute)
-static void handle_exec(uint8_t ring_id, const pkt_header_t *hdr,
-                        const uint8_t *payload) {
-    const pkt_exec_t *exec = (const pkt_exec_t *)payload;
-
-    if (!card_cache_has(&g_card_cache, exec->card_major, exec->card_minor)) {
-        // Try loading from SD
-        static uint8_t sd_buf[CARD_MAX_SIZE];
-        uint32_t byte_len;
-        if (sd_load_card(exec->card_major, exec->card_minor, sd_buf, &byte_len)) {
-            card_cache_store(&g_card_cache, exec->card_major, exec->card_minor,
-                             0, sd_buf, byte_len);
-        } else {
-            // NAK
-            pkt_nak_t nak = { .card_major = exec->card_major,
-                              .card_minor = exec->card_minor, .version = 0 };
-            pkt_header_t nak_hdr = {
-                .dest = hdr->src, .src = g_node_id, .type = PKT_NAK,
-                .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 1),
-                .payload_len = sizeof(nak),
-            };
-            nak_hdr.crc16 = crc16_ccitt((uint8_t *)&nak, sizeof(nak));
-            ring_send(ring_id, &nak_hdr, (uint8_t *)&nak, sizeof(nak));
-            return;
-        }
-    }
-
-    // Queue for Core 1
-    uint8_t next = (g_exec_head + 1) % VM_EXEC_QUEUE_SIZE;
-    if (next == g_exec_tail) return;
-
-    uint32_t offset = g_data_write_offset;
-    if (exec->data_len > 0 && offset + exec->data_len <= MEM_VM_DATA_SIZE) {
-        memcpy(vm_data_mem + offset, exec->data, exec->data_len);
-        g_data_write_offset = offset + ((exec->data_len + 3) & ~3u);
-    }
-
-    g_exec_queue[g_exec_head] = (exec_request_t){
-        .card_major = exec->card_major, .card_minor = exec->card_minor,
-        .data_len = exec->data_len, .src_node = hdr->src,
-        .ring_id = ring_id, .data_offset = offset,
-    };
-    __dmb();
-    g_exec_head = next;
-    multicore_fifo_push_blocking(1);
-}
-
-// --- Core 0: Ring + SD serving ---
+// --- Core 0: Service worker requests + cross-connect ---
 static void core0_loop(void) {
-    ring_init_all(storage_ring_configs);
-    ring_set_snoop_callback(storage_snoop_cb);
+    // Init worker ports (slave — workers are masters requesting cards)
+    link_init_ports(g_worker_ports, STORE_WORKER_COUNT,
+                    STORE_WORKER_BASE, 0, false);
+
+    // Init cross-connect ports (master — we request from peers)
+    // Use PIO1 for cross-connects
+    link_init_ports(g_xconn_ports, STORE_XCONN_COUNT,
+                    STORE_XCONN_BASE, 1, false);  // Slave: peers request from us too
+
     card_cache_warm_from_flash(&g_card_cache);
 
     while (1) {
-        for (uint8_t r = 0; r < RING_COUNT; r++) {
+        watchdog_update();
+
+        // Poll worker ports
+        for (uint8_t w = 0; w < STORE_WORKER_COUNT; w++) {
             pkt_header_t hdr;
             uint8_t *payload;
-            if (!ring_poll_rx(r, &hdr, &payload)) continue;
-
-            uint16_t expected = hdr.crc16;
-            if (hdr.payload_len > 0 &&
-                crc16_ccitt(payload, hdr.payload_len) != expected) {
-                ring_rx_done(r);
-                continue;
-            }
-
-            bool for_me = (hdr.dest == g_node_id || hdr.dest == ADDR_BROADCAST);
-
-            if (for_me) {
-                switch (hdr.type) {
-                case PKT_EXEC:
-                case PKT_BATCH:
-                    handle_exec(r, &hdr, payload);
-                    break;
-                case PKT_NAK:
-                case PKT_CARD_REQ:
-                    handle_card_request(r, &hdr, payload);
-                    break;
-                default:
-                    break;
+            if (link_slave_poll_rx(&g_worker_ports[w], &hdr, &payload)) {
+                if (hdr.type == PKT_CARD_REQ) {
+                    handle_card_request(&g_worker_ports[w], &hdr, payload);
                 }
             }
+        }
 
-            if (!for_me || hdr.dest == ADDR_BROADCAST) {
-                uint8_t ttl = PKT_TTL(hdr.flags);
-                if (ttl > 0) ring_forward(r, r);
+        // Poll cross-connect ports (peer requests)
+        for (uint8_t x = 0; x < STORE_XCONN_COUNT; x++) {
+            pkt_header_t hdr;
+            uint8_t *payload;
+            if (link_slave_poll_rx(&g_xconn_ports[x], &hdr, &payload)) {
+                if (hdr.type == PKT_CARD_REQ) {
+                    handle_xconn_request(&g_xconn_ports[x], &hdr, payload);
+                }
             }
-
-            ring_rx_done(r);
         }
     }
 }
 
-// --- Core 1: VM execution (same as worker) ---
-static void core1_entry(void) {
-    vm_init(&g_vm_ctx);
-    g_vm_ctx.data_base = vm_data_mem;
-    g_vm_ctx.data_size = MEM_VM_DATA_SIZE;
-    g_vm_ctx.stack_base = vm_stack_mem;
-    g_vm_ctx.stack_size = MEM_VM_STACK_SIZE;
-    g_vm_ctx.result_buf = result_buf;
-    g_vm_ctx.result_capacity = MEM_RESULT_BUF_SIZE;
+// --- Core 1: Background SD prefetch ---
+static void core1_prefetch(void) {
+    // Prefetch popular cards into SRAM cache at startup
+    for (uint16_t i = 0; i < g_sd_index_count && i < 32; i++) {
+        sd_load_card_to_cache(g_sd_index[i].major, g_sd_index[i].minor);
+    }
 
+    // Then idle — wake on demand via multicore FIFO if needed
     while (1) {
         multicore_fifo_pop_blocking();
-
-        while (g_exec_tail != g_exec_head) {
-            exec_request_t req = g_exec_queue[g_exec_tail];
-            __dmb();
-            g_exec_tail = (g_exec_tail + 1) % VM_EXEC_QUEUE_SIZE;
-
-            uint32_t card_len;
-            uint32_t *card = card_cache_get(&g_card_cache,
-                                            req.card_major, req.card_minor, &card_len);
-            if (!card) continue;
-
-            vm_load_card(&g_vm_ctx, card, card_len, req.card_major, req.card_minor);
-            g_vm_ctx.regs[1] = req.data_offset;
-            vm_execute(&g_vm_ctx, VM_MAX_CYCLES_PER_RUN);
-
-            // Send result
-            static uint8_t res_pkt[PKT_MAX_PAYLOAD];
-            pkt_result_t *res = (pkt_result_t *)res_pkt;
-            res->status = (g_vm_ctx.state == VM_HALTED) ? 0 : 1;
-            res->card_major = req.card_major;
-            res->card_minor = req.card_minor;
-            res->data_len = g_vm_ctx.result_len;
-            if (g_vm_ctx.result_len > 0) {
-                memcpy(res->data, g_vm_ctx.result_buf, g_vm_ctx.result_len);
-            }
-
-            uint16_t plen = sizeof(pkt_result_t) + g_vm_ctx.result_len;
-            pkt_header_t hdr = {
-                .dest = req.src_node, .src = g_node_id, .type = PKT_RESULT,
-                .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 0), .payload_len = plen,
-            };
-            hdr.crc16 = crc16_ccitt(res_pkt, plen);
-            ring_send(req.ring_id, &hdr, res_pkt, plen);
-
-            if (g_exec_tail == g_exec_head) g_data_write_offset = 0;
-        }
+        // Could handle async card load requests here
     }
 }
 
 // --- Entry point ---
 void role_storage_run(void) {
     card_cache_init(&g_card_cache);
+    sd_init();
+    sd_load_index();
 
-    // Init SD storage
-    if (!sd_storage_init()) {
-        // SD failed — fall back to worker role
-        role_worker_run();
-        return;
-    }
+    g_node_id = disc_participant_run(2);  // ROLE_STORAGE
+    if (g_node_id == 0) g_node_id = ADDR_STORAGE_BASE;
 
-    // Read node ID
-    flash_config_t cfg;
-    platform_flash_read(FLASH_CONFIG_BASE - FLASH_FIRMWARE_BASE,
-                        (uint8_t *)&cfg, sizeof(cfg));
-    g_node_id = (cfg.magic == FLASH_CONFIG_MAGIC && cfg.node_id != 0xFF) ?
-                cfg.node_id : 0xFE;
-
-    multicore_launch_core1(core1_entry);
+    multicore_launch_core1(core1_prefetch);
     core0_loop();
 }
