@@ -18,6 +18,8 @@
 #define PKT_DISCOVER   0x08  // Topology discovery
 #define PKT_ROUTE      0x09  // Routing table update
 #define PKT_CARD_REQ   0x0A  // Request a card by ID
+#define PKT_ADDR_REQ   0x10  // Address request (DHCP-style)
+#define PKT_ADDR_ACK   0x11  // Address assignment (DHCP-style)
 
 // Special addresses
 #define ADDR_BROADCAST 0xFF

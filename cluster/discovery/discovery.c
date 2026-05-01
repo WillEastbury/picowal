@@ -4,216 +4,181 @@
 #include "../common/ring.h"
 
 #include "pico/stdlib.h"
+#include "pico/unique_id.h"
 #include <string.h>
 
 // ============================================================
-// Discovery Protocol
+// DHCP-style Discovery Protocol
 // ============================================================
 //
-// 1. Head broadcasts DISCOVER on all rings (TTL=15)
-// 2. Each node receives DISCOVER:
-//    - Records hop count (TTL_initial - TTL_remaining)
-//    - Responds with STATUS (includes role, capabilities)
-//    - Forwards DISCOVER downstream (TTL--)
-// 3. Head collects all STATUS responses within timeout
-// 4. Head assigns sequential IDs based on ring position
-// 5. Head broadcasts ROUTE packet with ID assignments
-// 6. Nodes read their assigned ID from ROUTE packet
+// Simple REQ → ACK model:
+// - Nodes use RP2350 unique board ID as hardware identifier
+// - Head assigns sequential IDs on first-come basis
+// - Works across multiple rings (REQs forwarded through ring)
+// - Nodes keep retrying until ACK received or timeout
 //
-// Packet payload for DISCOVER: [sequence:4]
-// Packet payload for ROUTE: [count:1][node_entries: id,position × N]
 
-#define DISC_SEQUENCE_MAGIC  0xD15C0000
+// Packet types (extend PKT_* namespace)
+#define PKT_ADDR_REQ  0x10
+#define PKT_ADDR_ACK  0x11
 
-static discovery_result_t g_disc_result;
+// --- Helper: get this board's unique ID ---
+void disc_get_hw_id(hw_id_t *out) {
+    pico_unique_board_id_t uid;
+    pico_get_unique_board_id(&uid);
+    memcpy(out->bytes, uid.id, 8);
+}
 
-// --- Master: run full discovery ---
-void discovery_run_master(void) {
-    memset(&g_disc_result, 0, sizeof(g_disc_result));
-    g_disc_result.state = DISC_ANNOUNCING;
+static bool hw_id_match(const hw_id_t *a, const hw_id_t *b) {
+    return memcmp(a->bytes, b->bytes, 8) == 0;
+}
 
-    // Send DISCOVER on all rings
-    uint32_t seq = DISC_SEQUENCE_MAGIC | (time_us_32() & 0xFFFF);
+// ============================================================
+// HEAD (Master) side
+// ============================================================
 
-    pkt_header_t hdr = {
-        .dest = ADDR_BROADCAST,
-        .src = ADDR_MASTER,
-        .type = PKT_DISCOVER,
-        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 2),  // High priority
-        .payload_len = 4,
-    };
+void disc_master_init(lease_table_t *table) {
+    memset(table, 0, sizeof(*table));
+    table->next_id = 1;  // Node IDs start at 1 (0 = head)
+}
 
-    uint8_t payload[4];
-    memcpy(payload, &seq, 4);
-    hdr.crc16 = crc16_ccitt(payload, 4);
-
-    for (uint8_t r = 0; r < RING_COUNT; r++) {
-        ring_send(r, &hdr, payload, 4);
+static uint8_t find_or_assign(lease_table_t *table, const hw_id_t *hw_id, uint8_t role) {
+    // Check if already assigned
+    for (uint8_t i = 0; i < table->count; i++) {
+        if (table->entries[i].active && hw_id_match(&table->entries[i].hw_id, hw_id)) {
+            return table->entries[i].node_id;
+        }
     }
 
-    // Collect responses for DISCOVERY_TIMEOUT_MS
-    uint64_t deadline = time_us_64() + (uint64_t)DISCOVERY_TIMEOUT_MS * 1000;
-    g_disc_result.state = DISC_LEARNING;
+    // Assign new
+    if (table->count >= MAX_CLUSTER_NODES) return 0;  // Full
+
+    lease_entry_t *entry = &table->entries[table->count];
+    entry->hw_id = *hw_id;
+    entry->node_id = table->next_id++;
+    entry->role = role;
+    entry->active = true;
+    table->count++;
+
+    return entry->node_id;
+}
+
+static uint32_t last_req_time = 0;
+
+bool disc_master_handle(lease_table_t *table, uint8_t ring,
+                        const void *hdr_ptr, const uint8_t *payload) {
+    const pkt_header_t *hdr = (const pkt_header_t *)hdr_ptr;
+
+    if (hdr->type != PKT_ADDR_REQ) return false;
+    if (hdr->payload_len < sizeof(addr_req_t)) return false;
+
+    const addr_req_t *req = (const addr_req_t *)payload;
+
+    // Assign (or re-confirm) an ID
+    uint8_t assigned = find_or_assign(table, &req->hw_id, req->role);
+    if (assigned == 0) return false;  // Table full
+
+    last_req_time = time_us_32();
+
+    // Send ACK back on all rings (broadcast so other nodes forward it)
+    addr_ack_t ack = {
+        .hw_id = req->hw_id,
+        .assigned_id = assigned,
+        .flags = 0,
+    };
+
+    pkt_header_t ack_hdr = {
+        .dest = ADDR_BROADCAST,
+        .src = ADDR_MASTER,
+        .type = PKT_ADDR_ACK,
+        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 2),
+        .payload_len = sizeof(ack),
+    };
+    ack_hdr.crc16 = crc16_ccitt((const uint8_t *)&ack, sizeof(ack));
+
+    for (uint8_t r = 0; r < RING_COUNT; r++) {
+        ring_send(r, &ack_hdr, (const uint8_t *)&ack, sizeof(ack));
+    }
+
+    return true;
+}
+
+bool disc_master_settled(const lease_table_t *table) {
+    if (table->count == 0) return false;
+    uint32_t elapsed = (time_us_32() - last_req_time) / 1000;
+    return elapsed >= DISC_SETTLE_MS;
+}
+
+// ============================================================
+// PARTICIPANT (Worker/Storage) side
+// ============================================================
+
+uint8_t disc_participant_run(uint8_t my_role) {
+    hw_id_t my_hw_id;
+    disc_get_hw_id(&my_hw_id);
+
+    // Build REQ packet
+    addr_req_t req = {
+        .hw_id = my_hw_id,
+        .role = my_role,
+        .flags = 0,
+    };
+
+    pkt_header_t req_hdr = {
+        .dest = ADDR_MASTER,
+        .src = 0xFE,  // Unaddressed
+        .type = PKT_ADDR_REQ,
+        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 1),
+        .payload_len = sizeof(req),
+    };
+    req_hdr.crc16 = crc16_ccitt((const uint8_t *)&req, sizeof(req));
+
+    uint64_t deadline = time_us_64() + (uint64_t)DISC_TIMEOUT_MS * 1000;
+    uint64_t next_req = 0;
 
     while (time_us_64() < deadline) {
+        // Send/resend REQ periodically
+        if (time_us_64() >= next_req) {
+            // Send on all rings
+            for (uint8_t r = 0; r < RING_COUNT; r++) {
+                ring_send(r, &req_hdr, (const uint8_t *)&req, sizeof(req));
+            }
+            next_req = time_us_64() + (uint64_t)DISC_REQ_INTERVAL_MS * 1000;
+        }
+
+        // Poll for ACK
         for (uint8_t r = 0; r < RING_COUNT; r++) {
             pkt_header_t rx_hdr;
             uint8_t *rx_payload;
 
             if (!ring_poll_rx(r, &rx_hdr, &rx_payload)) continue;
 
-            if (rx_hdr.type == PKT_STATUS && rx_hdr.dest == ADDR_MASTER) {
-                // New node responding
-                if (g_disc_result.node_count < MAX_DISCOVERED_NODES) {
-                    const pkt_status_t *st = (const pkt_status_t *)rx_payload;
-                    discovered_node_t *node = &g_disc_result.nodes[g_disc_result.node_count];
-                    node->node_id = rx_hdr.src;  // Temporary ID (or 0xFE if unassigned)
-                    node->role = st->node_state; // Overloaded: use status for role during discovery
-                    node->ring_position = DEFAULT_TTL - PKT_TTL(rx_hdr.flags);
-                    node->flags = 0;
-                    g_disc_result.node_count++;
+            if (rx_hdr.type == PKT_ADDR_ACK && rx_hdr.src == ADDR_MASTER) {
+                const addr_ack_t *ack = (const addr_ack_t *)rx_payload;
+
+                if (hw_id_match(&ack->hw_id, &my_hw_id)) {
+                    // This ACK is for us!
+                    ring_forward(r, r);  // Forward for other nodes
+                    ring_rx_done(r);
+                    return ack->assigned_id;
                 }
-            }
 
-            ring_rx_done(r);
-        }
-
-        sleep_us(100);
-    }
-
-    // Assign IDs based on ring position (closer to head = lower ID)
-    // Simple: sort by ring_position, assign 1..N
-    for (uint8_t i = 0; i < g_disc_result.node_count; i++) {
-        for (uint8_t j = i + 1; j < g_disc_result.node_count; j++) {
-            if (g_disc_result.nodes[j].ring_position < g_disc_result.nodes[i].ring_position) {
-                discovered_node_t tmp = g_disc_result.nodes[i];
-                g_disc_result.nodes[i] = g_disc_result.nodes[j];
-                g_disc_result.nodes[j] = tmp;
-            }
-        }
-        g_disc_result.nodes[i].node_id = i + 1;  // Assign 1-based ID
-    }
-
-    // Broadcast ROUTE with ID assignments
-    // Format: [count][id, position, id, position, ...]
-    uint8_t route_buf[1 + MAX_DISCOVERED_NODES * 2];
-    route_buf[0] = g_disc_result.node_count;
-    for (uint8_t i = 0; i < g_disc_result.node_count; i++) {
-        route_buf[1 + i * 2] = g_disc_result.nodes[i].node_id;
-        route_buf[2 + i * 2] = g_disc_result.nodes[i].ring_position;
-    }
-
-    uint16_t route_len = 1 + g_disc_result.node_count * 2;
-    pkt_header_t route_hdr = {
-        .dest = ADDR_BROADCAST,
-        .src = ADDR_MASTER,
-        .type = PKT_ROUTE,
-        .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 2),
-        .payload_len = route_len,
-    };
-    route_hdr.crc16 = crc16_ccitt(route_buf, route_len);
-
-    for (uint8_t r = 0; r < RING_COUNT; r++) {
-        ring_send(r, &route_hdr, route_buf, route_len);
-    }
-
-    g_disc_result.state = DISC_COMPLETE;
-}
-
-// --- Participant: respond to discovery ---
-void discovery_run_participant(discovery_result_t *result) {
-    memset(result, 0, sizeof(*result));
-    result->state = DISC_IDLE;
-
-    // Wait for DISCOVER packet (with timeout)
-    uint64_t deadline = time_us_64() + (uint64_t)DISCOVERY_TIMEOUT_MS * 1000;
-
-    while (time_us_64() < deadline) {
-        for (uint8_t r = 0; r < RING_COUNT; r++) {
-            pkt_header_t hdr;
-            uint8_t *payload;
-
-            if (!ring_poll_rx(r, &hdr, &payload)) continue;
-
-            if (hdr.type == PKT_DISCOVER && hdr.src == ADDR_MASTER) {
-                // Respond with STATUS
-                uint8_t my_position = DEFAULT_TTL - PKT_TTL(hdr.flags);
-                result->my_position = my_position;
-                result->state = DISC_LEARNING;
-
-                pkt_status_t status = {
-                    .node_state = 0,
-                    .queue_depth = 0,
-                    .card_count = 0,
-                    .exec_count = 0,
-                    .uptime_sec = time_us_32() / 1000000,
-                };
-
-                pkt_header_t resp = {
-                    .dest = ADDR_MASTER,
-                    .src = 0xFE,  // Unassigned
-                    .type = PKT_STATUS,
-                    .flags = PKT_MAKE_FLAGS(DEFAULT_TTL, 0),
-                    .payload_len = sizeof(status),
-                };
-                resp.crc16 = crc16_ccitt((uint8_t *)&status, sizeof(status));
-                ring_send(r, &resp, (uint8_t *)&status, sizeof(status));
-
-                // Forward DISCOVER
+                // ACK for someone else — forward it
                 ring_forward(r, r);
-                ring_rx_done(r);
-
-                // Now wait for ROUTE packet
-                goto wait_for_route;
-            }
-
-            // Forward any non-discovery packets normally
-            ring_rx_done(r);
-        }
-        sleep_us(100);
-    }
-
-    // Timeout — no discovery happened
-    result->state = DISC_IDLE;
-    result->assigned_id = 0xFE;
-    return;
-
-wait_for_route:
-    deadline = time_us_64() + (uint64_t)DISCOVERY_TIMEOUT_MS * 1000;
-
-    while (time_us_64() < deadline) {
-        for (uint8_t r = 0; r < RING_COUNT; r++) {
-            pkt_header_t hdr;
-            uint8_t *payload;
-
-            if (!ring_poll_rx(r, &hdr, &payload)) continue;
-
-            if (hdr.type == PKT_ROUTE && hdr.src == ADDR_MASTER) {
-                // Find our ID by position
-                uint8_t count = payload[0];
-                for (uint8_t i = 0; i < count; i++) {
-                    uint8_t id = payload[1 + i * 2];
-                    uint8_t pos = payload[2 + i * 2];
-                    if (pos == result->my_position) {
-                        result->assigned_id = id;
-                        result->state = DISC_COMPLETE;
-                        ring_forward(r, r);  // Pass along
-                        ring_rx_done(r);
-                        return;
-                    }
-                }
+            } else if (rx_hdr.type == PKT_ADDR_REQ && rx_hdr.src != 0xFE) {
+                // Another node's REQ — forward it
+                ring_forward(r, r);
+            } else {
+                // Forward everything during discovery
                 ring_forward(r, r);
             }
 
             ring_rx_done(r);
         }
-        sleep_us(100);
+
+        sleep_us(50);
     }
 
-    result->assigned_id = 0xFE;
-    result->state = DISC_COMPLETE;
-}
-
-uint8_t discovery_get_id(void) {
-    return g_disc_result.assigned_id;
+    // Timeout — no head found, return unassigned
+    return 0;
 }
