@@ -86,6 +86,24 @@ W:price|>|1000
 
 ## Data model
 
+### C API
+
+Embedders that need picowal as an in-process card store can use
+`src/picowal_api.h` instead of exposing raw HTTP routes. The API addresses
+records as `(pack, card)` pairs, routes through the same flash/SD storage layer
+as the web UI, and returns explicit status codes for invalid input, missing
+cards, duplicate create-only writes, and I/O failures.
+
+Core calls:
+
+```c
+picowal_api_put(pack, card, data, len);
+picowal_api_get(pack, card, out, out_cap, &out_len);
+picowal_api_delete(pack, card);
+picowal_api_create_random(pack, data, len, &card);
+picowal_api_list(pack, cards, max_cards);
+```
+
 ### Packs and cards
 
 Data is organized into **packs** (like tables) containing **cards** (like rows). Each card is a binary blob with a 4-byte magic header (`0xCA7D`) followed by ordinal-tagged fields.
