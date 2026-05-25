@@ -88,11 +88,13 @@ W:price|>|1000
 
 ### C API
 
-Embedders that need picowal as an in-process card store can use
+Embedders that need picowal as an in-process disk card store can use
 `src/picowal_api.h` instead of exposing raw HTTP routes. The API addresses
-records as `(pack, card)` pairs, routes through the same flash/SD storage layer
-as the web UI, and returns explicit status codes for invalid input, missing
-cards, duplicate create-only writes, and I/O failures.
+records as `(pack, card)` pairs in user packs (`pack >= 2`), routes directly to
+the SD-backed storage layer used by the web UI, and returns explicit status
+codes for invalid input, SD-not-ready, missing cards, duplicate create-only
+writes, and I/O failures. System flash packs (`0` and `1`) are intentionally
+not exposed through this API.
 
 Core calls:
 

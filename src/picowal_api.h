@@ -13,6 +13,7 @@ typedef enum {
     PICOWAL_API_NOT_FOUND,
     PICOWAL_API_EXISTS,
     PICOWAL_API_INVALID,
+    PICOWAL_API_NOT_READY,
     PICOWAL_API_IO,
 } picowal_api_status_t;
 
