@@ -26,6 +26,7 @@ add_executable(${PROJECT_NAME}
     src/query.c
     src/udp_wal.c
     src/crypto.c
+    src/picowal_store_sd.c
     src/picowal_api.c
 )
 

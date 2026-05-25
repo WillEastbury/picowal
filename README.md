@@ -88,13 +88,39 @@ W:price|>|1000
 
 ### C API
 
-Embedders that need picowal as an in-process disk card store can use
+Embedders that need picowal as an in-process card store can use
 `src/picowal_api.h` instead of exposing raw HTTP routes. The API addresses
-records as `(pack, card)` pairs in user packs (`pack >= 2`), routes directly to
-the SD-backed storage layer used by the web UI, and returns explicit status
-codes for invalid input, SD-not-ready, missing cards, duplicate create-only
-writes, and I/O failures. System flash packs (`0` and `1`) are intentionally
-not exposed through this API.
+records as `(pack, card)` pairs in user packs (`pack >= 2`) and returns explicit
+status codes for invalid input, storage-not-ready, missing cards, duplicate
+create-only writes, and I/O failures. System flash packs (`0` and `1`) are
+intentionally not exposed through this API.
+
+The API uses a tiny compiled-in storage backend seam (`src/picowal_store.h`).
+C has no `interface` keyword; Picowal uses the standard native pattern: a small
+`struct` of function pointers. Firmware defaults to the SD backend, while host
+or cloud builds can bind a different backend before use:
+
+```c
+picowal_api_set_store(&picowal_sd_store);     // firmware default
+```
+
+Linux host builds can use the filesystem backend over a local mounted path:
+
+```c
+picowal_fs_store_t fs;
+picowal_store_t store;
+picowal_store_fs_open(&fs, "/mnt/picowal", &store);
+picowal_api_set_store(&store);
+```
+
+The filesystem backend stores cards as atomic files under
+`<root>/<pack-hex>/<card-hex>.kv` and uses write+fsync+rename for updates. It is
+intended for Linux/local mounted paths and is not compiled into Pico firmware.
+
+For Azure Blob, prefer a card/KV-level backend using **Block Blobs** for
+records, manifests, and WAL segments. Page Blobs are only attractive if you want
+to emulate a random-access block device, which is not the preferred Picowal
+cloud abstraction.
 
 Core calls:
 
