@@ -122,6 +122,32 @@ records, manifests, and WAL segments. Page Blobs are only attractive if you want
 to emulate a random-access block device, which is not the preferred Picowal
 cloud abstraction.
 
+The host build also includes an Azure Table Storage backend for cheap cloud
+experiments. It stores one card per entity:
+
+| Field | Value |
+|---|---|
+| `PartitionKey` | pack as three hex digits, e.g. `002` |
+| `RowKey` | card as six hex digits, e.g. `000001` |
+| `ValueHex` | card payload encoded as hex |
+| `Version` | monotonic per-card version |
+
+On open, the backend can load `PartitionKey`, `RowKey`, and `Version` into an
+in-memory index. `list` and `exists` use that local index; `get`, `put`, and
+`delete` call Azure Table Storage over HTTPS using a table SAS URL. This keeps
+the C dependency surface tiny and avoids pulling in a full Azure SDK:
+
+```c
+picowal_aztable_store_t az;
+picowal_store_t store;
+picowal_store_aztable_open(&az, &(picowal_aztable_config_t){
+    .endpoint = "https://acct.table.core.windows.net/Picowal",
+    .sas = "?sv=...",
+    .load_existing = true,
+}, &store);
+picowal_api_set_store(&store);
+```
+
 Core calls:
 
 ```c
