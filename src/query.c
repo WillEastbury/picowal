@@ -351,6 +351,70 @@ static bool is_numeric_type(uint8_t tc) {
            tc == 0x12; // lookup stored as uint32
 }
 
+static const char *op_token(query_op_t op) {
+    switch (op) {
+        case QOP_EQ: return "==";
+        case QOP_NE: return "!=";
+        case QOP_GT: return ">";
+        case QOP_LT: return "<";
+        case QOP_GE: return ">=";
+        case QOP_LE: return "<=";
+        case QOP_IN: return "IN";
+        case QOP_NI: return "NI";
+    }
+    return "==";
+}
+
+static bool safe_token(const char *s) {
+    if (!s || !*s) return false;
+    for (const char *p = s; *p; p++) {
+        char c = *p;
+        if (!isalnum((unsigned char)c) && c != '_' && c != '-' && c != '.') return false;
+    }
+    return true;
+}
+
+int query_build_lookup_filter(char *out, int out_size,
+                              const char *pack,
+                              const char *display_field,
+                              const char *filter_field,
+                              query_op_t filter_op,
+                              const char *filter_value,
+                              const char *current_id_field,
+                              const char *current_id) {
+    if (!out || out_size <= 0 || !safe_token(pack) || !safe_token(display_field)) return -1;
+    int n = snprintf(out, out_size, "S:%s\nF:%s\n", display_field, pack);
+    if (n < 0 || n >= out_size) return -1;
+    if (filter_field && *filter_field) {
+        if (!safe_token(filter_field) || !filter_value) return -1;
+        int w = snprintf(out + n, out_size - n, "W:%s|%s|%s\n",
+                         filter_field, op_token(filter_op), filter_value);
+        if (w < 0 || w >= out_size - n) return -1;
+        n += w;
+    }
+    if (current_id_field && *current_id_field && current_id && *current_id) {
+        if (!safe_token(current_id_field)) return -1;
+        int w = snprintf(out + n, out_size - n, "W:%s|!=|%s\n", current_id_field, current_id);
+        if (w < 0 || w >= out_size - n) return -1;
+        n += w;
+    }
+    return n;
+}
+
+int query_build_many_to_many_map(char *out, int out_size,
+                                 const char *mapping_pack,
+                                 const char *source_field,
+                                 const char *source_id,
+                                 const char *target_field) {
+    if (!out || out_size <= 0 || !safe_token(mapping_pack) ||
+        !safe_token(source_field) || !safe_token(target_field) ||
+        !source_id || !*source_id) return -1;
+    int n = snprintf(out, out_size, "S:%s\nF:%s\nW:%s|==|%s\n",
+                     target_field, mapping_pack, source_field, source_id);
+    if (n < 0 || n >= out_size) return -1;
+    return n;
+}
+
 // ============================================================
 // Execute query — scan pack, filter, project
 // ============================================================

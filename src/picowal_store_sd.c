@@ -2,6 +2,8 @@
 
 #include "kv_sd.h"
 
+#include <stddef.h>
+
 static bool sd_ready(void *ctx) {
     (void)ctx;
     return kvsd_ready();
@@ -46,4 +48,3 @@ const picowal_store_t picowal_sd_store = {
     .ops = &sd_ops,
     .ctx = NULL,
 };
-
