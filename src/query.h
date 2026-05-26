@@ -95,4 +95,29 @@ query_t query_parse(const char *text);
 int query_execute(const query_t *q, char *buf, int buf_size,
                   const char **pack_name, int *count);
 
+// Build a bounded filtered-lookup query into out.
+// Example output:
+//   S:name
+//   F:todos
+//   W:status|!=|completed
+//   W:id|!=|123
+// Returns bytes written, or -1 if out is too small / args invalid.
+int query_build_lookup_filter(char *out, int out_size,
+                              const char *pack,
+                              const char *display_field,
+                              const char *filter_field,
+                              query_op_t filter_op,
+                              const char *filter_value,
+                              const char *current_id_field,
+                              const char *current_id);
+
+// Build a bounded many-to-many mapping-card query into out.
+// The mapping pack stores source_field -> source_id and target_field -> target ids.
+// Returns bytes written, or -1 if out is too small / args invalid.
+int query_build_many_to_many_map(char *out, int out_size,
+                                 const char *mapping_pack,
+                                 const char *source_field,
+                                 const char *source_id,
+                                 const char *target_field);
+
 #endif
