@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PicoWAL</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body{background:#1a1a2e;color:#e0e0e0}
+  .card-panel{background:#16213e;border:1px solid #0f3460;border-radius:8px}
+  .field-dirty{border-left:3px solid #e94560!important}
+  .badge-type{font-size:.65em;opacity:.7}
+  .nav-brand{color:#e94560!important;font-weight:700;letter-spacing:1px}
+  .table{--bs-table-bg:#16213e;--bs-table-color:#e0e0e0;--bs-table-border-color:#0f3460}
+  .btn-accent{background:#e94560;border:none;color:#fff}
+  .btn-accent:hover{background:#c73652;color:#fff}
+  .form-control,.form-select{background:#0f3460;color:#e0e0e0;border-color:#1a1a4e}
+  .form-control:focus,.form-select:focus{background:#0f3460;color:#fff;border-color:#e94560;box-shadow:0 0 0 .2rem rgba(233,69,96,.25)}
+  .modal-content{background:#16213e;border:1px solid #0f3460}
+  .status-bar{font-size:.8em;opacity:.7}
+</style>
+</head>
+<body>
+
+<!-- Login Modal -->
+<div class="modal fade" id="loginModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered modal-sm">
+    <div class="modal-content p-4">
+      <h4 class="text-center mb-3"><span class="nav-brand">PicoWAL</span></h4>
+      <p class="text-center text-muted small">Hardware KV Storage Engine</p>
+      <div class="mb-2">
+        <input type="text" class="form-control" placeholder="Username"
+          data-bind="value:loginUser, event:{keypress:loginKeypress}">
+      </div>
+      <div class="mb-3">
+        <input type="password" class="form-control" placeholder="Password"
+          data-bind="value:loginPass, event:{keypress:loginKeypress}">
+      </div>
+      <button class="btn btn-accent w-100" data-bind="click:login, enable:!loggingIn()">
+        <span data-bind="visible:!loggingIn()">Login</span>
+        <span data-bind="visible:loggingIn">Logging in...</span>
+      </button>
+      <div class="text-danger text-center mt-2 small" data-bind="text:loginErr"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Main App -->
+<div data-bind="visible:loggedIn" style="display:none">
+
+  <!-- Navbar -->
+  <nav class="navbar navbar-dark px-3 mb-3" style="background:#0f3460">
+    <span class="nav-brand">&#x1F5C3; PicoWAL</span>
+    <div class="d-flex align-items-center gap-3">
+      <span class="status-bar" data-bind="text:statusText"></span>
+      <span class="badge bg-secondary" data-bind="text:currentUser"></span>
+      <button class="btn btn-sm btn-outline-light" data-bind="click:logout">Logout</button>
+    </div>
+  </nav>
+
+  <div class="container-fluid">
+    <div class="row">
+
+      <!-- Left: Navigation -->
+      <div class="col-md-3">
+
+        <!-- Pack Navigator -->
+        <div class="card-panel p-3 mb-3">
+          <h6>Packs</h6>
+          <div class="list-group list-group-flush" data-bind="foreach:availablePacks">
+            <a href="#" class="list-group-item list-group-item-action bg-transparent text-light border-secondary py-1 px-2"
+              data-bind="click:$root.selectPack, css:{'active':$root.navPack()==ord}">
+              <span data-bind="text:name"></span>
+              <span class="badge bg-secondary float-end" data-bind="text:ord"></span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Card Browser -->
+        <div class="card-panel p-3 mb-3">
+          <h6>Cards</h6>
+          <div class="input-group input-group-sm mb-2">
+            <input class="form-control" placeholder="Pack" type="number" min="0" max="1023"
+              data-bind="value:navPack">
+            <input class="form-control" placeholder="Card" type="number" min="0"
+              data-bind="value:navCard">
+          </div>
+          <div class="d-flex gap-1 mb-2">
+            <button class="btn btn-sm btn-primary flex-fill" data-bind="click:doGet">GET</button>
+            <button class="btn btn-sm btn-warning flex-fill" data-bind="click:doList">LIST</button>
+            <button class="btn btn-sm btn-danger flex-fill"
+              data-bind="click:doDelete, enable:currentCard()&&canDelete()">DEL</button>
+          </div>
+          <div class="input-group input-group-sm mb-2">
+            <input class="form-control" placeholder="IDs: 1,2,5,42" data-bind="value:mgetIds">
+            <button class="btn btn-sm btn-info" data-bind="click:doMget">MGET</button>
+          </div>
+          <div class="input-group input-group-sm" data-bind="visible:canWrite">
+            <input class="form-control" placeholder="New card ordinal" type="number"
+              data-bind="value:newCardOrd">
+            <button class="btn btn-sm btn-accent" data-bind="click:doNew">NEW</button>
+          </div>
+        </div>
+
+        <!-- Card List -->
+        <div class="card-panel p-3 mb-3" data-bind="visible:listItems().length">
+          <h6>Pack <span data-bind="text:navPack"></span> — Cards</h6>
+          <div class="list-group list-group-flush" style="max-height:400px;overflow-y:auto">
+            <!-- ko foreach: listItems -->
+            <a href="#" class="list-group-item list-group-item-action bg-transparent text-light border-secondary py-1 px-2"
+              data-bind="click:$root.selectListItem, css:{'active':$root.navCard()==id}">
+              Card <span data-bind="text:id"></span>
+              <span class="badge bg-secondary float-end" data-bind="text:fieldCount+' fields'"></span>
+            </a>
+            <!-- /ko -->
+          </div>
+          <div class="mt-2 d-flex gap-1">
+            <button class="btn btn-sm btn-outline-light flex-fill"
+              data-bind="click:listPrev, enable:listStart()>0">&laquo; Prev</button>
+            <button class="btn btn-sm btn-outline-light flex-fill"
+              data-bind="click:listNext, enable:listItems().length>=listLimit()">&raquo; Next</button>
+          </div>
+        </div>
+
+        <!-- Password Change -->
+        <div class="card-panel p-3">
+          <h6>Change Password</h6>
+          <input type="password" class="form-control form-control-sm mb-1" placeholder="Current"
+            data-bind="value:oldPass">
+          <input type="password" class="form-control form-control-sm mb-1" placeholder="New"
+            data-bind="value:newPass">
+          <button class="btn btn-sm btn-outline-warning w-100" data-bind="click:doChangePassword">Change</button>
+          <div class="small mt-1" data-bind="text:passMsg, css:{'text-success':passMsg().indexOf('changed')>=0,'text-danger':passMsg().indexOf('changed')<0&&passMsg()}"></div>
+        </div>
+      </div>
+
+      <!-- Right: Card Editor -->
+      <div class="col-md-9">
+        <div class="card-panel p-3" data-bind="visible:currentCard">
+
+          <!-- Card Header -->
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <h5 class="mb-0">
+                <span data-bind="text:currentCard()?currentCard().packName:''"></span>
+                / Card <span data-bind="text:navCard"></span>
+                <span class="badge bg-secondary ms-2" data-bind="text:'v'+((currentCard()||{}).version||0)"></span>
+                <span class="badge bg-info ms-1" data-bind="visible:currentCard()&&currentCard().isNew">NEW</span>
+              </h5>
+            </div>
+            <div class="d-flex gap-1">
+              <button class="btn btn-sm btn-success" data-bind="click:doSave, enable:hasDirty()&&canWrite()">
+                &#x1F4BE; Save
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" data-bind="click:doReload">
+                &#x21BB; Reload
+              </button>
+            </div>
+          </div>
+
+          <!-- Field Table -->
+          <table class="table table-sm table-hover mb-0">
+            <thead>
+              <tr>
+                <th style="width:40px">#</th>
+                <th style="width:150px">Field</th>
+                <th>Value</th>
+                <th style="width:80px">Type</th>
+              </tr>
+            </thead>
+            <tbody data-bind="foreach:currentCard()?currentCard().props():[]">
+              <tr data-bind="css:{'field-dirty':dirty()}">
+                <td class="text-muted" data-bind="text:ord"></td>
+                <td>
+                  <strong data-bind="text:name"></strong>
+                </td>
+                <td>
+                  <!-- ko if: type===0x07 -->
+                  <div class="form-check">
+                    <input type="checkbox" class="form-check-input"
+                      data-bind="checked:val">
+                  </div>
+                  <!-- /ko -->
+                  <!-- ko if: type===0x11 -->
+                  <span class="text-muted" data-bind="text:val"></span>
+                  <!-- /ko -->
+                  <!-- ko if: type!==0x07 && type!==0x11 -->
+                  <input class="form-control form-control-sm"
+                    data-bind="value:val,
+                               attr:{type:input, maxlength:maxlen},
+                               enable:true">
+                  <!-- /ko -->
+                </td>
+                <td>
+                  <span class="badge-type" data-bind="text:typeName"></span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+        </div>
+
+        <!-- Empty State -->
+        <div class="card-panel p-5 text-center" data-bind="visible:!currentCard()">
+          <h5 class="text-muted">Select a pack and card to begin</h5>
+          <p class="text-muted small">Use the panel on the left to browse, or enter a pack/card number and click GET.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/knockout@3.5/build/output/knockout-latest.js"></script>
+<script src="picowal.js"></script>
+<script>
+function AppVM() {
+  var self = this;
+
+  // ── Auth State ──
+  self.loggedIn = ko.observable(false);
+  self.currentUser = ko.observable('');
+  self.userCard = ko.observable(null);
+  self.loginUser = ko.observable('');
+  self.loginPass = ko.observable('');
+  self.loginErr = ko.observable('');
+  self.loggingIn = ko.observable(false);
+  self.profile = ko.observable(null);
+
+  // ── Navigation ──
+  self.navPack = ko.observable(1);
+  self.navCard = ko.observable(0);
+  self.newCardOrd = ko.observable('');
+  self.statusText = ko.observable('');
+
+  // ── Available packs from profile ──
+  self.availablePacks = ko.computed(function() {
+    var p = self.profile();
+    return p ? p.packs : [];
+  });
+
+  // ── Card Editor ──
+  self.currentCard = ko.observable(null);
+
+  // ── List View ──
+  self.listItems = ko.observableArray([]);
+  self.listStart = ko.observable(0);
+  self.listLimit = ko.observable(50);
+
+  // ── Password Change ──
+  self.oldPass = ko.observable('');
+  self.newPass = ko.observable('');
+  self.passMsg = ko.observable('');
+
+  // ── Multi-get ──
+  self.mgetIds = ko.observable('');
+
+  // ── Dirty tracking ──
+  self.hasDirty = ko.computed(function() {
+    var cc = self.currentCard();
+    if (!cc) return false;
+    return cc.props().some(function(p) { return p.dirty(); });
+  });
+
+  // ── Can write/delete current pack ──
+  self.canWrite = ko.computed(function() {
+    var p = self.profile(), pack = parseInt(self.navPack());
+    if (!p) return false;
+    if (p.isAdmin) return true;
+    return (p.writePacks||[]).indexOf(pack) >= 0;
+  });
+  self.canDelete = ko.computed(function() {
+    var p = self.profile(), pack = parseInt(self.navPack());
+    if (!p) return false;
+    if (p.isAdmin) return true;
+    return (p.deletePacks||[]).indexOf(pack) >= 0;
+  });
+
+  // ── Session expired handler ──
+  PicoWAL.onSessionExpired(function() {
+    self.loggedIn(false);
+    self.profile(null);
+    self.currentCard(null);
+    self.listItems([]);
+    self.loginErr('Session expired — please login again');
+    self.showLogin();
+  });
+
+  // ── Login Modal ──
+  var loginModal = null;
+
+  self.showLogin = function() {
+    self.loginUser('');
+    self.loginPass('');
+    if (!loginModal) loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
+    loginModal.show();
+  };
+
+  self.login = function() {
+    self.loggingIn(true);
+    self.loginErr('');
+
+    PicoWAL.login(self.loginUser(), self.loginPass(), function(session, errCode) {
+      self.loggingIn(false);
+      if (!session) {
+        self.loginErr(errCode === 401 ? 'Invalid credentials' :
+                      errCode === 403 ? 'Account locked' :
+                      errCode === -1  ? 'Connection failed' :
+                      'Login failed (' + errCode + ')');
+        return;
+      }
+
+      self.userCard(session.userCard);
+
+      // Load profile: own user card + pack navigation
+      PicoWAL.loadProfile(session.userCard, function(profile) {
+        if (!profile) {
+          self.loginErr('Failed to load profile');
+          return;
+        }
+        self.profile(profile);
+        self.currentUser(profile.username);
+        self.loggedIn(true);
+        self.loginErr('');
+        if (loginModal) loginModal.hide();
+        self.refreshStatus();
+
+        // Default to first available pack
+        if (profile.packs.length > 0) {
+          self.navPack(profile.packs[0].ord);
+        }
+      });
+    });
+  };
+
+  self.loginKeypress = function(data, event) {
+    if (event.keyCode === 13) self.login();
+    return true;
+  };
+
+  self.logout = function() {
+    PicoWAL.logout(function() {
+      self.loggedIn(false);
+      self.profile(null);
+      self.currentCard(null);
+      self.listItems([]);
+      self.showLogin();
+    });
+  };
+
+  // ── Status ──
+  self.refreshStatus = function() {
+    fetch('/status', { credentials: 'same-origin' })
+    .then(function(r) { return r.text(); })
+    .then(function(t) { self.statusText(t); });
+  };
+
+  // ── Select pack from nav ──
+  self.selectPack = function(pack) {
+    self.navPack(pack.ord);
+    self.currentCard(null);
+    self.doList();
+  };
+
+  // ── GET single card ──
+  self.doGet = function() {
+    var p = parseInt(self.navPack()), c = parseInt(self.navCard());
+    if (isNaN(p) || isNaN(c)) return;
+    PicoWAL.loadCard(p, c, function(vm) {
+      if (vm) {
+        self.currentCard(vm);
+      } else {
+        self.currentCard(null);
+      }
+    });
+  };
+
+  // ── LIST cards in pack ──
+  self.doList = function() {
+    var p = parseInt(self.navPack());
+    if (isNaN(p)) return;
+    PicoWAL.listCards(p, self.listStart(), self.listLimit(), function(items) {
+      self.listItems(items.map(function(item) {
+        var fc = 0;
+        if (item.data) { for (var k in item.data.fields) fc++; }
+        return { id: item.id, fieldCount: fc };
+      }));
+    });
+  };
+
+  self.listPrev = function() {
+    self.listStart(Math.max(0, self.listStart() - self.listLimit()));
+    self.doList();
+  };
+
+  self.listNext = function() {
+    self.listStart(self.listStart() + self.listLimit());
+    self.doList();
+  };
+
+  // ── MGET specific cards by ID list ──
+  self.doMget = function() {
+    var p = parseInt(self.navPack());
+    var ids = self.mgetIds().split(',').map(function(s) {
+      return parseInt(s.trim(), 10);
+    }).filter(function(v) { return !isNaN(v); });
+    if (isNaN(p) || !ids.length) return;
+    PicoWAL.mgetCards(p, ids, function(items) {
+      self.listItems(items.map(function(item) {
+        var fc = 0;
+        if (item.data) { for (var k in item.data.fields) fc++; }
+        return { id: item.id, fieldCount: fc };
+      }));
+      self.currentCard(null);
+    });
+  };
+
+  self.selectListItem = function(item) {
+    self.navCard(item.id);
+    self.doGet();
+  };
+
+  // ── NEW card ──
+  self.doNew = function() {
+    var p = parseInt(self.navPack()), c = parseInt(self.newCardOrd());
+    if (isNaN(p) || isNaN(c)) return;
+    self.navCard(c);
+    PicoWAL.loadCard(p, c, function(vm) {
+      if (vm) {
+        vm.isNew = true;
+        vm.props().forEach(function(prop) { prop.dirty(true); });
+        self.currentCard(vm);
+      }
+    });
+  };
+
+  // ── SAVE dirty fields ──
+  self.doSave = function() {
+    var cc = self.currentCard();
+    if (!cc) return;
+    PicoWAL.saveCard(cc, function(ok) {
+      if (ok) self.refreshStatus();
+      else alert('Save failed');
+    });
+  };
+
+  // ── RELOAD current card ──
+  self.doReload = function() { self.doGet(); };
+
+  // ── DELETE card ──
+  self.doDelete = function() {
+    var cc = self.currentCard();
+    if (!cc) return;
+    if (!confirm('Delete Pack ' + cc.pack + ' / Card ' + cc.card + '?')) return;
+    PicoWAL.apiFetch('DELETE', '/0/' + cc.pack + '/' + cc.card)
+    .then(function(r) {
+      if (r.ok) {
+        self.currentCard(null);
+        self.doList();
+        self.refreshStatus();
+      } else {
+        alert('Delete failed (' + r.status + ')');
+      }
+    });
+  };
+
+  // ── Change password ──
+  self.doChangePassword = function() {
+    self.passMsg('');
+    PicoWAL.changePassword(self.userCard(), self.oldPass(), self.newPass(),
+    function(ok, status) {
+      if (ok) {
+        self.passMsg('Password changed');
+        self.oldPass(''); self.newPass('');
+      } else {
+        self.passMsg(status === 401 ? 'Wrong current password' : 'Failed (' + status + ')');
+      }
+    });
+  };
+
+  // ── Boot ──
+  self.showLogin();
+}
+
+ko.applyBindings(new AppVM());
+</script>
+</body>
+</html>

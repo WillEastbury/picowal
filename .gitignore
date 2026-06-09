@@ -1,1 +1,20 @@
+# Build artifacts
+build/
 __pycache__/
+*.py[cod]
+bin/
+obj/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local WiFi credentials — never commit
+src/wifi_config.h

@@ -1,0 +1,71 @@
+cmake_minimum_required(VERSION 3.13)
+
+set(PICO_BOARD pico2_w)
+
+include($ENV{PICO_SDK_PATH}/pico_sdk_init.cmake)
+
+project(pico2w_lcd C CXX ASM)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+
+pico_sdk_init()
+
+add_subdirectory(drivers)
+
+add_executable(${PROJECT_NAME}
+    src/main.c
+    src/net_core.c
+    src/wal_engine.c
+    src/wal_dma.c
+    src/kv_flash.c
+    src/metadata_dict.c
+    src/httpd/web_server.c
+    src/user_auth.c
+    src/kv_sd.c
+    src/query.c
+    src/udp_wal.c
+    src/crypto.c
+)
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/drivers
+    ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/lib/picocompress
+)
+
+target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/lib/picocompress/picocompress.c
+)
+
+target_link_libraries(${PROJECT_NAME}
+    pico_stdlib
+    pico_cyw43_arch_lwip_poll
+    pico_multicore
+    hardware_spi
+    hardware_pwm
+    hardware_gpio
+    hardware_dma
+    hardware_flash
+    pico_rand
+    pico_mbedtls
+    lcd_driver
+    sd_driver
+)
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    PICO_STACK_SIZE=0x2000
+    PICO_CORE1_STACK_SIZE=0x0C00
+)
+
+pico_enable_stdio_usb(${PROJECT_NAME} 1)
+pico_enable_stdio_uart(${PROJECT_NAME} 0)
+
+# LTO disabled — causes __assert_func linker errors with arm-none-eabi nosys specs
+# include(CheckIPOSupported)
+# check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
+# if(_ipo_ok)
+#     set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+# endif()
+
+pico_add_extra_outputs(${PROJECT_NAME})

@@ -1,0 +1,30 @@
+# PicoWAL Pin Constraints for Alchitry Cu (iCE40HX8K-CB132)
+# W5500 on Bank A via Alchitry Br breakout
+# SD Card on Bank B via Alchitry Br breakout
+#
+# NOTE: Pin names A2-A7 and B2-B5 are placeholders. Actual pin mapping
+# depends on which Br breakout bank headers are used and should be
+# verified against the Alchitry Cu schematic and Br adapter pinout.
+
+# System
+set_io clk_100mhz P7
+set_io rst_n_btn  P8
+
+# W5500 SPI (active directly on FPGA pins for SB_SPI, define fallback here)
+# Directly on Br bank A pins (0.1" headers)
+set_io w5500_cs   A2
+set_io w5500_sck  A3
+set_io w5500_mosi A4
+set_io w5500_miso A5
+set_io w5500_int  A6
+set_io w5500_rst  A7
+
+# SD Card SPI (soft SPI master)
+# On Br bank B pins
+set_io sd_cs      B2
+set_io sd_sck     B3
+set_io sd_mosi    B4
+set_io sd_miso    B5
+
+# Status LED
+set_io led        J3

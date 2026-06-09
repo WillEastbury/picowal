@@ -1,431 +1,508 @@
-# PicoWAL
+# PicoWAL — Micro-Database Appliance
 
-**A network-attached application server that runs entirely in FPGA logic — no CPU, no OS, no framework.**
+A networked micro-database running on a **Raspberry Pi Pico 2W** with a Waveshare Pico-ResTouch-LCD-3.5 display and 16GB SD card.
 
-PicoWAL serves dynamic web pages from a £24 board using a custom bytecode ISA (PicoScript) executed directly in LUTs. HTTP requests arrive over Ethernet, trigger hardware state machines that load data cards, render templates with nested loops, and stream responses — all without a single line of software running anywhere.
+Serves a full SSR web UI with user auth, schema management, a query language with joins and aggregates, master-child forms, batch writes, and OTA firmware updates — all from a $6 microcontroller.
 
----
+📊 **[Benchmark Results →](docs/BENCHMARKS.md)** | 🗺️ **[FPGA Design →](docs/FPGA_DESIGN.md)** | 🔌 **[Embedding Contract →](docs/EMBEDDING_CONTRACT.md)**
 
-## What Is This?
+## PicoScript and FPGA lineage
 
-PicoWAL is a pure-FPGA query engine and web application server. It stores data as **cards** (fixed-size records) organised into **packs** (collections) under **tenants** (namespaces). Queries execute as PicoScript bytecode programs — compiled from a multi-syntax source language — running on up to 8 hardware virtual cores with zero-overhead parallel loops.
+This repository also retains the earlier PicoScript/FPGA design notes while the standalone language stack lives at [`WillEastbury/picoscript`](https://github.com/WillEastbury/picoscript).
 
-### Key Properties
+| Spec | File |
+|------|------|
+| PicoScript hardware bytecode contract | [`docs/picoscript-hardware.md`](docs/picoscript-hardware.md) |
+| PicoScript language/editor contract | [`docs/picoscript-language-editor.md`](docs/picoscript-language-editor.md) |
+| Current FPGA design notes | [`docs/FPGA_DESIGN.md`](docs/FPGA_DESIGN.md) |
 
-| Property | Value |
-|----------|-------|
-| CPU | None. FPGA IS the processor |
-| Operating System | None |
-| Language runtime | None — bytecode executes in combinatorial logic |
-| TCP/IP stack | Hardware (W5100S chip) |
-| HTTP parsing | Hardware (FPGA LUTs) |
-| Template rendering | Hardware (streaming find-and-replace with 2-level FOREACH) |
-| Power consumption | 0.92W (USB powered) |
-| Prototype cost | ~£24 |
-| Form factor | 60×40mm PCB or Alchitry Cu breadboard |
+## What it does
 
----
+- **HTTP database server** on port 80 over WiFi
+- **16GB SD card** for user data (6.6 million card slots)
+- **4MB flash** for system data (users, schemas)
+- **Query engine** with `S:` / `F:` / `W:` syntax, cross-pack joins, aggregates
+- **Cost-based optimizer** with cardinality estimates and predicate reordering
+- **Server-side rendered** web UI — no client frameworks, ~2KB of JS total
+- **Master-child forms** with inline editable grid
+- **OTA firmware updates** via SD staging (no BOOTSEL needed)
+- **LCD dashboard** showing SSID, IP address, flash/SD free space
+
+## Quick start
+
+### 1. Build & flash
+
+```powershell
+$env:PICO_SDK_PATH = "C:\source\pico-sdk"
+cmake -B build -G Ninja
+cmake --build build
+# Hold BOOTSEL, plug USB, copy build/pico2w_lcd.uf2 to RPI-RP2 drive
+```
+
+### 2. Connect
+
+Device boots to `192.168.222.223:80` (static IP). Log in with `admin` / `admin`.
+
+### 3. Create a pack
+
+Admin → Schema → New Pack → set name, module, ordinal → add fields.
+
+### 4. Query
+
+```
+S:name,price,currencies.code
+F:products,currencies
+W:price|>|1000
+```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    iCE40HX8K FPGA                        │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐ │
-│  │ HTTP     │  │PicoScript│  │ Template │  │  PIPE  │ │
-│  │ Parser   │→ │ Executor │→ │ Engine   │→ │ DMA    │ │
-│  │ (980 LUT)│  │ (8 cores)│  │(2-level) │  │        │ │
-│  └──────────┘  └──────────┘  └──────────┘  └────────┘ │
-│       ↑              ↑              ↑            ↓      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐ │
-│  │ W5100S   │  │   QSPI   │  │  Schema  │  │   SD   │ │
-│  │ TCP/IP   │  │   SRAM   │  │  BRAM    │  │  Card  │ │
-│  │ (SPI)    │  │  (cache) │  │ (tables) │  │  Store │ │
-│  └──────────┘  └──────────┘  └──────────┘  └────────┘ │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│  Browser                                     │
+│  ┌─────────┐ ┌──────────┐ ┌──────────────┐  │
+│  │ SSR HTML │ │ app.js   │ │ Grid Editor  │  │
+│  │ (cached) │ │ (2KB,24h)│ │ (batch save) │  │
+│  └────┬─────┘ └────┬─────┘ └──────┬───────┘  │
+└───────┼─────────────┼──────────────┼──────────┘
+        │ HTTP/1.1    │              │
+┌───────┴─────────────┴──────────────┴──────────┐
+│  Pico 2W (RP2350 Cortex-M33, 520KB SRAM)     │
+│                                                │
+│  ┌──────────────────────────────────────────┐  │
+│  │ web_server.c — SSR pages, routes, OTA    │  │
+│  │ query.c — parser, optimizer, executor    │  │
+│  │ user_auth.c — sessions, RBAC, SHA-256    │  │
+│  └────────────────┬─────────────────────────┘  │
+│                   │                            │
+│  ┌────────────────┴─────────────────────────┐  │
+│  │ kv_store.h — unified routing layer       │  │
+│  │   Pack 0-1 → kv_flash (system data)      │  │
+│  │   Pack 2+  → kv_sd (user data on SD)     │  │
+│  └──────┬─────────────────┬─────────────────┘  │
+│         │                 │                    │
+│  ┌──────┴──────┐  ┌──────┴──────────────────┐  │
+│  │ 4MB Flash   │  │ 16GB SD Card (SPI1)     │  │
+│  │ kv_flash.c  │  │ kv_sd.c + OTA staging   │  │
+│  │ 4KB sectors │  │ 2KB cards, bitmap alloc  │  │
+│  └─────────────┘  └─────────────────────────┘  │
+│                                                │
+│  ┌──────────────────────────────────────────┐  │
+│  │ LCD Dashboard (ILI9488, SPI1 shared)     │  │
+│  │ SSID, IP, flash free, SD usage           │  │
+│  └──────────────────────────────────────────┘  │
+└────────────────────────────────────────────────┘
 ```
 
-## Specification Boundaries
+## Data model
 
-PicoScript is intentionally split into two contracts:
+### Packs and cards
 
-| Spec | Owns | File |
-|------|------|------|
-| Hardware / bytecode | 32-bit instruction format, opcode values, register semantics, scheduler/branch/storage/PIPE/DSP behaviour | [`docs/picoscript-hardware.md`](docs/picoscript-hardware.md) |
-| Language / editor | Source syntax, alternate views, diagnostics, completions, formatting, round-tripping | [`docs/picoscript-language-editor.md`](docs/picoscript-language-editor.md) |
+Data is organized into **packs** (like tables) containing **cards** (like rows). Each card is a binary blob with a 4-byte magic header (`0xCA7D`) followed by ordinal-tagged fields.
 
-This lets the language and editor evolve without destabilising the RTL-visible bytecode contract.
-
-### Data Model
-
-```
-Tenant → Pack → Card
-  │        │       └── 512-byte fixed record (bytecode OR data)
-  │        └── Collection of cards (like a database table)
-  └── Isolation boundary (like a database)
-```
-
-### Storage Hierarchy
-
-| Tier | Medium | Capacity | Latency | Bandwidth | Cost | Required |
-|------|--------|----------|---------|-----------|------|----------|
-| L0 | BRAM (on-chip) | 4KB | 1 cycle | — | — | Yes |
-| L1 | QSPI SRAM | 128KB-1MB | ~200ns | ~6MB/s | £1.50 | Yes |
-| L2 | eMMC (4-bit) | 4-32GB | ~100µs | ~24MB/s | £3-8 | **Optional** |
-| L3 | SD Card (SPI) | 2-32GB | ~1ms | ~4MB/s | £3-8 | Yes |
-
-**eMMC auto-detection:** A detect pin (pulled HIGH via 10K resistor) is grounded by the eMMC module when present. At boot, the FPGA samples this pin — if LOW, the L2 tier is enabled and the eMMC is initialised. If HIGH, L2 is skipped and SRAM talks directly to SD.
-
-Cache policy: LRU eviction, write-back. Reads cascade L1→L2→L3. Writes hit L1 immediately, write-back on eviction.
-
----
-
-## PicoScript ISA
-
-The hardware-facing ISA is specified in [`docs/picoscript-hardware.md`](docs/picoscript-hardware.md). In short, PicoScript uses a 32-bit fixed-width instruction word:
-
-```
-[31:28] opcode   4-bit (16 opcodes, single LUT decode)
-[27:24] Rd       destination register (R0-R15)
-[23:20] Rs1      source register 1
-[19:16] Rs2      source register 2 / mode / condition / sub-op
-[15:0]  imm16    immediate value / card address / branch target
-```
-
-### Opcode Table
-
-| Op | Mnemonic | Function | Cycles | Hardware Unit |
-|:--:|----------|----------|:------:|---------------|
-| 0 | NOOP | No-op / HTTP control | 1 | Scheduler |
-| 1 | LOAD | Load card → register | 2-48K | Memory controller |
-| 2 | SAVE | Save register → card | 2-48K | Memory controller |
-| 3 | PIPE | Zero-copy card → TCP stream | var | PIPE DMA engine |
-| 4 | ADD | Addition | 1 | ALU |
-| 5 | SUB | Subtraction | 1 | ALU |
-| 6 | MUL | Multiplication | 8 | Soft MAC |
-| 7 | DIV | Division | 32 | Soft divider |
-| 8 | INC | Increment | 1 | ALU |
-| 9 | JUMP | Unconditional jump (to card) | 2-10 | Flow controller |
-| A | BRANCH | Conditional branch | 1-10 | Branch unit |
-| B | CALL | Subroutine call (push card+IP) | 2-10 | Flow + call stack |
-| C | RETURN | Return from call (pop card+IP) | 2-10 | Flow + call stack |
-| D | WAIT | Suspend context until interrupt | 0† | Scheduler |
-| E | RAISE | Fire software interrupt | 1 | IRQ controller |
-| F | DSP | AI/ML accelerator operation | 8-2048 | Soft MAC array |
-
-† WAIT consumes zero cycles — context is removed from scheduling until woken by RAISE.
-
-### Flow Control = Card Navigation
-
-The program counter is `(pack, card, instruction_pointer)`. Flow instructions navigate between cards:
-
-- **JUMP(pack, card)** — Load target card, execute from IP=0
-- **BRANCH(cond, pack, card)** — Conditional JUMP
-- **CALL(pack, card)** — Push (current_pack, current_card, IP+1) onto call stack, then JUMP
-- **RETURN** — Pop (pack, card, IP) from call stack, resume
-
-Local branching (within a card) uses mode=0. Cross-card jumps use mode=1.
-
-### WAIT / RAISE Interrupt Model
-
-```
-Context A:  WAIT          → suspends, 0 cycles consumed
-Context B:  RAISE 0xA    → wakes context A at IP+1
-```
-
-Wake sources:
-- **Software**: Another context executes `RAISE channel_id`
-- **HTTP parser**: New request decoded → auto-RAISE assigned handler
-- **PIPE engine**: Transfer complete → auto-RAISE originating context
-- **Fork/Join**: All v-cores joined → auto-RAISE forking context
-
-### Hardware Loop Constructs
-
-These are **silicon primitives**, not compiler sugar — zero-overhead execution:
-
-| Construct | Hardware | LUTs | Description |
-|-----------|----------|------|-------------|
-| FOR | Loop counter + auto-branch | 80 | Counted loop, branch is free |
-| FOREACH | Card iterator + auto-load | 100 | Walk a pack, auto-load each card |
-| SWITCH | BRAM jump table | 40 | O(1) indexed dispatch |
-
-### DSP Sub-operations (opcode 0xF)
-
-| Sub-op | Mnemonic | Function |
-|:------:|----------|----------|
-| 0 | MATMUL | Matrix multiply |
-| 1 | SOFTMAX | Softmax activation |
-| 2 | DOT | Dot product |
-| 3 | SCALE | Scale vector |
-| 4 | RELU | ReLU activation |
-| 5 | NORM | Layer normalisation |
-| 6 | TOPK | Top-K selection |
-| 7 | GELU | GELU activation |
-| 8 | TRANSPOSE | Matrix transpose |
-| 9 | VADD | Vector add |
-| A | EMBED | Embedding lookup |
-| B | QUANT | Quantize float→int8 |
-| C | DEQUANT | Dequantize int8→float |
-| D | MASK | Attention mask |
-| E | CONCAT | Concatenate vectors |
-| F | SPLIT | Split into heads |
-
-### Parallel Loops (Fork/Join)
-
-```csharp
-Thread.Fork(R0, R1, :body);   // distribute iterations across 8 v-cores
-// ... loop body ...
-Thread.Join();                  // barrier — wait for all cores
-```
-
-Distributes range [R0..R1) across available v-cores. Each gets a unique iteration value in R0. 8× speedup on embarrassingly parallel workloads (filter, scan, map).
-
----
-
-## Schema & Field Extraction
-
-Cards can have typed schemas stored in BRAM:
-
-```
-Schema "users": 
-  field 0: offset=0,  type=u32, len=4   (id)
-  field 1: offset=4,  type=str, len=32  (name)  
-  field 2: offset=36, type=u16, len=2   (age)
-  field 3: offset=38, type=u32, len=4   (balance)
-```
-
-Hardware FIELD extractor (80 LUTs): reads schema from BRAM, barrel-shifts card data to extract the named field into a register. Enables:
-
-```csharp
-Storage.Field(R0, "age");           // extract field → R0
-Flow.Branch(GT, R0, 18, :match);   // WHERE age > 18
-```
-
----
-
-## Template Engine (Hardware)
-
-Streaming template rendering with **2-level nested FOREACH**:
-
-```html
-<h1>{{1}}</h1>                    <!-- field 1 from master card -->
-{{EACH:orders}}                    <!-- iterate child pack -->
-  <div>Order #{{1}}               <!-- field from child -->
-    <ul>
-    {{EACH:items}}                  <!-- iterate grandchild pack -->
-      <li>{{2}} — £{{3}}</li>      <!-- fields from grandchild -->
-    {{/EACH}}
-    </ul>
-  </div>
-{{/EACH}}
-```
-
-### Template Markers (in card data)
-
-| Byte | Meaning |
-|------|---------|
-| `0xFE` + field_id | Replace with field value |
-| `0xFD` + pack_id | Begin FOREACH (push nesting level) |
-| `0xFC` | End FOREACH (loop or pop level) |
-
-The template engine streams card data toward the TCP TX buffer, detecting markers and injecting live field values in-flight. No buffering of the full output — streaming at wire speed.
-
----
-
-## Multi-Syntax Language
-
-The language/editor-facing contract is specified in [`docs/picoscript-language-editor.md`](docs/picoscript-language-editor.md).
-
-Cards store **only bytecode** (4 bytes/instruction). The source language is a client-side view layer with 4 interchangeable syntaxes over identical bytecode:
-
-### C# Style (`.pico`)
-```csharp
-Storage.Load(0, 1, 42, R0);
-Storage.Field(R1, 2);
-Flow.Branch(GT, R1, 18, :match);
-Storage.Pipe(0, 1, 42, Stream.Out);
-```
-
-### BASIC Style (`.bas`)
-```basic
-10 PEEK STORAGE, 0, 1, 42, R0
-20 PEEK FIELD, R1, 2
-30 IF R1 > 18 GOTO 50
-40 GOTO 60
-50 SYS PIPE, 0, 1, 42, STREAM
-60 REM END
-```
-
-### Python Style (`.py`)
-```python
-storage.load(0, 1, 42, r0)
-storage.field(r1, 2)
-flow.branch(gt, r1, 18, "match")
-storage.pipe(0, 1, 42, stream.out)
-```
-
-### Hex Style (`.hex`)
-```
-1042 0001 002A 0000
-1043 0102 0000 0000
-A001 0102 0012 0032
-3042 0001 002A 0000
-```
-
-Write in any syntax; colleague reads it in another. Same card. Compile on save, decompile on load — all client-side.
-
-### BASIC Verb Mapping (C64-inspired)
-
-| Verb | Maps to | Example |
+| Pack | Purpose | Storage |
 |------|---------|---------|
-| PEEK | Read (LOAD, FIELD) | `PEEK STORAGE, 0, 1, 42, R0` |
-| POKE | Write (SAVE, Net.*, RAISE) | `POKE NET, STATUS, 200` |
-| LET | Math (ADD, SUB, MUL, DIV, INC) | `LET R0 = R1 + 42` |
-| GOTO | Unconditional jump | `GOTO 30` |
-| IF | Conditional branch | `IF R0 < R1 GOTO 50` |
-| GOSUB | Call subroutine | `GOSUB 100` |
-| RETURN | Return from call | `RETURN` |
-| SYS | Hardware call (PIPE, DSP, FORK, TEMPLATE) | `SYS TEMPLATE, 0, 1, 2, STREAM` |
-| WAIT | Suspend | `WAIT` |
-| REM | No-op | `REM THIS IS A COMMENT` |
+| 0 | Schema definitions | Flash |
+| 1 | Users & auth | Flash |
+| 2 | Days (reference) | SD |
+| 3 | Countries (reference) | SD |
+| 4 | Currencies (reference) | SD |
+| 5+ | User-defined | SD |
 
----
+### Schema card format (Pack 0)
 
-## Resource Budget (iCE40HX8K)
+Each pack's schema is stored as a card in Pack 0:
+
+| Ordinal | Field | Description |
+|---------|-------|-------------|
+| 0 | Pack name | Length-prefixed UTF-8 |
+| 1 | Field count | uint8 |
+| 2 | Field definitions | 3 bytes each: ord, type, maxlen |
+| 3 | Flags | bit 0: public-read, bits 1-3: cardinality bucket |
+| 4 | Module | Groups packs into nav dropdowns |
+| 5 | Field names | Null-separated ASCII |
+| 6 | Children | Array of child pack ordinals (1:many) |
+
+### Field types
+
+| Code | Name | Friendly | Size |
+|------|------|----------|------|
+| 0x01 | uint8 | Small number (0-255) | 1 |
+| 0x02 | uint16 | Number (0-65k) | 2 |
+| 0x03 | uint32 | Large number | 4 |
+| 0x04 | int8 | Small number (+/-) | 1 |
+| 0x05 | int16 | Number (+/-) | 2 |
+| 0x06 | int32 | Large number (+/-) | 4 |
+| 0x07 | bool | Yes / No | 1 |
+| 0x08 | ascii | Text | len-prefixed |
+| 0x09 | utf8 | Text | len-prefixed |
+| 0x0A | date | Date | len-prefixed |
+| 0x0B | time | Time | len-prefixed |
+| 0x0C | datetime | Date & Time | len-prefixed |
+| 0x10 | array_u16 | Number list | count-prefixed |
+| 0x11 | blob | Binary data | raw bytes |
+| 0x12 | lookup | Link | uint32 card ID |
+
+### Relationships
+
+- **Many→1 (lookup)**: A field of type `0x12` stores a card ID from another pack. The `maxlen` byte specifies the target pack ordinal.
+- **1→Many (children)**: Schema ord 6 lists child pack ordinals. The child pack must have a lookup field pointing back to the parent.
+
+## Query language
 
 ```
-LUT Usage:         7471 / 7680  (97%)
-BRAM:              21 / 32 blocks
-Pins:              19 / 79 (QSPI mode)
-Spare LUTs:        209
-Spare Pins:        60
-Soft MACs:         3
-Power:             0.92W
-Clock:             48MHz (PLL from 100MHz oscillator)
+S:field1,field2              — Select fields
+S:*                          — Select all
+S:pack.field                 — Select from joined pack
+S:SUM|field                  — Aggregate (SUM, AVG, MIN, MAX, COUNT)
+F:pack1,pack2                — From (comma-separated, first is primary)
+W:field|op|value             — Where (multiple = AND)
+W:pack.field|op|value        — Where on joined pack
 ```
 
-### LUT Breakdown
+**Operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `IN`, `NI`
 
-| Module | LUTs | % |
-|--------|------|---|
-| PicoScript executor (8 contexts) | 1250 | 16% |
-| Context scheduler + registers | 360 | 5% |
-| HTTP parser | 980 | 13% |
-| QSPI SRAM controller | 150 | 2% |
-| SPI master (W5100S + SD) | 240 | 3% |
-| PIPE DMA engine | 180 | 2% |
-| 3× soft MAC (16-bit multiply-accumulate) | 768 | 10% |
-| UART debug interface | 600 | 8% |
-| Fork/Join parallel engine | 270 | 4% |
-| Hardware FOR/FOREACH/SWITCH | 220 | 3% |
-| FIELD extractor + Template engine | 173 | 2% |
-| 2-level template FOREACH | 63 | 1% |
-| PLL + clock distribution | 50 | 1% |
-| GPIO + misc logic | 200 | 3% |
-| **Unallocated / routing** | **209** | **3%** |
+**Response:** Pipe-delimited rows, CRLF line endings, `X-Pack` and `X-Count` HTTP headers.
 
----
+### Query optimizer
+
+- **Cardinality cache**: 3-bit log10 buckets in SRAM, lazy-flushed to schema flags
+- **Fanout stats**: Tracks avg children per lookup value
+- **Predicate reordering**: Sorts WHERE clauses by estimated selectivity (most selective first)
+- **Short-circuit AND**: First failing predicate skips the row
+
+### Examples
+
+```
+S:name,sku,price,currencies.code
+F:products,currencies
+W:price|>|1000
+```
+
+```
+S:SUM|total,customers.name
+F:orders,customers
+```
+
+## Web UI
+
+### Pages
+
+| Route | Description |
+|-------|-------------|
+| `/` | Home — pack cards with counts |
+| `/pack/{n}` | Card list — multi-column, paginated, search bar |
+| `/pack/{n}/{card}` | Card editor — breadcrumbs, prev/next, master-child grid |
+| `/status` | Appliance stats |
+| `/query` | Query form + results |
+| `/admin` | User management |
+| `/admin/meta` | Schema browser |
+| `/admin/meta/{n}` | Schema editor — fields, module, children |
+| `/admin/log` | Debug log ring buffer |
+| `/update` | OTA firmware update |
+
+### Features
+
+- **Sans-serif UI** with warm dark palette
+- **Pretty field labels**: `in_stock` → "In Stock"
+- **Friendly type hints**: "Text" not "utf8", "Yes / No" not "bool"
+- **Module grouping**: Packs grouped into nav dropdowns (Reference ▾, Sales ▾, Admin ▾)
+- **Pagination**: 10 cards per page with prev/next
+- **Lookup dropdowns**: ≤16 cards → `<select>`, >16 → search input
+- **Master-child grids**: Inline editable detail tables with Save All (batch write)
+- **Cache headers**: `app.js` cached 24h, favicon 204 cached 7d
+
+## Batch API
+
+```
+POST /batch
+Content-Type: application/octet-stream
+```
+
+Binary format: `0xBA 0x7C | count(u16) | [pack(u16) card(u32) len(u16) data]...`
+
+Validates all entries + RBAC first, then writes all cards. Max 32 per batch.
+
+## OTA firmware update
+
+Firmware uploads to SD card staging area (512KB, blocks 1-1024), then flashes to slot A on commit. No XIP contention — SD reads via SPI are independent of flash.
+
+```
+POST /update/begin    → prepare SD staging
+POST /update/chunk    → write 1KB chunks to SD
+POST /update/commit   → SD → SRAM → flash, reboot
+```
+
+Or use the deploy script:
+
+```powershell
+python ota_deploy.py 192.168.222.223 build/pico2w_lcd.bin
+```
 
 ## Hardware
 
-### Target: Alchitry Cu (development)
+- **Raspberry Pi Pico 2W** — RP2350 Cortex-M33, 520KB SRAM, 4MB flash
+- **Waveshare Pico-ResTouch-LCD-3.5** — ILI9488 LCD (touch not used)
+- **16GB SDHC** — shared SPI1 bus (GP10=SCK, GP11=MOSI, GP12=MISO, GP22=CS)
+- **Static IP**: 192.168.222.223/16, gateway 192.168.0.1
 
-The iCE40HX8K-CT256 on the Alchitry Cu development board. Breadboard prototype with:
-- Alchitry Cu (owned)
-- W5100S module (PoE Ethernet, £4)
-- QSPI SRAM (23LC1024, £2)
-- MicroSD breakout (£1)
-- Breadboard + wires (~£5)
+## Source files — complete reference
 
-### Target: Custom PCB (production)
+### Boot & orchestration
 
-60×40mm, 2-layer PCB. BOM cost ~£24:
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/main.c` | 60 | Entry point. Inits LCD, touch, SD, flash KV, SD KV, DMA. Launches Core 1 (`wal_engine_run`), then enters Core 0 network loop (`net_core_run`). |
+| `src/wal_defs.h` | 145 | Shared WAL structures: `wal_state_t`, request/response rings, slot pool (32 × 512B), FIFO helpers, `fifo_push_timeout()`. Owned by both cores. |
+| `src/wal_fence.h` | 9 | `wal_dmb()` — memory barrier for cross-core visibility. |
 
-| Component | Cost |
-|-----------|------|
-| iCE40HX8K-TQ144 | £6.50 |
-| W5100S (QFP48) | £2.80 |
-| QSPI SRAM (23LC1024) | £1.50 |
-| MicroSD slot | £0.40 |
-| 25MHz crystal + PLL passives | £0.80 |
-| Ethernet magnetics + RJ45 | £2.50 |
-| PoE PD module (12V→3.3V) | £3.80 |
-| Flash (iCE40 config, 2Mbit) | £0.80 |
-| PCB fabrication (JLCPCB 5pcs) | £2.50 |
-| Passives + connectors | £2.08 |
-| **Total** | **~£24** |
+### Core 0 — network & UI
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/net_core.c` | 659 | Core 0 main loop: WiFi connect (5× retry with backoff), static IP, HTTP init, UDP WAL init, hardware watchdog (8s), poll loop (cyw43 + TCP drain + UDP + LCD + SD flush). Also contains the raw TCP WAL server (port 8001) with HMAC-SHA256 challenge/response auth. Core 1 heartbeat stall detection. |
+| `src/net_core.h` | 51 | Static IP config, WAL port constants. WiFi credentials loaded from `wifi_config.h` (gitignored). |
+| `src/httpd/web_server.c` | 3464 | **Largest file.** Full SSR HTTP server: connection pool (6 conns), request parser, route dispatcher, HTML templating, CSS generation, app.js serving, cookie auth + PSK fallback, RBAC enforcement. Routes: card CRUD, batch writes, query UI, schema editor, user admin, OTA upload, admin wipe/reboot, debug log, notes. |
+| `src/httpd/web_server.h` | 16 | Exports: `web_server_init()`, `web_server_recent_activity()`, `web_log()`, cardinality helpers. |
+| `src/udp_wal.c` | 491 | UDP WAL protocol server (port 8002). Session management (8 sessions, epoch-based), HELLO/RESUME handshake, batch write (up to 16 cards), single-card read, 4 durability levels, bitmap ACK. Optional ChaCha20-Poly1305 encryption. Deferred queue (16 slots) + raw ring (48 overflow) for backpressure. |
+| `src/udp_wal.h` | 65 | Protocol constants, message types, durability flags. |
+
+### Core 1 — WAL engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/wal_engine.c` | 373 | Core 1 consumer: drains request ring via multicore FIFO, dispatches APPEND/READ/KV_GET/KV_PUT/DELETE/RANGE/RECORD_COUNT ops to `kv_flash`. Runs background compaction when idle. OTA halt support (`__wfe()` spin). |
+| `src/wal_engine.h` | 6 | Exports: `wal_engine_run()`. |
+| `src/wal_dma.c` | 60 | DMA copy helper using hardware DMA channel. `wal_dma_copy()` for fast bulk memory moves. |
+| `src/wal_dma.h` | 25 | DMA init/copy/wait/busy API. |
+
+### Storage — KV stores
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/kv_flash.c` | 853 | **Flash-backed KV store** for packs 0–1 (schemas + users). Page-based storage with V2 headers (sequence + CRC), mutation group commits, sorted SRAM index (binary search), compaction, deadlog recovery. Interrupt-safe flash writes. |
+| `src/kv_flash.h` | 101 | Full KV API: `kv_init/put/get/get_copy/delete/exists/range/stats/compact_step/wipe`. |
+| `src/kv_sd.c` | 623 | **SD-backed KV store** for packs 2+. Copy-on-write (COW) slot allocation with bitmap, 3-tier index (SRAM → Flash XIP → SD keylist), sorted merge range queries. Flash index at 0xC0000 with write-order hardening. |
+| `src/kv_sd.h` | 112 | SD KV API: `kvsd_init/put/get/get_copy/delete/exists/range/flush/dirty/stats/ready`. Defines FIDX region, KVSD_INDEX_MAX (18000). |
+| `src/kv_store.h` | 74 | **Unified routing layer.** Inline functions route by pack ordinal: packs 0–1 → `kv_flash`, packs 2+ → `kv_sd` (when ready, else flash fallback). Used by web_server, udp_wal, query engine. |
+| `src/storage.c` | 603 | Experimental packed/compressed storage engine with heatshrink. Superblock, block allocator, pack summaries, log writes. Currently compiled but not active in HTTP routes. |
+| `src/storage.h` | 93 | Storage engine API with compression support. |
+| `src/field_index.c` | 203 | Hash-based field-value index for O(1) lookups on SD. 4096-bucket hash table, chained entries in SD blocks. Used by `storage.c`. |
+| `src/field_index.h` | 48 | Field index API: `fidx_init/insert/search/search_prefix/remove_card`. |
+
+### Metadata & schema
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/metadata_dict.c` | 231 | Schema catalog: caches pack definitions from Pack 0, provides type/field/schema lookups. Reload from flash on boot. |
+| `src/metadata_dict.h` | 60 | Type/field/schema structs, catalog API. |
+
+### Auth & security
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/user_auth.c` | 736 | User management: session table (4 slots), login/logout, SHA-256 password hashing (salted), RBAC (readPacks/writePacks/deletePacks per user), admin detection, password change, user CRUD. Seeds default admin + reference data schemas on first boot. |
+| `src/user_auth.h` | 107 | Auth API: `user_auth_init/login/logout/check/can_read/can_write/can_delete/is_admin/create_user/change_password/seed_schema`. |
+| `src/crypto.c` | 299 | **Standalone crypto** (no mbedTLS for ciphers): ChaCha20 stream cipher, Poly1305 MAC, AEAD encrypt/decrypt, HKDF-SHA256 key derivation. Used by UDP WAL encryption. |
+| `src/crypto.h` | 36 | Crypto primitives API. |
+
+### Query engine
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/query.c` | 820 | Full query engine: `S:/F:/W:` parser, cost-based optimizer (cardinality estimates, predicate reordering, fanout stats), executor with cross-pack joins, aggregates (SUM/AVG/MIN/MAX/COUNT), pipe-delimited output. |
+| `src/query.h` | 87 | Query structs, parse/execute API. |
+
+### Configuration headers
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `src/lwipopts.h` | 44 | lwIP tuning: 20 TCP PCBs, 8 UDP PCBs, 2s TIME_WAIT, 41KB heap, keepalive on. |
+| `src/mbedtls_config.h` | 10 | Minimal mbedTLS: SHA-256 only (for password hashing + HKDF). |
+| `src/hs_config.h` | 10 | Heatshrink compression: window=8, lookahead=4. |
+
+### Hardware drivers
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `drivers/lcd/ili9488.c` | 260 | ILI9488 480×320 LCD driver over SPI1. Init sequence, buffered character rendering (one SPI transaction per glyph), pixel/rect/string drawing, backlight PWM. |
+| `drivers/lcd/ili9488.h` | 33 | LCD API + color constants. |
+| `drivers/sd/sd_card.c` | 330 | SD card SPI driver on SPI1. DMA-driven bulk transfers (512-byte blocks), bit-bang bus wakeup (required after LCD init), CMD0/CMD8/ACMD41 with timeout, single/multi block read/write at 50MHz. All read+write functions `__no_inline_not_in_flash_func` for OTA safety. |
+| `drivers/sd/sd_card.h` | 35 | SD API: `sd_init/read_block/read_blocks/write_block/write_blocks/get_info/get_debug`. Pin definitions. |
+| `drivers/touch/xpt2046.c` | 46 | XPT2046 resistive touch over SPI0 (shared with LCD). 3-sample averaging. |
+| `drivers/touch/xpt2046.h` | 16 | Touch API: `touch_init/read`. |
+
+### Libraries
+
+| Directory | Purpose |
+|-----------|---------|
+| `lib/heatshrink/` | LZSS compression library (encoder + decoder). Used by `kv_flash.c`, `kv_sd.c`, `storage.c`. |
+
+### Python tools
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `ota_deploy.py` | 132 | OTA firmware uploader — login, begin, chunk (1KB), commit, verify. |
+| `bench_run.py` | 270 | HTTP benchmark — login, writes, reads, queries, mixed load. |
+| `udp_client.py` | 296 | UDP WAL protocol client — HELLO, batch write, single read, encryption. |
+| `stress_test.py` | 335 | Mixed load stress test — 5 UDP writers + 1 HTTP query thread. |
+| `tcp_test.py` | 273 | Raw TCP WAL protocol tester — HMAC auth, NOOP/APPEND/READ. |
 
 ---
 
-## Product Family
+## Data flow
 
-| Tier | FPGA | Storage | Connections | Use Case |
-|------|------|---------|-------------|----------|
-| **Pico** | iCE40HX8K | SD only | 4 (W5100S) | Single-app server, IoT |
-| **Mini** | iCE40HX8K + SRAM | SD + 1MB cache | 4 | Multi-tenant KV store |
-| **Midi** | ECP5-25F | NVMe + DRAM | 16+ | Production query engine |
-| **Maxi** | ECP5-85F + RK3588 | NVMe RAID | 100+ | Full database appliance |
+### HTTP request → KV store → response
 
-This repository contains the **Pico** tier design.
-
----
-
-## Building
-
-### FPGA Bitstream (requires yosys + nextpnr-ice40)
-
-```bash
-cd picowal_hx_cu/
-make           # synthesise → place+route → pack bitstream
-make prog      # upload to Alchitry Cu via iceprog
+```
+Browser ──HTTP──► lwIP TCP ──► web_server.c route dispatcher
+                                    │
+                         ┌──────────┴──────────┐
+                         │ Cookie/PSK auth      │
+                         │ RBAC check           │
+                         └──────────┬──────────┘
+                                    │
+                              kv_store.h router
+                              ┌─────┴─────┐
+                       Pack 0-1│           │Pack 2+
+                         kv_flash.c    kv_sd.c
+                              │           │
+                         4MB Flash    16GB SD Card
 ```
 
-### PicoScript Compiler (Python, client-side)
+### UDP WAL → KV store
 
-```bash
-python3 picoscript_lang.py    # run examples + round-trip tests
-python3 picoscript_opcodes.py # print full opcode reference
+```
+UDP datagram ──► udp_wal.c recv callback
+                      │
+              ┌───────┴────────┐
+              │ Session lookup  │
+              │ Decrypt (opt)   │
+              │ Validate batch  │
+              └───────┬────────┘
+                      │
+                 Deferred queue (16 slots)
+                 Raw ring overflow (48 slots)
+                      │
+                 udp_wal_poll() ── one card per cycle ──► kv_store.h
+```
+
+### TCP WAL → flash KV (Core 1)
+
+```
+TCP connect ──► net_core.c ──► HMAC challenge/response
+                                    │
+                            wal_state_t request ring
+                                    │
+                            ──FIFO signal──►
+                                    │
+                            Core 1: wal_engine.c
+                                    │
+                              kv_flash.c (packs 0-1 only)
+```
+
+### OTA firmware update
+
+```
+POST /update/begin  ──► Clear SD staging area (blocks 1-1024)
+POST /update/chunk  ──► Write 1KB chunks to SD
+POST /update/commit ──► Halt Core 1 ──► Copy SD → SRAM → Flash
+                        (sector-0-last write order)
+                        ──► watchdog_reboot()
+```
+
+### Boot sequence
+
+```
+main.c
+  │
+  ├── lcd_init() + touch_init()      (SPI0)
+  ├── sd_init()                       (SPI1, bit-bang wakeup)
+  ├── kv_init()                       (flash scan + recovery)
+  ├── kvsd_init()                     (SD superblock + keylist)
+  ├── metadata_reload_cache()         (schema catalog)
+  ├── user_auth_init()                (seed admin if first boot)
+  ├── wal_dma_init()                  (DMA channel)
+  ├── multicore_launch_core1()        (wal_engine_run)
+  └── net_core_run()                  (WiFi + poll loop, never returns)
 ```
 
 ---
 
-## Performance
+## Memory layout
 
-| Workload | Throughput | Notes |
-|----------|-----------|-------|
-| Cached KV read (sequential) | ~400K QPS | Single-context, QSPI bottleneck |
-| Cached KV read (parallel 8×) | ~3.2M QPS | Fork across 8 v-cores |
-| Filter/scan (parallel) | 8× sequential | Embarrassingly parallel |
-| Template render | Wire speed | Streaming, no buffering |
-| HTTP parse → response | 4 instructions | No software overhead |
-| Cold read (SD) | ~800 QPS | SD card latency dominant |
+### Flash (4MB)
+
+| Region | Offset | Size | Purpose |
+|--------|--------|------|---------|
+| Firmware | 0x000000 | ~504KB | Application code + read-only data |
+| Flash index (FIDX) | 0x0C0000 | 64KB | SD key index cache (write-order hardened) |
+| KV region | 0x100000+ | ~3MB | Flash KV pages (V2 headers, mutation groups) |
+
+### SRAM (520KB total, ~348KB BSS)
+
+| Component | Size | Notes |
+|-----------|------|-------|
+| g_index[] (18K keys) | 72KB | Sorted SD key index |
+| g_slots[] (18K slots) | 72KB | Parallel slot array |
+| WAL slot pool (32 × 512B) | 16KB | Request/response ring |
+| UDP deferred queue | ~35KB | 16 batches × 16 cards × 134B |
+| UDP raw ring | 24KB | 48 overflow datagram slots |
+| lwIP heap + pbufs | 41KB | Network buffers |
+| HTTP conn buffers | 24KB | 6 connections × 4KB |
+| OTA chunk buffer | 16KB | SD → flash staging |
+| Stack + heap | ~60KB | Both cores |
+| **Free** | **~172KB** | Available for future use |
+
+### SD card (16GB, raw block access)
+
+| Region | Blocks | Purpose |
+|--------|--------|---------|
+| Superblock | 0 | Magic, version, counts, keylist pointer |
+| OTA staging | 1–1024 | 512KB firmware staging area |
+| Bitmap | 1025–1056 | 32 blocks × 4096 bits = 131K slot tracker |
+| Keylist | 1057–1312 | 256 blocks × 64 entries = 16K key+slot pairs |
+| Data slots | 1313+ | 4 blocks per card (2KB), COW allocation |
 
 ---
 
-## Status
+## Interaction map
 
-- [x] ISA design (16 opcodes, 32-bit fixed width)
-- [x] Multi-syntax compiler + decompilers
-- [x] Opcode reference with all encodings
-- [x] Hardware architecture + LUT budget
-- [x] Pin/BRAM/power budget verified
-- [x] Parallel loop design (Fork/Join)
-- [x] Schema + field extraction design
-- [x] Template engine with 2-level FOREACH
-- [x] PCB BOM + cost analysis
-- [ ] Verilog RTL implementation
-- [ ] Testbench + simulation
-- [ ] Synthesis on actual Alchitry Cu
-- [ ] Breadboard prototype
-- [ ] Custom PCB fabrication
+```
+main.c ──────────► net_core.c (Core 0)
+    │                  │
+    │                  ├── web_server.c ──► kv_store.h ──► kv_flash.c / kv_sd.c
+    │                  │       │                               │          │
+    │                  │       ├── query.c ◄── metadata_dict.c │          │
+    │                  │       ├── user_auth.c                 │          │
+    │                  │       └── storage.c ◄── field_index.c │          │
+    │                  │                                       │          │
+    │                  ├── udp_wal.c ──► crypto.c              │          │
+    │                  │       └──────► kv_store.h ────────────┘          │
+    │                  │                                                  │
+    │                  └── ili9488.c (LCD dashboard)                      │
+    │                                                                     │
+    └────────────► wal_engine.c (Core 1) ──► kv_flash.c                  │
+                        │                                                 │
+                        └── wal_dma.c                                    │
+                                                                         │
+                   sd_card.c ◄───────────────────────────────────────────┘
+```
 
----
+## Build
 
-## Licence
+Requires: Pico SDK, ARM GCC toolchain, CMake, Ninja.
+
+```powershell
+$env:PICO_SDK_PATH = "C:\source\pico-sdk"
+cmake -B build -G Ninja
+cmake --build build
+```
+
+Output: `build/pico2w_lcd.uf2` (BOOTSEL) and `build/pico2w_lcd.bin` (OTA).
+
+**Build stats:** ~504KB text, ~348KB BSS, 14 source files + 3 drivers + heatshrink lib.
+
+## License
 
 MIT
-
----
-
-*A £24 network-attached application server with no CPU, no OS, and no software. Just physics.*

@@ -1,0 +1,12 @@
+C:\source\pico2w\client\PicoWal.Client\bin\Debug\net10.0\PicoWal.Client.deps.json
+C:\source\pico2w\client\PicoWal.Client\bin\Debug\net10.0\PicoWal.Client.dll
+C:\source\pico2w\client\PicoWal.Client\bin\Debug\net10.0\PicoWal.Client.pdb
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.GeneratedMSBuildEditorConfig.editorconfig
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.AssemblyInfoInputs.cache
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.AssemblyInfo.cs
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.csproj.CoreCompileInputs.cache
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.sourcelink.json
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.dll
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\refint\PicoWal.Client.dll
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\PicoWal.Client.pdb
+C:\source\pico2w\client\PicoWal.Client\obj\Debug\net10.0\ref\PicoWal.Client.dll
