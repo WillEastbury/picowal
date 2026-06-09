@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """picoscript.py -- PicoScript Instruction Set Architecture
 
+Hardware bytecode contract: docs/picoscript-hardware.md
+Language/editor contract: docs/picoscript-language-editor.md
+
 PicoScript: executable cards for PicoWAL.
 
 Core insight: the TCP state machine and query engine are already jump tables.
@@ -457,4 +460,3 @@ if __name__ == "__main__":
     print("  AI acceleration:                   MATMUL/SOFTMAX on 312 DSP MACs")
     print("  Web server:                        PIPE [card] = zero-copy serve")
     print("  Event-driven:                      WAIT/RAISE = cooperative actors")
-

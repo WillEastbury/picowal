@@ -46,6 +46,17 @@ PicoWAL is a pure-FPGA query engine and web application server. It stores data a
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Specification Boundaries
+
+PicoScript is intentionally split into two contracts:
+
+| Spec | Owns | File |
+|------|------|------|
+| Hardware / bytecode | 32-bit instruction format, opcode values, register semantics, scheduler/branch/storage/PIPE/DSP behaviour | [`docs/picoscript-hardware.md`](docs/picoscript-hardware.md) |
+| Language / editor | Source syntax, alternate views, diagnostics, completions, formatting, round-tripping | [`docs/picoscript-language-editor.md`](docs/picoscript-language-editor.md) |
+
+This lets the language and editor evolve without destabilising the RTL-visible bytecode contract.
+
 ### Data Model
 
 ```
@@ -72,7 +83,7 @@ Cache policy: LRU eviction, write-back. Reads cascade L1→L2→L3. Writes hit L
 
 ## PicoScript ISA
 
-32-bit fixed-width instruction word:
+The hardware-facing ISA is specified in [`docs/picoscript-hardware.md`](docs/picoscript-hardware.md). In short, PicoScript uses a 32-bit fixed-width instruction word:
 
 ```
 [31:28] opcode   4-bit (16 opcodes, single LUT decode)
@@ -223,6 +234,8 @@ The template engine streams card data toward the TCP TX buffer, detecting marker
 ---
 
 ## Multi-Syntax Language
+
+The language/editor-facing contract is specified in [`docs/picoscript-language-editor.md`](docs/picoscript-language-editor.md).
 
 Cards store **only bytecode** (4 bytes/instruction). The source language is a client-side view layer with 4 interchangeable syntaxes over identical bytecode:
 

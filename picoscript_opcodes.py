@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """picoscript_opcodes.py -- Complete PicoScript Opcode Reference
 
+Hardware bytecode contract: docs/picoscript-hardware.md
+Language/editor contract: docs/picoscript-language-editor.md
+
 Full documentation of every opcode with:
   - Binary encoding
   - C# syntax

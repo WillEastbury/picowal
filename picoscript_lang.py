@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """picoscript_lang.py -- PicoScript Source Language & Compiler
 
+Language/editor contract: docs/picoscript-language-editor.md
+Hardware bytecode contract: docs/picoscript-hardware.md
+
 PicoScript source looks like method calls on hardware namespaces:
 
     Storage.Load(tenant, pack, card, R0);
