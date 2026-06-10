@@ -80,16 +80,22 @@ module tb_picowal;
     end
 
     // Pre-load instruction memory directly into DUT's instr_mem
-    //   ADD R0, R0, 42   → opcode=4, rd=0, rs1=0, rs2=0, imm16=42 → 0x4000002A
-    //   ADD R1, R0, 1    → 0x41000001
-    //   SUB R2, R1, 10   → 0x5210000A
-    //   NOOP             → 0x00000000
+    // ISA: [31:28]=opcode [27:24]=Rd [23:20]=Rs1 [19:16]=Rs2 [15:0]=imm16
+    // Opcodes: 0=NOOP, 1=LOAD, 2=SAVE, 3=PIPE, 4=ADD, 5=SUB, 6=MUL, 7=DIV
+    //          8=INC, 9=JUMP, A=BRANCH, B=CALL, C=RETURN, D=WAIT, E=RAISE, F=DSP
     initial begin
-        dut.instr_mem[0] = 32'h4000_002A;  // ADD R0, R0, 42
-        dut.instr_mem[1] = 32'h4100_0001;  // ADD R1, R0, 1
-        dut.instr_mem[2] = 32'h5210_000A;  // SUB R2, R1, 10
-        dut.instr_mem[3] = 32'h0000_0000;  // NOOP
-        dut.instr_mem[4] = 32'h0000_0000;  // NOOP (padding)
+        dut.instr_mem[0] = 32'h4000_002A;  // ADD R0, R0, 42       → R0 = 42
+        dut.instr_mem[1] = 32'h4100_0001;  // ADD R1, R0, 1        → R1 = 43
+        dut.instr_mem[2] = 32'h5210_000A;  // SUB R2, R1, 10       → R2 = 33
+        dut.instr_mem[3] = 32'h2000_0100;  // SAVE R0 to addr 0x100
+        dut.instr_mem[4] = 32'h1300_0100;  // LOAD R3 from addr 0x100 → R3 = 42 (low 16)
+        dut.instr_mem[5] = 32'h9000_0008;  // JUMP to IP 8 (skip instrs 6,7)
+        dut.instr_mem[6] = 32'h4400_00FF;  // ADD R4, R0, 255 (SHOULD BE SKIPPED)
+        dut.instr_mem[7] = 32'h4500_00FF;  // ADD R5, R0, 255 (SHOULD BE SKIPPED)
+        dut.instr_mem[8] = 32'h4600_0007;  // ADD R6, R0, 7        → R6 = 7
+        dut.instr_mem[9] = 32'h0000_0000;  // NOOP (halt area)
+        dut.instr_mem[10] = 32'h0000_0000;
+        dut.instr_mem[11] = 32'h0000_0000;
     end
 
     // Test sequence

@@ -458,8 +458,45 @@ module picowal_hx_top (
     // Stage 2 (EXECUTE): ALU/branch/etc operate on latched register data
     // ═══════════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Card-load FSM: loads 128 instructions from SRAM into instr_mem
+    // Each instruction = 32 bits = 2 × 16-bit SRAM reads
+    // Card base address in SRAM: card_id × 256 (words)
+    // ═══════════════════════════════════════════════════════════════════
+
     reg  loading_card;
+    reg  [7:0]  load_idx;        // 0-255: two reads per instruction
+    reg  [15:0] load_hi_word;    // temp storage for high 16 bits
+    reg  [15:0] load_card_id;    // which card we're loading
+    wire [17:0] load_sram_addr = {load_card_id[9:0], load_idx};  // card*256 + idx
+
     initial loading_card = 1'b0;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            loading_card <= 1'b0;
+            load_idx     <= 8'd0;
+        end else if (!loading_card && need_card_load) begin
+            // Start loading new card
+            loading_card <= 1'b1;
+            load_idx     <= 8'd0;
+            load_card_id <= pc_card;
+        end else if (loading_card && sram_done) begin
+            if (load_idx[0] == 1'b0) begin
+                // Even read: got high word
+                load_hi_word <= sram_rdata;
+                load_idx     <= load_idx + 8'd1;
+            end else begin
+                // Odd read: got low word, write instruction
+                instr_mem[load_idx[7:1]] <= {load_hi_word, sram_rdata};
+                if (load_idx == 8'd255) begin
+                    // Done loading all 128 instructions
+                    loading_card <= 1'b0;
+                end
+                load_idx <= load_idx + 8'd1;
+            end
+        end
+    end
 
     localparam EX_FETCH   = 2'd0;
     localparam EX_READ    = 2'd1;
@@ -542,10 +579,26 @@ module picowal_hx_top (
     // PIPE start signal (only during EXECUTE)
     assign pipe_start = is_pipe & in_execute & ~alu_started;
 
-    // SRAM arbitration (PIPE gets priority when active)
-    assign sram_cmd_read  = pipe_busy ? pipe_sram_read : (is_load & in_execute & ~alu_started);
-    assign sram_cmd_write = is_save & in_execute & ~pipe_busy & ~alu_started;
-    assign sram_cmd_addr  = pipe_busy ? pipe_sram_addr : {2'b00, decode_imm16};
+    // SRAM arbitration: card-load > PIPE > instruction LOAD/SAVE
+    wire load_sram_req = loading_card & ~sram_busy;
+    reg  mem_started;
+    initial mem_started = 1'b0;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            mem_started <= 1'b0;
+        else if (in_execute && sel_mem)
+            mem_started <= 1'b1;
+        else if (exec_state != EX_EXECUTE)
+            mem_started <= 1'b0;
+    end
+
+    assign sram_cmd_read  = loading_card ? load_sram_req :
+                            (pipe_busy ? pipe_sram_read :
+                            (is_load & in_execute & ~mem_started));
+    assign sram_cmd_write = is_save & in_execute & ~pipe_busy & ~loading_card & ~mem_started;
+    assign sram_cmd_addr  = loading_card ? load_sram_addr :
+                            (pipe_busy ? pipe_sram_addr : {2'b00, decode_imm16});
     assign sram_cmd_wdata = rf_rdata1[15:0];
     assign sram_burst     = pipe_busy;
 
@@ -555,7 +608,7 @@ module picowal_hx_top (
     assign w5100_spi_burst  = pipe_busy ? pipe_spi_burst  : 1'b0;
 
     // Register file write-back
-    assign rf_we    = alu_done | (is_load & sram_done & ~pipe_busy);
+    assign rf_we    = alu_done | (is_load & sram_done & ~pipe_busy & ~loading_card & in_execute);
     assign rf_wdata = alu_done ? alu_result : {16'd0, sram_rdata};
 
     // ═══════════════════════════════════════════════════════════════════
