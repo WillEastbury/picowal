@@ -36,6 +36,16 @@ int main(void) {
     uint32_t count = picowal_api_list(2, cards, 4);
     if (count != 1 || cards[0] != 1) return 1;
 
+    const char updated[] = "updated-picowal";
+    if (picowal_api_put(2, 1, updated, sizeof(updated)) != PICOWAL_API_OK) return 1;
+    memset(out, 0, sizeof(out));
+    out_len = 0;
+    if (picowal_api_get(2, 1, out, sizeof(out), &out_len) != PICOWAL_API_OK) return 1;
+    if (out_len != sizeof(updated) || memcmp(out, updated, sizeof(updated)) != 0) return 1;
+
+    count = picowal_api_list(2, cards, 4);
+    if (count != 1 || cards[0] != 1) return 1;
+
     if (!picowal_api_exists(2, 1)) return 1;
     if (picowal_api_delete(2, 1) != PICOWAL_API_OK) return 1;
     if (picowal_api_exists(2, 1)) return 1;
@@ -48,4 +58,3 @@ int main(void) {
     rmdir(root);
     return 0;
 }
-

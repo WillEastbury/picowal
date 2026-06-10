@@ -116,6 +116,9 @@ picowal_api_set_store(&store);
 The filesystem backend stores cards as atomic files under
 `<root>/<pack-hex>/<card-hex>.kv` and uses write+fsync+rename for updates. It is
 intended for Linux/local mounted paths and is not compiled into Pico firmware.
+See [`docs/PIOS_WALFS_FINDINGS.md`](docs/PIOS_WALFS_FINDINGS.md) for the
+read-after-write and overwrite invariants captured while integrating Picowal
+cards into PIOS.
 
 For Azure Blob, prefer a card/KV-level backend using **Block Blobs** for
 records, manifests, and WAL segments. Page Blobs are only attractive if you want
