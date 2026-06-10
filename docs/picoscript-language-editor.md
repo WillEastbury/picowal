@@ -34,16 +34,16 @@ Source files are views over bytecode. The editor may let one user write C#-style
 
 ## Current Syntax Views
 
-`picoscript_lang.py` currently supports these decompiler views:
+`picoscript_lang.py` currently accepts C#-style input and supports these decompiler views:
 
 | Mode | Extension | Example |
-|------|-----------|---------|
-| C# style | `.pico` | `Storage.Load(0, 1, 42, R0);` |
-| BASIC style | `.bas` | `10 STORAGE LOAD, 0, 1, 42, R0` |
-| Python style | `.py` | `storage.load(0, 1, 42, r0)` |
-| Hex | `.hex` | `1040002A` |
+|------|-----------|---------|--------|
+| C# style | `.pico` | `Storage.Load(0, 1, 42, R0);` | Input + output |
+| BASIC style | `.bas` | `10 STORAGE LOAD, 0, 1, 42, R0` | Output view only |
+| Python style | `.py` | `storage.load(0, 1, 42, r0)` | Output view only |
+| Hex | `.hex` | `1040002A` | Output view only |
 
-The checked-in compiler currently accepts the C#-style namespace/method syntax as the primary input syntax.
+Future BASIC, Python, or Hex parsers should reuse the same parse-to-IR layer, but they are not part of the current checked-in compiler contract.
 
 ## Primary Source Syntax
 
@@ -90,6 +90,33 @@ Namespaces are language-facing names for hardware capabilities:
 
 These names are editor-facing. The compiler maps them to opcode fields described in `docs/picoscript-hardware.md`.
 
+## Current Compiler Surface
+
+The checked-in compiler currently emits these source forms:
+
+| Namespace | Methods |
+|-----------|---------|
+| `Storage` | `Load`, `Save`, `Pipe` |
+| `Thread` | `Skip`, `Wait`, `Raise` |
+| `Math` | `Add`, `Sub`, `Mul`, `Div`, `Inc` |
+| `Flow` | `Jump`, `Branch`, `Call`, `Return` |
+| `Dsp` | `MatMul`, `Softmax`, `Dot`, `Scale`, `Relu`, `Norm`, `TopK`, `Gelu`, `Transpose`, `VAdd`, `Embed`, `Quant`, `Dequant`, `Mask`, `Concat`, `Split` |
+| `Net` | `Status`, `Header`, `Type`, `Body`, `Close` |
+
+Planned hardware/editor primitives such as `Storage.Field`, `Storage.ForEach`, `Storage.Template`, `Thread.Fork`, `Thread.Join`, `Flow.For`, and `Flow.Switch` are documented as proposed extension points in `picoscript_opcodes.py`. They should not be exposed as accepted input until their encodings are stable in `docs/picoscript-hardware.md` and implemented consistently in the compiler, disassemblers, and runtime/RTL.
+
+## Label Resolution
+
+Labels are instruction addresses, not source-line numbers.
+
+| Instruction | Label encoding |
+|-------------|----------------|
+| `Flow.Jump(:label)` | Absolute instruction index in `imm16` |
+| `Flow.Call(:label)` | Absolute instruction index in `imm16` |
+| `Flow.Branch(cond, Ra, Rb, :label)` | Relative signed offset from the branch instruction to the target instruction, stored in `imm16` two's-complement form |
+
+Unknown labels are compiler errors. They must not silently resolve to instruction 0.
+
 ## Editor Model
 
 The editor should treat PicoScript as a structured bytecode view:
@@ -100,13 +127,13 @@ The editor should treat PicoScript as a structured bytecode view:
 4. Store only bytecode in cards.
 5. Decompile bytecode back into the selected display syntax.
 
-Round-trip invariant:
+Current C# input round-trip invariant:
 
 ```text
-source -> bytecode -> selected source view -> bytecode
+C# source -> bytecode -> C# source view -> bytecode
 ```
 
-The final bytecode should match unless the user edits semantics.
+The final bytecode should match unless the user edits semantics. Cross-view round-trips through BASIC/Python/Hex require input parsers for those views and are planned editor work, not current compiler behaviour.
 
 ## Diagnostics
 
@@ -120,6 +147,7 @@ Diagnostics should be source-level and explain the hardware constraint when rele
 | Card address out of range | `Card address fields must fit tenant=0-31, pack=0-63, card=0-31.` |
 | Unknown label | `Unknown label ':name'. Define it with ':name' on its own line.` |
 | Immediate out of range | `Immediate must fit imm16.` |
+| Unsupported input view | `Only C#-style Namespace.Method(...) input is currently supported.` |
 
 Avoid hardware-centric errors like "bad Rs2" in the editor unless the user is in hex/assembly mode.
 
@@ -138,6 +166,8 @@ The editor can derive completions from the language namespace table:
 | `Net.` | `Status`, `Header`, `Type`, `Body`, `Close` |
 
 Register completions should offer `R0` through `R15`, with `R15` marked read-only/context.
+
+The editor may show planned primitives in a separate "proposed hardware extension" group, but should not complete them as ordinary accepted compiler input until the compiler implements them.
 
 ## Formatting
 

@@ -81,9 +81,9 @@ The address is produced by `encode_card_addr(tenant, pack, card)` in `picoscript
 
 The detailed opcode reference lives in `picoscript_opcodes.py`. That file should stay hardware-oriented: encodings, cycle estimates, and execution units.
 
-## Addressing Modes
+## Addressing and Extension Modes
 
-For LOAD/SAVE/PIPE and arithmetic variants, `Rs2` selects mode where applicable:
+For LOAD/SAVE and arithmetic variants, `Rs2` selects mode where applicable:
 
 | Mode | Meaning |
 |:----:|---------|
@@ -93,6 +93,25 @@ For LOAD/SAVE/PIPE and arithmetic variants, `Rs2` selects mode where applicable:
 | 3 | Register plus offset |
 
 Register-indirect LOAD/SAVE is the key capability that makes PicoScript able to follow computed card addresses.
+
+PIPE is stream-oriented rather than register write-back oriented. Its currently stable modes are:
+
+| Mode | Meaning |
+|:----:|---------|
+| 0 | Pipe immediate card address from `imm16` |
+| 1 | Pipe register-indirect card address |
+| 2 | Reserved for template streaming mode |
+
+Additional hardware-extension modes are reserved for proposed silicon primitives. They are not accepted compiler input until the compiler, disassemblers, runtime model, and RTL agree on the semantics:
+
+| Host opcode | Mode | Proposed primitive | Status |
+|-------------|:----:|--------------------|--------|
+| LOAD | 4 | FOREACH card iterator | Reserved/proposed |
+| LOAD | 5 | FIELD extractor | Reserved/proposed |
+| PIPE | 2 | TEMPLATE renderer | Reserved/proposed |
+| JUMP | 1 | SWITCH indexed jump | Reserved/proposed |
+
+The opcode reference may describe these extension points for hardware budgeting, but language tooling must treat them as planned features unless this contract marks them stable.
 
 ## Branch Conditions
 
@@ -111,7 +130,17 @@ For `BRANCH`, `Rs2` encodes the condition:
 | 8 | EOF |
 | 9 | ERR |
 
-The compiler is responsible for resolving labels to bytecode offsets or absolute targets.
+`BRANCH Rs2=4` is the stable LE condition. It is not available as a hardware-FOR selector in the current bytecode contract. Hardware FOR needs either a non-conflicting extension discriminator or a future opcode-contract revision before compilers emit it.
+
+The compiler is responsible for resolving labels as follows:
+
+| Instruction | `imm16` label encoding |
+|-------------|------------------------|
+| JUMP | Absolute instruction index |
+| CALL | Absolute instruction index |
+| BRANCH | Relative signed offset from the branch instruction |
+
+Unknown labels are invalid bytecode inputs and must be reported as compiler errors.
 
 ## DSP Sub-operations
 
@@ -163,6 +192,8 @@ Each active context has:
 - Scheduler state
 
 `WAIT` removes a context from scheduling until a matching `RAISE` or hardware event wakes it. PIPE, storage, and fork/join completion may also wake contexts.
+
+Fork/join is a proposed scheduler extension described by the opcode reference. Its final `WAIT`/`RAISE` encoding remains reserved until the scheduler contract specifies the exact descriptor layout.
 
 ## RTL Mapping
 

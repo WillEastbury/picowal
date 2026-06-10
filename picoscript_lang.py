@@ -272,7 +272,11 @@ class Compiler:
 
     def compile(self, source):
         """Compile source text to list of 32-bit instruction words."""
+        self.instructions = []
+        self.labels = {}
+        self.source_lines = []
         lines = source.strip().split("\n")
+
         # Pass 1: collect labels, strip comments/blanks
         clean_lines = []
         pc = 0
@@ -282,13 +286,16 @@ class Compiler:
                 continue
             if line.startswith(":"):
                 label = line[1:].rstrip(";").strip()
+                if not label:
+                    raise SyntaxError(f"Empty label at instruction {pc}")
+                if label in self.labels:
+                    raise SyntaxError(f"Duplicate label ':{label}' at instruction {pc}")
                 self.labels[label] = pc
                 continue
             clean_lines.append(line)
             pc += 1
 
         # Pass 2: compile each statement
-        self.instructions = []
         for i, line in enumerate(clean_lines):
             self.source_lines.append(line)
             word = self._compile_statement(line, i)
@@ -302,11 +309,23 @@ class Compiler:
         line = line.rstrip(";").strip()
 
         # Parse Namespace.Method(args)
-        dot_pos = line.index(".")
-        paren_pos = line.index("(")
+        try:
+            dot_pos = line.index(".")
+            paren_pos = line.index("(")
+            close_pos = line.rindex(")")
+        except ValueError as exc:
+            raise SyntaxError(
+                "Only C#-style Namespace.Method(...) input is currently supported "
+                f"at instruction {pc}: {line}"
+            ) from exc
+        if dot_pos > paren_pos:
+            raise SyntaxError(
+                "Only C#-style Namespace.Method(...) input is currently supported "
+                f"at instruction {pc}: {line}"
+            )
         namespace = line[:dot_pos]
         method = line[dot_pos+1:paren_pos]
-        args_str = line[paren_pos+1:line.rindex(")")]
+        args_str = line[paren_pos+1:close_pos]
         args = [a.strip() for a in args_str.split(",") if a.strip()] if args_str.strip() else []
 
         # Look up opcode
@@ -378,22 +397,30 @@ class Compiler:
             return encode_instruction(OP_RETURN)
         if method == "Jump":
             label = args[0].lstrip(":")
-            target_pc = self.labels.get(label, 0)
+            target_pc = self._resolve_label(label, pc)
+            # Jump/Call encode absolute instruction indices.
             return encode_instruction(OP_JUMP, imm16=target_pc)
         if method == "Call":
             label = args[0].lstrip(":")
-            target_pc = self.labels.get(label, 0)
+            target_pc = self._resolve_label(label, pc)
+            # Jump/Call encode absolute instruction indices.
             return encode_instruction(OP_CALL, imm16=target_pc)
         if method == "Branch":
             cond = CONDITION_MAP[args[0]]
             rd = parse_register(args[1])
             rs1 = parse_register(args[2])
             label = args[3].lstrip(":")
-            target_pc = self.labels.get(label, 0)
+            target_pc = self._resolve_label(label, pc)
+            # Branch encodes a signed relative offset from this instruction.
             offset = target_pc - pc
             imm16 = offset & 0xFFFF
             return encode_instruction(OP_BRANCH, rd=rd, rs1=rs1, rs2=cond, imm16=imm16)
         raise SyntaxError(f"Unknown Flow method: {method}")
+
+    def _resolve_label(self, label, pc):
+        if label not in self.labels:
+            raise SyntaxError(f"Unknown label ':{label}' at instruction {pc}")
+        return self.labels[label]
 
     def _compile_net(self, method, args, pc):
         """Net.Status(200) / Net.Type("text/html") / Net.Body() / Net.Close()"""
