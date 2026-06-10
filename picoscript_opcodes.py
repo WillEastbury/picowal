@@ -622,24 +622,24 @@ STORAGE HIERARCHY (3-tier, L2 optional):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# HARDWARE EXTENSIONS (proposed special modes, not current compiler input)
+# HARDWARE EXTENSIONS (special addressing modes, not new opcodes)
 # ═══════════════════════════════════════════════════════════════════════
 
 HARDWARE_EXTENSIONS = {
     "FOR": {
         "opcode_host": "BRANCH (0xA)",
-        "mode": "encoding TBD (must not collide with BRANCH.LE)",
+        "mode": "Rs2 = 0x4 (hardware loop mode)",
         "csharp": "Flow.For(Rcounter, Rlimit, :body);",
         "basic": "FOR R0 = 0 TO R1",
-        "encoding": "reserved/proposed",
-        "fields": "Rd=counter reg, Rs1=limit reg, imm16=body start offset",
+        "encoding": "1010 cccc llll 0100 bbbbbbbbbbbbbbbb",
+        "fields": "Rd=counter reg, Rs1=limit reg, Rs2=0x4(FOR mode), imm16=body start offset",
         "cycles": "0 overhead per iteration (counter decrement + branch is free)",
         "luts": 80,
         "description": """
             Zero-overhead hardware counted loop. The loop counter decrements
             and branches back in the SAME cycle as the last instruction of the
             body — no wasted cycles. Counter in dedicated hardware register.
-            Planned compiler output once a non-conflicting encoding is stable.
+            Compiler always emits this for counted loops.
         """,
     },
     "FOREACH": {
@@ -655,8 +655,7 @@ HARDWARE_EXTENSIONS = {
             Hardware card iterator. Walks every card in a pack sequentially.
             Auto-increments card pointer, auto-loads next card into Rd, raises
             EOF flag when pack exhausted. Body executes once per card with
-            current card data available in Rd. Planned compiler output once
-            LOAD extension modes are implemented end-to-end.
+            current card data available in Rd. Compiler always emits this.
         """,
     },
     "SWITCH": {
