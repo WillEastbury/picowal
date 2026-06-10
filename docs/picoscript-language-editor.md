@@ -34,20 +34,20 @@ Source files are views over bytecode. The editor may let one user write C#-style
 
 ## Current Syntax Views
 
-`picoscript_lang.py` currently accepts C-style namespace calls and BASIC-style input, and supports these decompiler views:
+`picoscript_lang.py` currently accepts C#-style input and supports these decompiler views:
 
 | Mode | Extension | Example |
 |------|-----------|---------|--------|
-| C style | `.pico` | `Storage.Load(0, 1, 42, R0);` | Input + output |
-| BASIC style | `.bas` | `10 STORAGE LOAD, 0, 1, 42, R0` | Input + output |
+| C# style | `.pico` | `Storage.Load(0, 1, 42, R0);` | Input + output |
+| BASIC style | `.bas` | `10 STORAGE LOAD, 0, 1, 42, R0` | Output view only |
 | Python style | `.py` | `storage.load(0, 1, 42, r0)` | Output view only |
 | Hex | `.hex` | `1040002A` | Output view only |
 
-Future Python or Hex parsers should reuse the same parse-to-IR layer, but they are not part of the current checked-in compiler contract.
+Future BASIC, Python, or Hex parsers should reuse the same parse-to-IR layer, but they are not part of the current checked-in compiler contract.
 
-## C-style Source Syntax
+## Primary Source Syntax
 
-The C-style syntax is:
+The current primary syntax is:
 
 ```csharp
 Namespace.Method(arg0, arg1, ...);
@@ -74,21 +74,6 @@ Flow.Branch(LT, R0, R1, :loop);
 ```
 
 Comments currently use `//`.
-
-## BASIC-style Source Syntax
-
-BASIC-style input uses optional ascending line numbers, uppercase command groups, and comma-separated operands:
-
-```basic
-10 NET STATUS, 200
-20 NET TYPE, TEXT/HTML
-30 NET BODY
-40 STORAGE LOAD, 0, 1, 42, R0
-50 FLOW BRANCH, NZ, R0, R0, 40
-60 FLOW RETURN
-```
-
-Numeric flow targets are BASIC line numbers. The compiler maps line numbers to instruction indices before emitting bytecode.
 
 ## Namespaces
 
@@ -120,20 +105,17 @@ The checked-in compiler currently emits these source forms:
 
 Planned hardware/editor primitives such as `Storage.Field`, `Storage.ForEach`, `Storage.Template`, `Thread.Fork`, `Thread.Join`, `Flow.For`, and `Flow.Switch` are documented as proposed extension points in `picoscript_opcodes.py`. They should not be exposed as accepted input until their encodings are stable in `docs/picoscript-hardware.md` and implemented consistently in the compiler, disassemblers, and runtime/RTL.
 
-## Flow Target Resolution
+## Label Resolution
 
-C-style labels are instruction addresses, not source-line numbers. BASIC flow targets are BASIC line numbers that resolve to instruction addresses.
+Labels are instruction addresses, not source-line numbers.
 
 | Instruction | Label encoding |
 |-------------|----------------|
 | `Flow.Jump(:label)` | Absolute instruction index in `imm16` |
 | `Flow.Call(:label)` | Absolute instruction index in `imm16` |
 | `Flow.Branch(cond, Ra, Rb, :label)` | Relative signed offset from the branch instruction to the target instruction, stored in `imm16` two's-complement form |
-| `FLOW JUMP, line` | Absolute instruction index for `line` in `imm16` |
-| `FLOW CALL, line` | Absolute instruction index for `line` in `imm16` |
-| `FLOW BRANCH, cond, Ra, Rb, line` | Relative signed offset from the branch instruction to `line` |
 
-Unknown labels or BASIC line targets are compiler errors. They must not silently resolve to instruction 0.
+Unknown labels are compiler errors. They must not silently resolve to instruction 0.
 
 ## Editor Model
 
@@ -145,16 +127,13 @@ The editor should treat PicoScript as a structured bytecode view:
 4. Store only bytecode in cards.
 5. Decompile bytecode back into the selected display syntax.
 
-Current C/BASIC bytecode round-trip invariants:
+Current C# input round-trip invariant:
 
 ```text
-C-style source -> bytecode -> BASIC source view -> bytecode
-BASIC source -> bytecode -> C-style source view -> bytecode
-C-style source -> bytecode -> C-style source view -> bytecode
-BASIC source -> bytecode -> BASIC source view -> bytecode
+C# source -> bytecode -> C# source view -> bytecode
 ```
 
-The final bytecode should match unless the user edits semantics. Cross-view round-trips through Python/Hex require input parsers for those views and are planned editor work, not current compiler behaviour.
+The final bytecode should match unless the user edits semantics. Cross-view round-trips through BASIC/Python/Hex require input parsers for those views and are planned editor work, not current compiler behaviour.
 
 ## Diagnostics
 
@@ -167,10 +146,8 @@ Diagnostics should be source-level and explain the hardware constraint when rele
 | Bad register | `Expected register R0-R15.` |
 | Card address out of range | `Card address fields must fit tenant=0-31, pack=0-63, card=0-31.` |
 | Unknown label | `Unknown label ':name'. Define it with ':name' on its own line.` |
-| Unknown BASIC line | `Unknown BASIC line N.` |
-| Non-ascending BASIC line numbers | `BASIC line numbers must be unique and ascending.` |
 | Immediate out of range | `Immediate must fit imm16.` |
-| Unsupported input view | `Expected C-style Namespace.Method(...) or BASIC-style input.` |
+| Unsupported input view | `Only C#-style Namespace.Method(...) input is currently supported.` |
 
 Avoid hardware-centric errors like "bad Rs2" in the editor unless the user is in hex/assembly mode.
 
