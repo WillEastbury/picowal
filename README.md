@@ -90,9 +90,66 @@ W:price|>|1000
 
 Embedders that need picowal as an in-process card store can use
 `src/picowal_api.h` instead of exposing raw HTTP routes. The API addresses
-records as `(pack, card)` pairs, routes through the same flash/SD storage layer
-as the web UI, and returns explicit status codes for invalid input, missing
-cards, duplicate create-only writes, and I/O failures.
+records as `(pack, card)` pairs in user packs (`pack >= 2`) and returns explicit
+status codes for invalid input, storage-not-ready, missing cards, duplicate
+create-only writes, and I/O failures. System flash packs (`0` and `1`) are
+intentionally not exposed through this API.
+
+The API uses a tiny compiled-in storage backend seam (`src/picowal_store.h`).
+C has no `interface` keyword; Picowal uses the standard native pattern: a small
+`struct` of function pointers. Firmware defaults to the SD backend, while host
+or cloud builds can bind a different backend before use:
+
+```c
+picowal_api_set_store(&picowal_sd_store);     // firmware default
+```
+
+Linux host builds can use the filesystem backend over a local mounted path:
+
+```c
+picowal_fs_store_t fs;
+picowal_store_t store;
+picowal_store_fs_open(&fs, "/mnt/picowal", &store);
+picowal_api_set_store(&store);
+```
+
+The filesystem backend stores cards as atomic files under
+`<root>/<pack-hex>/<card-hex>.kv` and uses write+fsync+rename for updates. It is
+intended for Linux/local mounted paths and is not compiled into Pico firmware.
+See [`docs/PIOS_WALFS_FINDINGS.md`](docs/PIOS_WALFS_FINDINGS.md) for the
+read-after-write and overwrite invariants captured while integrating Picowal
+cards into PIOS.
+
+For Azure Blob, prefer a card/KV-level backend using **Block Blobs** for
+records, manifests, and WAL segments. Page Blobs are only attractive if you want
+to emulate a random-access block device, which is not the preferred Picowal
+cloud abstraction.
+
+The host build also includes an Azure Table Storage backend for cheap cloud
+experiments. It stores one card per entity:
+
+| Field | Value |
+|---|---|
+| `PartitionKey` | pack as three hex digits, e.g. `002` |
+| `RowKey` | card as six hex digits, e.g. `000001` |
+| `ValueHex` | card payload encoded as hex |
+| `Version` | monotonic per-card version |
+
+On open, the backend can load `PartitionKey`, `RowKey`, and `Version` into an
+in-memory index. `list` and `exists` use that local index; `get`, `put`, and
+`delete` call Azure Table Storage over HTTPS using a table SAS URL. This keeps
+the C dependency surface tiny and avoids pulling in a full Azure SDK:
+
+```c
+picowal_aztable_store_t az;
+picowal_store_t store;
+picowal_store_aztable_open(&az, &(picowal_aztable_config_t){
+    .endpoint = "https://acct.table.core.windows.net/Picowal",
+    .sas = "?sv=...",
+    .load_existing = true,
+}, &store);
+picowal_api_set_store(&store);
+```
 
 Core calls:
 
@@ -102,6 +159,45 @@ picowal_api_get(pack, card, out, out_cap, &out_len);
 picowal_api_delete(pack, card);
 picowal_api_create_random(pack, data, len, &card);
 picowal_api_list(pack, cards, max_cards);
+```
+
+### Host/server search primitives
+
+Server-side Picowal builds also include `src/picowal_search.h`, a host-only
+search layer that stays out of Pico firmware (`PICOWAL_HOST` required). It adds
+the missing primitives needed for higher-level retail/search services while
+keeping Picowal as the pack/card source of truth:
+
+- **Full-text inverted index** over card-derived text, with term posting lists,
+  document-length statistics, and BM25 scoring.
+- **Vector ANN candidate generation** using deterministic vector signatures to
+  narrow candidates before exact cosine scoring.
+- **Hybrid query planning/ranking** with lexical candidates, vector candidates,
+  reciprocal-rank-fusion style scoring signals, and final score ordering.
+- **Semantic rerank hook** via a callback so server code can plug in an ONNX,
+  sentence-transformer, or external reranker without coupling Picowal to a model
+  runtime.
+- **Pack indexing bridge** via `picowal_search_index_pack()`, which lists cards
+  through `picowal_api_list()`, reads them through `picowal_api_get()`, and lets
+  the caller extract text/vector fields from each card.
+
+The search layer is intentionally bounded and deterministic: no heap allocation,
+fixed capacities, explicit status codes, and pack/card keys as result IDs.
+
+```c
+picowal_search_index_t index;
+picowal_search_init(&index);
+picowal_search_index_pack(&index, 5, extract_product_text_and_vector, NULL);
+
+picowal_search_request_t req = {
+    .query_text = "waterproof jacket",
+    .query_vector = embedding,
+    .query_vector_dims = 384,
+    .limit = 10,
+    .semantic_score = cross_encoder_score,
+};
+picowal_search_response_t res;
+picowal_search_query(&index, &req, &res);
 ```
 
 ### Packs and cards
