@@ -224,6 +224,29 @@ picowal_search_journal_upsert_to_pack(&index, 21, 2000,
 picowal_search_journal_replay_from_pack(&index, 21, 2000);
 ```
 
+### Retail search layer
+
+Host/server builds also include `src/picowal_retail.h`, a specialized retail
+layer built on top of PicoWAL cards and `picowal_search`:
+
+- Products are stored as bounded PicoWAL cards in a product pack.
+- Product upserts update the search index, category/brand facets, price range
+  index, vector bucket index, and append-only index journal.
+- Demo catalog ingestion is available through `picowal_retail_ingest_demo()`.
+- JSON helpers produce product list/detail/search/recommend responses suitable
+  for a small PicoWeb API surface.
+- `src/picowal_retail_web.h` exposes a PicoWeb route table with product ingest,
+  list, detail, search, recommend, event, and storefront routes.
+- The storefront HTML is a BareMetalJsTools page using
+  `BareMetal.Communications` and `BareMetal.Search`.
+
+```c
+picowal_retail_t retail;
+picowal_retail_init(&retail, 8, 9, 100, 10, 200);
+picowal_retail_ingest_demo(&retail);
+picowal_retail_search_json(&retail, "waterproof jacket", json, sizeof(json));
+```
+
 ### Packs and cards
 
 Data is organized into **packs** (like tables) containing **cards** (like rows). Each card is a binary blob with a 4-byte magic header (`0xCA7D`) followed by ordinal-tagged fields.

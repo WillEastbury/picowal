@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_library(picowal_host
     ../src/picowal_api.c
+    ../src/picowal_retail.c
     ../src/picowal_search.c
     ../src/picowal_store_fs.c
     ../src/picowal_store_aztable.c
@@ -48,3 +49,13 @@ add_executable(picowal_search_smoke
 )
 
 target_link_libraries(picowal_search_smoke PRIVATE picowal_host)
+
+set(PICOWEB_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../picoweb" CACHE PATH "Path to picoweb checkout")
+if(EXISTS "${PICOWEB_ROOT}/include/picoweb.h")
+    add_executable(picowal_retail_smoke
+        ../src/picowal_retail_web.c
+        tests/retail_smoke.c
+    )
+    target_include_directories(picowal_retail_smoke PRIVATE "${PICOWEB_ROOT}/include")
+    target_link_libraries(picowal_retail_smoke PRIVATE picowal_host)
+endif()
