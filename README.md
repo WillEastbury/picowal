@@ -161,6 +161,45 @@ picowal_api_create_random(pack, data, len, &card);
 picowal_api_list(pack, cards, max_cards);
 ```
 
+### Host/server search primitives
+
+Server-side Picowal builds also include `src/picowal_search.h`, a host-only
+search layer that stays out of Pico firmware (`PICOWAL_HOST` required). It adds
+the missing primitives needed for higher-level retail/search services while
+keeping Picowal as the pack/card source of truth:
+
+- **Full-text inverted index** over card-derived text, with term posting lists,
+  document-length statistics, and BM25 scoring.
+- **Vector ANN candidate generation** using deterministic vector signatures to
+  narrow candidates before exact cosine scoring.
+- **Hybrid query planning/ranking** with lexical candidates, vector candidates,
+  reciprocal-rank-fusion style scoring signals, and final score ordering.
+- **Semantic rerank hook** via a callback so server code can plug in an ONNX,
+  sentence-transformer, or external reranker without coupling Picowal to a model
+  runtime.
+- **Pack indexing bridge** via `picowal_search_index_pack()`, which lists cards
+  through `picowal_api_list()`, reads them through `picowal_api_get()`, and lets
+  the caller extract text/vector fields from each card.
+
+The search layer is intentionally bounded and deterministic: no heap allocation,
+fixed capacities, explicit status codes, and pack/card keys as result IDs.
+
+```c
+picowal_search_index_t index;
+picowal_search_init(&index);
+picowal_search_index_pack(&index, 5, extract_product_text_and_vector, NULL);
+
+picowal_search_request_t req = {
+    .query_text = "waterproof jacket",
+    .query_vector = embedding,
+    .query_vector_dims = 384,
+    .limit = 10,
+    .semantic_score = cross_encoder_score,
+};
+picowal_search_response_t res;
+picowal_search_query(&index, &req, &res);
+```
+
 ### Packs and cards
 
 Data is organized into **packs** (like tables) containing **cards** (like rows). Each card is a binary blob with a 4-byte magic header (`0xCA7D`) followed by ordinal-tagged fields.

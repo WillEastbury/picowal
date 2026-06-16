@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 add_library(picowal_host
     ../src/picowal_api.c
+    ../src/picowal_search.c
     ../src/picowal_store_fs.c
     ../src/picowal_store_aztable.c
 )
@@ -19,6 +20,10 @@ target_compile_definitions(picowal_host PUBLIC
     PICOWAL_HOST=1
     PICOWAL_NO_DEFAULT_STORE=1
 )
+
+if(UNIX)
+    target_link_libraries(picowal_host PUBLIC m)
+endif()
 
 add_executable(picowal_fs_smoke
     tests/fs_smoke.c
@@ -38,3 +43,8 @@ add_executable(picowal_aztable_live_smoke
 
 target_link_libraries(picowal_aztable_live_smoke PRIVATE picowal_host)
 
+add_executable(picowal_search_smoke
+    tests/search_smoke.c
+)
+
+target_link_libraries(picowal_search_smoke PRIVATE picowal_host)
