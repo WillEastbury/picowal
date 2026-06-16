@@ -171,12 +171,22 @@ keeping Picowal as the pack/card source of truth:
 - **Full-text inverted index** over card-derived text, with term posting lists,
   document-length statistics, and BM25 scoring.
 - **Vector ANN candidate generation** using deterministic vector signatures to
-  narrow candidates before exact cosine scoring.
+  narrow candidates before exact cosine scoring. Vector signatures are also
+  stored in a bounded vector bucket table so candidate generation can start from
+  matching buckets instead of a full scan.
 - **Hybrid query planning/ranking** with lexical candidates, vector candidates,
   reciprocal-rank-fusion style scoring signals, and final score ordering.
 - **Semantic rerank hook** via a callback so server code can plug in an ONNX,
   sentence-transformer, or external reranker without coupling Picowal to a model
   runtime.
+- **Facet and range indexes** via field/value counters and numeric field entries
+  for commerce filters such as category, brand, price, inventory, or margin band.
+- **Persistent index segments** with CRC-checked binary save/load, including
+  postings, facet entries, numeric entries, vector buckets, and index metadata.
+- **Append-only index journal** for deterministic replay of upsert, delete,
+  facet, and numeric-field mutations after restart or product-write catch-up.
+- **Index metadata/versioning** with name, schema version, generation, and
+  compatibility checks before a loaded segment is used.
 - **Pack indexing bridge** via `picowal_search_index_pack()`, which lists cards
   through `picowal_api_list()`, reads them through `picowal_api_get()`, and lets
   the caller extract text/vector fields from each card.
@@ -198,6 +208,16 @@ picowal_search_request_t req = {
 };
 picowal_search_response_t res;
 picowal_search_query(&index, &req, &res);
+```
+
+For recovery, a server can checkpoint the derived indexes to a segment and keep
+an append-only mutation journal for catch-up:
+
+```c
+picowal_search_save(&index, "/var/lib/picowal/products.pwsi");
+picowal_search_journal_upsert(&index, "/var/lib/picowal/products.pwsj",
+                              5, card, text, vector, dims);
+picowal_search_journal_replay(&index, "/var/lib/picowal/products.pwsj");
 ```
 
 ### Packs and cards
