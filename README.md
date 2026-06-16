@@ -210,14 +210,18 @@ picowal_search_response_t res;
 picowal_search_query(&index, &req, &res);
 ```
 
-For recovery, a server can checkpoint the derived indexes to a segment and keep
-an append-only mutation journal for catch-up:
+For recovery, a server can checkpoint the derived indexes to PicoWAL cards and
+keep an append-only mutation journal in PicoWAL for catch-up. The filesystem
+save/load helpers are host conveniences; the pack/card APIs keep catalog,
+indexes, and journals inside PicoWAL:
 
 ```c
-picowal_search_save(&index, "/var/lib/picowal/products.pwsi");
-picowal_search_journal_upsert(&index, "/var/lib/picowal/products.pwsj",
-                              5, card, text, vector, dims);
-picowal_search_journal_replay(&index, "/var/lib/picowal/products.pwsj");
+picowal_search_save_to_pack(&index, 20, 1000);
+picowal_search_load_from_pack(&index, 20, 1000);
+
+picowal_search_journal_upsert_to_pack(&index, 21, 2000,
+                                      5, card, text, vector, dims);
+picowal_search_journal_replay_from_pack(&index, 21, 2000);
 ```
 
 ### Packs and cards

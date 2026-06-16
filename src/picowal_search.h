@@ -227,6 +227,36 @@ picowal_search_status_t picowal_search_journal_number(picowal_search_index_t *in
                                                       float value);
 picowal_search_status_t picowal_search_journal_replay(picowal_search_index_t *index,
                                                       const char *journal_path);
+picowal_search_status_t picowal_search_journal_upsert_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card,
+                                                              const char *text,
+                                                              const float *vector,
+                                                              uint16_t vector_dims);
+picowal_search_status_t picowal_search_journal_delete_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card);
+picowal_search_status_t picowal_search_journal_facet_to_pack(picowal_search_index_t *index,
+                                                             uint16_t journal_pack,
+                                                             uint32_t base_card,
+                                                             uint16_t pack,
+                                                             uint32_t card,
+                                                             const char *field,
+                                                             const char *value);
+picowal_search_status_t picowal_search_journal_number_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card,
+                                                              const char *field,
+                                                              float value);
+picowal_search_status_t picowal_search_journal_replay_from_pack(picowal_search_index_t *index,
+                                                                uint16_t journal_pack,
+                                                                uint32_t base_card);
 picowal_search_status_t picowal_search_index_pack(picowal_search_index_t *index,
                                                   uint16_t pack,
                                                   picowal_search_extract_fn extract,
@@ -235,6 +265,12 @@ picowal_search_status_t picowal_search_save(const picowal_search_index_t *index,
                                             const char *path);
 picowal_search_status_t picowal_search_load(picowal_search_index_t *index,
                                             const char *path);
+picowal_search_status_t picowal_search_save_to_pack(const picowal_search_index_t *index,
+                                                    uint16_t pack,
+                                                    uint32_t base_card);
+picowal_search_status_t picowal_search_load_from_pack(picowal_search_index_t *index,
+                                                      uint16_t pack,
+                                                      uint32_t base_card);
 picowal_search_status_t picowal_search_query(const picowal_search_index_t *index,
                                              const picowal_search_request_t *request,
                                              picowal_search_response_t *response);

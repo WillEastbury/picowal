@@ -161,6 +161,13 @@ int main(void) {
         loaded.vector_bucket_count != index.vector_bucket_count) {
         return 1;
     }
+    static picowal_search_index_t card_loaded;
+    picowal_search_init(&card_loaded);
+    if (picowal_search_save_to_pack(&index, 6, 100) != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_load_from_pack(&card_loaded, 6, 100) != PICOWAL_SEARCH_OK) return 1;
+    if (!picowal_search_is_compatible(&card_loaded, "retail-products", 7)) return 1;
+    if (picowal_search_query(&card_loaded, &stored_request, &response) != PICOWAL_SEARCH_OK) return 1;
+    if (response.hit_count != 1 || !expect_key(&response, 0, 3, 11)) return 1;
 
     char journal_path[160];
     snprintf(journal_path, sizeof(journal_path), "%s/search.pwsj", root);
@@ -184,6 +191,21 @@ int main(void) {
     if (facet_count != 1 || strcmp(facet_counts[0].value, "outerwear") != 0 || facet_counts[0].count != 1) return 1;
     if (picowal_search_range(&replayed, "price", 90.0f, 92.0f, range_keys, 4, &range_count) != PICOWAL_SEARCH_OK) return 1;
     if (range_count != 1 || range_keys[0] != picowal_api_key(4, 21)) return 1;
+
+    static picowal_search_index_t card_journaled;
+    static picowal_search_index_t card_replayed;
+    picowal_search_init(&card_journaled);
+    if (picowal_search_journal_upsert_to_pack(&card_journaled, 6, 300, 7, 31, "card journal waterproof jacket", jacket_vec, 4) != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_journal_upsert_to_pack(&card_journaled, 6, 300, 7, 32, "card journal leather boots", boots_vec, 4) != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_journal_facet_to_pack(&card_journaled, 6, 300, 7, 31, "category", "outerwear") != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_journal_number_to_pack(&card_journaled, 6, 300, 7, 31, "price", 93.0f) != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_journal_delete_to_pack(&card_journaled, 6, 300, 7, 32) != PICOWAL_SEARCH_OK) return 1;
+    picowal_search_init(&card_replayed);
+    if (picowal_search_journal_replay_from_pack(&card_replayed, 6, 300) != PICOWAL_SEARCH_OK) return 1;
+    if (picowal_search_query(&card_replayed, &journal_request, &response) != PICOWAL_SEARCH_OK) return 1;
+    if (response.hit_count != 1 || !expect_key(&response, 0, 7, 31)) return 1;
+    if (picowal_search_range(&card_replayed, "price", 92.0f, 94.0f, range_keys, 4, &range_count) != PICOWAL_SEARCH_OK) return 1;
+    if (range_count != 1 || range_keys[0] != picowal_api_key(7, 31)) return 1;
 
     puts("picowal search smoke ok");
     char pack_dir[128];

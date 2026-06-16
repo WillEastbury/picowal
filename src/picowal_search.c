@@ -15,6 +15,12 @@
 #define PICOWAL_SEARCH_SEG_VERSION 1u
 #define PICOWAL_SEARCH_JOURNAL_MAGIC   0x5057534Au /* "PWSJ" */
 #define PICOWAL_SEARCH_JOURNAL_VERSION 1u
+#define PICOWAL_SEARCH_JPACK_MAGIC     0x50574A50u /* "PWJP" */
+#define PICOWAL_SEARCH_STREAM_MAX      (sizeof(picowal_search_journal_header_t) + \
+                                        PICOWAL_SEARCH_TEXT_MAX + \
+                                        (PICOWAL_SEARCH_VECTOR_MAX * sizeof(float)) + \
+                                        PICOWAL_SEARCH_FIELD_MAX + \
+                                        PICOWAL_SEARCH_FACET_VALUE_MAX)
 
 typedef struct {
     uint32_t magic;
@@ -61,6 +67,15 @@ typedef struct {
     uint32_t payload_len;
     uint32_t payload_crc32;
 } picowal_search_journal_header_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t next_offset;
+    uint32_t record_count;
+    uint32_t crc32;
+} picowal_search_journal_pack_manifest_t;
 
 typedef struct {
     uint16_t doc_slot;
@@ -121,10 +136,262 @@ static bool read_exact(FILE *file, void *data, size_t size) {
     return fread(data, 1, size, file) == size;
 }
 
+static bool valid_card_ref(uint16_t pack, uint32_t card) {
+    return pack >= 2 && pack <= PICOWAL_PACK_MAX && card <= PICOWAL_CARD_MAX;
+}
+
+static picowal_search_status_t api_to_search_status(picowal_api_status_t status) {
+    switch (status) {
+        case PICOWAL_API_OK:
+            return PICOWAL_SEARCH_OK;
+        case PICOWAL_API_NOT_FOUND:
+            return PICOWAL_SEARCH_NOT_FOUND;
+        case PICOWAL_API_INVALID:
+            return PICOWAL_SEARCH_INVALID;
+        default:
+            return PICOWAL_SEARCH_IO;
+    }
+}
+
+static bool add_card_offset(uint32_t base_card, uint32_t offset, uint32_t *out_card) {
+    if (!out_card || offset > PICOWAL_CARD_MAX || base_card > PICOWAL_CARD_MAX - offset) return false;
+    *out_card = base_card + offset;
+    return true;
+}
+
+static picowal_search_status_t put_card_stream(uint16_t pack,
+                                               uint32_t base_card,
+                                               uint32_t start_offset,
+                                               const void *data,
+                                               size_t len,
+                                               uint32_t *out_next_offset) {
+    if (!valid_card_ref(pack, base_card) || (!data && len != 0) || !out_next_offset) {
+        return PICOWAL_SEARCH_INVALID;
+    }
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint32_t offset = start_offset;
+    size_t pos = 0;
+    do {
+        uint32_t card;
+        if (!add_card_offset(base_card, offset, &card)) return PICOWAL_SEARCH_FULL;
+        size_t chunk = len - pos;
+        if (chunk > PICOWAL_VALUE_MAX) chunk = PICOWAL_VALUE_MAX;
+        picowal_api_status_t st = picowal_api_put(pack, card, bytes ? bytes + pos : NULL, (uint16_t)chunk);
+        if (st != PICOWAL_API_OK) return api_to_search_status(st);
+        pos += chunk;
+        offset++;
+    } while (pos < len || len == 0);
+    *out_next_offset = offset;
+    return PICOWAL_SEARCH_OK;
+}
+
+static picowal_search_status_t get_card_stream(uint16_t pack,
+                                               uint32_t base_card,
+                                               uint32_t start_offset,
+                                               void *data,
+                                               size_t len,
+                                               uint32_t *out_next_offset) {
+    if (!valid_card_ref(pack, base_card) || (!data && len != 0) || !out_next_offset) {
+        return PICOWAL_SEARCH_INVALID;
+    }
+    uint8_t *bytes = (uint8_t *)data;
+    uint32_t offset = start_offset;
+    size_t pos = 0;
+    do {
+        uint32_t card;
+        if (!add_card_offset(base_card, offset, &card)) return PICOWAL_SEARCH_FULL;
+        uint8_t chunk_buf[PICOWAL_VALUE_MAX];
+        uint16_t got = sizeof(chunk_buf);
+        picowal_api_status_t st = picowal_api_get(pack, card, chunk_buf, sizeof(chunk_buf), &got);
+        if (st != PICOWAL_API_OK) return api_to_search_status(st);
+        size_t need = len - pos;
+        if (need > PICOWAL_VALUE_MAX) need = PICOWAL_VALUE_MAX;
+        if (got != need) return PICOWAL_SEARCH_CORRUPT;
+        if (need) memcpy(bytes + pos, chunk_buf, need);
+        pos += need;
+        offset++;
+    } while (pos < len || len == 0);
+    *out_next_offset = offset;
+    return PICOWAL_SEARCH_OK;
+}
+
+static uint32_t journal_manifest_crc(const picowal_search_journal_pack_manifest_t *manifest) {
+    picowal_search_journal_pack_manifest_t copy = *manifest;
+    copy.crc32 = 0;
+    return search_crc32(&copy, sizeof(copy));
+}
+
+static picowal_search_status_t read_journal_manifest(uint16_t pack,
+                                                     uint32_t base_card,
+                                                     picowal_search_journal_pack_manifest_t *manifest) {
+    if (!manifest || !valid_card_ref(pack, base_card)) return PICOWAL_SEARCH_INVALID;
+    uint16_t len = sizeof(*manifest);
+    picowal_api_status_t st = picowal_api_get(pack, base_card, manifest, sizeof(*manifest), &len);
+    if (st == PICOWAL_API_NOT_FOUND) {
+        memset(manifest, 0, sizeof(*manifest));
+        manifest->magic = PICOWAL_SEARCH_JPACK_MAGIC;
+        manifest->version = PICOWAL_SEARCH_JOURNAL_VERSION;
+        manifest->next_offset = 1;
+        manifest->record_count = 0;
+        manifest->crc32 = journal_manifest_crc(manifest);
+        return PICOWAL_SEARCH_OK;
+    }
+    if (st != PICOWAL_API_OK) return api_to_search_status(st);
+    if (len != sizeof(*manifest) ||
+        manifest->magic != PICOWAL_SEARCH_JPACK_MAGIC ||
+        manifest->version != PICOWAL_SEARCH_JOURNAL_VERSION ||
+        manifest->next_offset == 0 ||
+        manifest->crc32 != journal_manifest_crc(manifest)) {
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+    return PICOWAL_SEARCH_OK;
+}
+
+static picowal_search_status_t write_journal_manifest(uint16_t pack,
+                                                      uint32_t base_card,
+                                                      picowal_search_journal_pack_manifest_t *manifest) {
+    if (!manifest || !valid_card_ref(pack, base_card)) return PICOWAL_SEARCH_INVALID;
+    manifest->crc32 = journal_manifest_crc(manifest);
+    return api_to_search_status(picowal_api_put(pack, base_card, manifest, sizeof(*manifest)));
+}
+
 static uint32_t journal_payload_len(uint16_t text_len, uint16_t vector_dims,
                                     uint16_t field_len, uint16_t value_len) {
     return (uint32_t)text_len + ((uint32_t)vector_dims * sizeof(float)) +
            (uint32_t)field_len + (uint32_t)value_len;
+}
+
+static picowal_search_status_t build_journal_record(uint8_t *record,
+                                                    size_t record_cap,
+                                                    size_t *out_len,
+                                                    uint16_t op,
+                                                    uint16_t pack,
+                                                    uint32_t card,
+                                                    const char *text,
+                                                    const float *vector,
+                                                    uint16_t vector_dims,
+                                                    const char *field,
+                                                    const char *value,
+                                                    float numeric_value) {
+    if (!record || !out_len || pack < 2 || pack > PICOWAL_PACK_MAX || card > PICOWAL_CARD_MAX) {
+        return PICOWAL_SEARCH_INVALID;
+    }
+    uint16_t text_len = bounded_len(text, PICOWAL_SEARCH_TEXT_MAX);
+    uint16_t field_len = bounded_len(field, PICOWAL_SEARCH_FIELD_MAX);
+    uint16_t value_len = bounded_len(value, PICOWAL_SEARCH_FACET_VALUE_MAX);
+    if (vector_dims > PICOWAL_SEARCH_VECTOR_MAX || (vector_dims > 0 && !vector)) return PICOWAL_SEARCH_INVALID;
+    uint32_t payload_len = journal_payload_len(text_len, vector_dims, field_len, value_len);
+    if (sizeof(picowal_search_journal_header_t) + payload_len > record_cap) return PICOWAL_SEARCH_FULL;
+
+    picowal_search_journal_header_t header = {
+        .magic = PICOWAL_SEARCH_JOURNAL_MAGIC,
+        .version = PICOWAL_SEARCH_JOURNAL_VERSION,
+        .op = op,
+        .pack = pack,
+        .text_len = text_len,
+        .card = card,
+        .vector_dims = vector_dims,
+        .field_len = field_len,
+        .value_len = value_len,
+        .reserved = 0,
+        .numeric_value = numeric_value,
+        .payload_len = payload_len,
+        .payload_crc32 = 0,
+    };
+
+    uint8_t *payload = record + sizeof(header);
+    uint32_t off = 0;
+    if (text_len) {
+        memcpy(payload + off, text, text_len);
+        off += text_len;
+    }
+    if (vector_dims) {
+        memcpy(payload + off, vector, (size_t)vector_dims * sizeof(float));
+        off += (uint32_t)vector_dims * sizeof(float);
+    }
+    if (field_len) {
+        memcpy(payload + off, field, field_len);
+        off += field_len;
+    }
+    if (value_len) {
+        memcpy(payload + off, value, value_len);
+        off += value_len;
+    }
+    if (off != payload_len) return PICOWAL_SEARCH_INVALID;
+    header.payload_crc32 = search_crc32(payload, payload_len);
+    memcpy(record, &header, sizeof(header));
+    *out_len = sizeof(header) + payload_len;
+    return PICOWAL_SEARCH_OK;
+}
+
+static picowal_search_status_t apply_journal_record(picowal_search_index_t *index,
+                                                    const uint8_t *record,
+                                                    size_t record_len) {
+    if (!index || !record || record_len < sizeof(picowal_search_journal_header_t)) {
+        return PICOWAL_SEARCH_INVALID;
+    }
+    picowal_search_journal_header_t header;
+    memcpy(&header, record, sizeof(header));
+    if (header.magic != PICOWAL_SEARCH_JOURNAL_MAGIC ||
+        header.version != PICOWAL_SEARCH_JOURNAL_VERSION ||
+        header.pack < 2 || header.pack > PICOWAL_PACK_MAX ||
+        header.card > PICOWAL_CARD_MAX ||
+        header.text_len > PICOWAL_SEARCH_TEXT_MAX ||
+        header.vector_dims > PICOWAL_SEARCH_VECTOR_MAX ||
+        header.field_len > PICOWAL_SEARCH_FIELD_MAX ||
+        header.value_len > PICOWAL_SEARCH_FACET_VALUE_MAX ||
+        header.payload_len != journal_payload_len(header.text_len, header.vector_dims,
+                                                  header.field_len, header.value_len) ||
+        record_len != sizeof(header) + header.payload_len) {
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+    const uint8_t *payload = record + sizeof(header);
+    if (search_crc32(payload, header.payload_len) != header.payload_crc32) {
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+
+    uint32_t off = 0;
+    char text[PICOWAL_SEARCH_TEXT_MAX + 1u] = {0};
+    float vector[PICOWAL_SEARCH_VECTOR_MAX] = {0};
+    char field[PICOWAL_SEARCH_FIELD_MAX + 1u] = {0};
+    char value[PICOWAL_SEARCH_FACET_VALUE_MAX + 1u] = {0};
+    if (header.text_len) {
+        memcpy(text, payload + off, header.text_len);
+        off += header.text_len;
+    }
+    if (header.vector_dims) {
+        memcpy(vector, payload + off, (size_t)header.vector_dims * sizeof(float));
+        off += (uint32_t)header.vector_dims * sizeof(float);
+    }
+    if (header.field_len) {
+        memcpy(field, payload + off, header.field_len);
+        off += header.field_len;
+    }
+    if (header.value_len) {
+        memcpy(value, payload + off, header.value_len);
+        off += header.value_len;
+    }
+
+    picowal_search_status_t st = PICOWAL_SEARCH_INVALID;
+    switch ((picowal_search_journal_op_t)header.op) {
+        case PICOWAL_SEARCH_JOURNAL_UPSERT:
+            st = picowal_search_upsert(index, header.pack, header.card, text, vector, header.vector_dims);
+            break;
+        case PICOWAL_SEARCH_JOURNAL_DELETE:
+            st = picowal_search_delete(index, header.pack, header.card);
+            if (st == PICOWAL_SEARCH_NOT_FOUND) st = PICOWAL_SEARCH_OK;
+            break;
+        case PICOWAL_SEARCH_JOURNAL_FACET:
+            st = picowal_search_set_facet(index, header.pack, header.card, field, value);
+            break;
+        case PICOWAL_SEARCH_JOURNAL_NUMBER:
+            st = picowal_search_set_number(index, header.pack, header.card, field, header.numeric_value);
+            break;
+        default:
+            st = PICOWAL_SEARCH_CORRUPT;
+            break;
+    }
+    return st;
 }
 
 static picowal_search_status_t append_journal_record(const char *journal_path,
@@ -861,6 +1128,150 @@ picowal_search_status_t picowal_search_journal_replay(picowal_search_index_t *in
     return fclose(file) == 0 ? PICOWAL_SEARCH_OK : PICOWAL_SEARCH_IO;
 }
 
+static picowal_search_status_t append_journal_record_to_pack(uint16_t journal_pack,
+                                                             uint32_t base_card,
+                                                             uint16_t op,
+                                                             uint16_t pack,
+                                                             uint32_t card,
+                                                             const char *text,
+                                                             const float *vector,
+                                                             uint16_t vector_dims,
+                                                             const char *field,
+                                                             const char *value,
+                                                             float numeric_value) {
+    picowal_search_journal_pack_manifest_t manifest;
+    picowal_search_status_t st = read_journal_manifest(journal_pack, base_card, &manifest);
+    if (st != PICOWAL_SEARCH_OK) return st;
+
+    uint8_t record[PICOWAL_SEARCH_STREAM_MAX];
+    size_t record_len = 0;
+    st = build_journal_record(record, sizeof(record), &record_len, op, pack, card, text,
+                              vector, vector_dims, field, value, numeric_value);
+    if (st != PICOWAL_SEARCH_OK) return st;
+
+    uint32_t next_offset = 0;
+    st = put_card_stream(journal_pack, base_card, manifest.next_offset, record, record_len, &next_offset);
+    if (st != PICOWAL_SEARCH_OK) return st;
+    manifest.next_offset = next_offset;
+    manifest.record_count++;
+    return write_journal_manifest(journal_pack, base_card, &manifest);
+}
+
+picowal_search_status_t picowal_search_journal_upsert_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card,
+                                                              const char *text,
+                                                              const float *vector,
+                                                              uint16_t vector_dims) {
+    if (!index) return PICOWAL_SEARCH_INVALID;
+    picowal_search_status_t st = append_journal_record_to_pack(journal_pack, base_card,
+                                                               PICOWAL_SEARCH_JOURNAL_UPSERT,
+                                                               pack, card, text, vector, vector_dims,
+                                                               NULL, NULL, 0.0f);
+    if (st != PICOWAL_SEARCH_OK) return st;
+    return picowal_search_upsert(index, pack, card, text, vector, vector_dims);
+}
+
+picowal_search_status_t picowal_search_journal_delete_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card) {
+    if (!index) return PICOWAL_SEARCH_INVALID;
+    picowal_search_status_t st = append_journal_record_to_pack(journal_pack, base_card,
+                                                               PICOWAL_SEARCH_JOURNAL_DELETE,
+                                                               pack, card, NULL, NULL, 0,
+                                                               NULL, NULL, 0.0f);
+    if (st != PICOWAL_SEARCH_OK) return st;
+    return picowal_search_delete(index, pack, card);
+}
+
+picowal_search_status_t picowal_search_journal_facet_to_pack(picowal_search_index_t *index,
+                                                             uint16_t journal_pack,
+                                                             uint32_t base_card,
+                                                             uint16_t pack,
+                                                             uint32_t card,
+                                                             const char *field,
+                                                             const char *value) {
+    if (!index) return PICOWAL_SEARCH_INVALID;
+    picowal_search_status_t st = append_journal_record_to_pack(journal_pack, base_card,
+                                                               PICOWAL_SEARCH_JOURNAL_FACET,
+                                                               pack, card, NULL, NULL, 0,
+                                                               field, value, 0.0f);
+    if (st != PICOWAL_SEARCH_OK) return st;
+    return picowal_search_set_facet(index, pack, card, field, value);
+}
+
+picowal_search_status_t picowal_search_journal_number_to_pack(picowal_search_index_t *index,
+                                                              uint16_t journal_pack,
+                                                              uint32_t base_card,
+                                                              uint16_t pack,
+                                                              uint32_t card,
+                                                              const char *field,
+                                                              float value) {
+    if (!index) return PICOWAL_SEARCH_INVALID;
+    picowal_search_status_t st = append_journal_record_to_pack(journal_pack, base_card,
+                                                               PICOWAL_SEARCH_JOURNAL_NUMBER,
+                                                               pack, card, NULL, NULL, 0,
+                                                               field, NULL, value);
+    if (st != PICOWAL_SEARCH_OK) return st;
+    return picowal_search_set_number(index, pack, card, field, value);
+}
+
+picowal_search_status_t picowal_search_journal_replay_from_pack(picowal_search_index_t *index,
+                                                                uint16_t journal_pack,
+                                                                uint32_t base_card) {
+    if (!index) return PICOWAL_SEARCH_INVALID;
+    picowal_search_journal_pack_manifest_t manifest;
+    picowal_search_status_t st = read_journal_manifest(journal_pack, base_card, &manifest);
+    if (st != PICOWAL_SEARCH_OK) return st;
+
+    uint32_t offset = 1;
+    for (uint32_t rec = 0; rec < manifest.record_count; rec++) {
+        uint8_t record[PICOWAL_SEARCH_STREAM_MAX];
+        uint8_t first[PICOWAL_VALUE_MAX];
+        uint32_t first_card;
+        if (!add_card_offset(base_card, offset, &first_card)) return PICOWAL_SEARCH_FULL;
+        uint16_t first_len = sizeof(first);
+        picowal_api_status_t api_st = picowal_api_get(journal_pack, first_card, first, sizeof(first), &first_len);
+        if (api_st != PICOWAL_API_OK) return api_to_search_status(api_st);
+        if (first_len < sizeof(picowal_search_journal_header_t)) return PICOWAL_SEARCH_CORRUPT;
+
+        picowal_search_journal_header_t header;
+        memcpy(&header, first, sizeof(header));
+        if (header.magic != PICOWAL_SEARCH_JOURNAL_MAGIC ||
+            header.version != PICOWAL_SEARCH_JOURNAL_VERSION ||
+            header.payload_len != journal_payload_len(header.text_len, header.vector_dims,
+                                                      header.field_len, header.value_len)) {
+            return PICOWAL_SEARCH_CORRUPT;
+        }
+        size_t total_len = sizeof(header) + header.payload_len;
+        if (total_len > sizeof(record)) return PICOWAL_SEARCH_CORRUPT;
+        size_t first_need = total_len < PICOWAL_VALUE_MAX ? total_len : PICOWAL_VALUE_MAX;
+        if (first_len != first_need) return PICOWAL_SEARCH_CORRUPT;
+        memcpy(record, first, first_need);
+        offset++;
+        size_t pos = first_need;
+        while (pos < total_len) {
+            uint32_t card;
+            if (!add_card_offset(base_card, offset, &card)) return PICOWAL_SEARCH_FULL;
+            uint16_t got = PICOWAL_VALUE_MAX;
+            api_st = picowal_api_get(journal_pack, card, record + pos, PICOWAL_VALUE_MAX, &got);
+            if (api_st != PICOWAL_API_OK) return api_to_search_status(api_st);
+            size_t need = total_len - pos;
+            if (need > PICOWAL_VALUE_MAX) need = PICOWAL_VALUE_MAX;
+            if (got != need) return PICOWAL_SEARCH_CORRUPT;
+            pos += need;
+            offset++;
+        }
+        st = apply_journal_record(index, record, total_len);
+        if (st != PICOWAL_SEARCH_OK) return st;
+    }
+    return offset == manifest.next_offset ? PICOWAL_SEARCH_OK : PICOWAL_SEARCH_CORRUPT;
+}
+
 picowal_search_status_t picowal_search_index_pack(picowal_search_index_t *index,
                                                   uint16_t pack,
                                                   picowal_search_extract_fn extract,
@@ -1011,6 +1422,137 @@ picowal_search_status_t picowal_search_load(picowal_search_index_t *index,
         return PICOWAL_SEARCH_CORRUPT;
     }
 
+    return PICOWAL_SEARCH_OK;
+}
+
+picowal_search_status_t picowal_search_save_to_pack(const picowal_search_index_t *index,
+                                                    uint16_t pack,
+                                                    uint32_t base_card) {
+    if (!index || !valid_card_ref(pack, base_card)) return PICOWAL_SEARCH_INVALID;
+    if (index->doc_count > PICOWAL_SEARCH_DOC_MAX ||
+        index->term_count > PICOWAL_SEARCH_TERM_MAX ||
+        index->posting_count > PICOWAL_SEARCH_POSTING_MAX ||
+        index->facet_count > PICOWAL_SEARCH_FACET_ENTRY_MAX ||
+        index->numeric_count > PICOWAL_SEARCH_NUMERIC_ENTRY_MAX ||
+        index->vector_bucket_count > PICOWAL_SEARCH_VECTOR_BUCKET_ENTRY_MAX) {
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+
+    picowal_search_segment_header_t header = {
+        .magic = PICOWAL_SEARCH_SEG_MAGIC,
+        .version = PICOWAL_SEARCH_SEG_VERSION,
+        .header_size = sizeof(picowal_search_segment_header_t),
+        .doc_max = PICOWAL_SEARCH_DOC_MAX,
+        .term_max = PICOWAL_SEARCH_TERM_MAX,
+        .posting_max = PICOWAL_SEARCH_POSTING_MAX,
+        .text_max = PICOWAL_SEARCH_TEXT_MAX,
+        .vector_max = PICOWAL_SEARCH_VECTOR_MAX,
+        .token_max = PICOWAL_SEARCH_TOKEN_MAX,
+        .doc_count = index->doc_count,
+        .term_count = index->term_count,
+        .flags = index->overflow ? 1u : 0u,
+        .posting_count = index->posting_count,
+        .facet_count = index->facet_count,
+        .numeric_count = index->numeric_count,
+        .vector_bucket_count = index->vector_bucket_count,
+        .total_doc_len = index->total_doc_len,
+        .docs_crc32 = search_crc32(index->docs, sizeof(index->docs[0]) * index->doc_count),
+        .terms_crc32 = search_crc32(index->terms, sizeof(index->terms[0]) * index->term_count),
+        .postings_crc32 = search_crc32(index->postings, sizeof(index->postings[0]) * index->posting_count),
+        .facets_crc32 = search_crc32(index->facets, sizeof(index->facets[0]) * index->facet_count),
+        .numerics_crc32 = search_crc32(index->numerics, sizeof(index->numerics[0]) * index->numeric_count),
+        .vector_buckets_crc32 = search_crc32(index->vector_buckets,
+                                             sizeof(index->vector_buckets[0]) * index->vector_bucket_count),
+        .schema_version = index->metadata.schema_version,
+        .index_generation = index->metadata.index_generation,
+        .metadata_flags = index->metadata.flags,
+    };
+    bounded_copy(header.name, sizeof(header.name), index->metadata.name);
+
+    picowal_search_status_t st = api_to_search_status(picowal_api_put(pack, base_card, &header, sizeof(header)));
+    if (st != PICOWAL_SEARCH_OK) return st;
+    uint32_t offset = 1;
+    if ((st = put_card_stream(pack, base_card, offset, index->docs,
+                              sizeof(index->docs[0]) * index->doc_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = put_card_stream(pack, base_card, offset, index->terms,
+                              sizeof(index->terms[0]) * index->term_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = put_card_stream(pack, base_card, offset, index->postings,
+                              sizeof(index->postings[0]) * index->posting_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = put_card_stream(pack, base_card, offset, index->facets,
+                              sizeof(index->facets[0]) * index->facet_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = put_card_stream(pack, base_card, offset, index->numerics,
+                              sizeof(index->numerics[0]) * index->numeric_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    return put_card_stream(pack, base_card, offset, index->vector_buckets,
+                           sizeof(index->vector_buckets[0]) * index->vector_bucket_count, &offset);
+}
+
+picowal_search_status_t picowal_search_load_from_pack(picowal_search_index_t *index,
+                                                      uint16_t pack,
+                                                      uint32_t base_card) {
+    if (!index || !valid_card_ref(pack, base_card)) return PICOWAL_SEARCH_INVALID;
+    picowal_search_segment_header_t header;
+    uint16_t len = sizeof(header);
+    picowal_api_status_t api_st = picowal_api_get(pack, base_card, &header, sizeof(header), &len);
+    if (api_st != PICOWAL_API_OK) return api_to_search_status(api_st);
+    if (len != sizeof(header) ||
+        header.magic != PICOWAL_SEARCH_SEG_MAGIC ||
+        header.version != PICOWAL_SEARCH_SEG_VERSION ||
+        header.header_size != sizeof(picowal_search_segment_header_t) ||
+        header.doc_max != PICOWAL_SEARCH_DOC_MAX ||
+        header.term_max != PICOWAL_SEARCH_TERM_MAX ||
+        header.posting_max != PICOWAL_SEARCH_POSTING_MAX ||
+        header.text_max != PICOWAL_SEARCH_TEXT_MAX ||
+        header.vector_max != PICOWAL_SEARCH_VECTOR_MAX ||
+        header.token_max != PICOWAL_SEARCH_TOKEN_MAX ||
+        header.doc_count > PICOWAL_SEARCH_DOC_MAX ||
+        header.term_count > PICOWAL_SEARCH_TERM_MAX ||
+        header.posting_count > PICOWAL_SEARCH_POSTING_MAX ||
+        header.facet_count > PICOWAL_SEARCH_FACET_ENTRY_MAX ||
+        header.numeric_count > PICOWAL_SEARCH_NUMERIC_ENTRY_MAX ||
+        header.vector_bucket_count > PICOWAL_SEARCH_VECTOR_BUCKET_ENTRY_MAX) {
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+
+    picowal_search_init(index);
+    index->doc_count = header.doc_count;
+    index->term_count = header.term_count;
+    index->posting_count = header.posting_count;
+    index->facet_count = header.facet_count;
+    index->numeric_count = header.numeric_count;
+    index->vector_bucket_count = header.vector_bucket_count;
+    index->total_doc_len = header.total_doc_len;
+    index->overflow = (header.flags & 1u) != 0;
+    if (picowal_search_configure(index, header.name, header.schema_version,
+                                 header.index_generation, header.metadata_flags) != PICOWAL_SEARCH_OK) {
+        picowal_search_init(index);
+        return PICOWAL_SEARCH_CORRUPT;
+    }
+
+    picowal_search_status_t st;
+    uint32_t offset = 1;
+    if ((st = get_card_stream(pack, base_card, offset, index->docs,
+                              sizeof(index->docs[0]) * index->doc_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = get_card_stream(pack, base_card, offset, index->terms,
+                              sizeof(index->terms[0]) * index->term_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = get_card_stream(pack, base_card, offset, index->postings,
+                              sizeof(index->postings[0]) * index->posting_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = get_card_stream(pack, base_card, offset, index->facets,
+                              sizeof(index->facets[0]) * index->facet_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = get_card_stream(pack, base_card, offset, index->numerics,
+                              sizeof(index->numerics[0]) * index->numeric_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+    if ((st = get_card_stream(pack, base_card, offset, index->vector_buckets,
+                              sizeof(index->vector_buckets[0]) * index->vector_bucket_count, &offset)) != PICOWAL_SEARCH_OK) return st;
+
+    if (search_crc32(index->docs, sizeof(index->docs[0]) * index->doc_count) != header.docs_crc32 ||
+        search_crc32(index->terms, sizeof(index->terms[0]) * index->term_count) != header.terms_crc32 ||
+        search_crc32(index->postings, sizeof(index->postings[0]) * index->posting_count) != header.postings_crc32 ||
+        search_crc32(index->facets, sizeof(index->facets[0]) * index->facet_count) != header.facets_crc32 ||
+        search_crc32(index->numerics, sizeof(index->numerics[0]) * index->numeric_count) != header.numerics_crc32 ||
+        search_crc32(index->vector_buckets,
+                     sizeof(index->vector_buckets[0]) * index->vector_bucket_count) != header.vector_buckets_crc32) {
+        picowal_search_init(index);
+        return PICOWAL_SEARCH_CORRUPT;
+    }
     return PICOWAL_SEARCH_OK;
 }
 
