@@ -1,0 +1,77 @@
+; ============================================================
+; PicoCluster PIO UART TX — Manchester encoded, 20 Mbps
+; For RP2350 (rp2350 PIO)
+; ============================================================
+; Manchester encoding: each bit = two half-cycles
+;   '1' = high-then-low
+;   '0' = low-then-high
+; Self-clocking: receiver recovers clock from transitions
+; ============================================================
+
+.program ring_tx
+.side_set 1
+
+; TX: pull 32-bit word from FIFO, manchester-encode and shift out
+; Autopull configured for 32 bits
+; Clock divider set for 2x bit rate (each bit = 2 PIO cycles)
+
+.wrap_target
+bitloop:
+    out x, 1        side 0  [0]   ; Get next bit into X
+    jmp !x do_zero  side 0  [0]   ; Branch on bit value
+do_one:
+    nop             side 1  [0]   ; First half: HIGH
+    jmp bitloop     side 0  [0]   ; Second half: LOW  (1 = high-low)
+do_zero:
+    nop             side 0  [0]   ; First half: LOW
+    jmp bitloop     side 1  [0]   ; Second half: HIGH (0 = low-high)
+.wrap
+
+
+; ============================================================
+; PicoCluster PIO UART RX — Manchester decode, 20 Mbps
+; ============================================================
+; Detect transitions, sample in middle of second half-bit
+; Sync on start-of-frame marker (preamble: 0xAA)
+
+.program ring_rx
+
+; RX: detect edge, determine bit value, shift into ISR
+; Autopush configured for 32 bits
+
+start:
+    wait 1 pin 0            ; Wait for rising edge (idle = low)
+    
+.wrap_target
+sample:
+    ; We're at the start of a bit cell (just after first transition)
+    ; Wait half a bit period, then sample
+    ; If pin is HIGH at mid-point → we saw low-to-high → bit = 0
+    ; If pin is LOW at mid-point → we saw high-to-low → bit = 1
+    nop [1]                 ; Wait to mid-second-half
+    in pins, 1              ; Sample pin → ISR (inverted logic for manchester)
+    ; Wait for next transition (start of next bit)
+    wait 0 pin 0 [0]       ; Wait for falling edge
+    wait 1 pin 0 [0]       ; Wait for rising edge (next bit start)
+.wrap
+
+
+; ============================================================
+; PicoCluster PIO Relay — cut-through forwarding
+; ============================================================
+; Reads from RX FIFO (via DMA or direct), checks dest byte,
+; if not us → immediately writes to TX FIFO of downstream ring.
+; This runs on a separate SM pair to avoid blocking.
+;
+; NOTE: Actual relay logic is handled by DMA chaining + CPU
+; interrupt on address match. This program is a simple
+; byte-level forwarder for the non-matching case.
+
+.program ring_relay
+; Just forward RX → TX (CPU/DMA handles address filtering)
+; This is the fast path for transit packets
+
+.wrap_target
+    pull block              ; Wait for data from CPU/DMA (pre-filtered)
+    out pins, 1 [0]        ; Forward bit by bit (or use TX program)
+.wrap
